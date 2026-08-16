@@ -1,169 +1,200 @@
-# 🤖 VillagerAgent - AI-Powered Minecraft Villagers
+# 🤖 VillagerAgent — AI-Powered Minecraft Villagers
 
-Transform Minecraft villagers into intelligent AI agents with personalities, memories, and the ability to interact with the world using Large Language Models!
+Transform vanilla Minecraft 1.16.5 villagers into autonomous **Generative Agents** (Stanford "AI Town"-style): each villager has a personality, long-term memory, goals, needs, relationships, a daily schedule — and perceives its surroundings through a **layered spatial-perception stack** before acting, all driven by a configurable LLM.
 
-## ✨ Features
+## ✨ Highlights
 
-### ✅ Currently Implemented
+- 🧠 **LLM-driven autonomy** — personality, memory, goal generation, dialogue and decision-making all run through a pluggable LLM backend.
+- 🗺️ **Layered perception (Far / Mid / Near)** — chunk content memory → building & room index → frustum-culled near-field scan, assembled into structured text for the LLM.
+- 🏘️ **Building & room understanding** — automatic detection of buildings and bed→room segmentation via a deterministic distance-field / watershed algorithm (no extra ML).
+- ⚙️ **Decision harness** — per-call timeouts, circuit breakers, and a JSONL decision journal keep villagers responsive even when the API is slow or down.
+- 🎨 **In-game GUIs** — custom chat screen, trade screen, and a config-driven debug overlay for visualizing perception.
+- 🛠️ **World interaction** — farming, combat, crafting, and LLM-designed block building.
 
-- **🎭 Unique Personalities**: 8 different personality types (friendly, shrewd, cautious, adventurous, wise, cheerful, grumpy, curious)
-- **📝 Memory System**: Villagers remember the last 50 events and 20 conversations
-- **🎯 Goal System**: Villagers autonomously generate and pursue goals (gather, craft, trade, socialize)
-- **🎒 Custom Inventory**: Each villager has a 27-slot inventory to store items
-- **💰 Dynamic Trading**: LLM-based price negotiation and persuasion
-- **💬 Player Interaction**: Right-click to talk to villagers
-- **🧠 LLM Integration**: OpenAI and Anthropic API support for intelligent responses
-- **⚙️ Full Configuration**: Customize all aspects via config file
+---
 
-### 🚧 Coming Soon
+## 🧠 Architecture: Layered Perception
 
-- **🌾 World Interaction**: Farming, harvesting, crafting, building
-- **💬 Villager-to-Villager Chat**: AI-powered conversations between villagers
-- **🎨 Custom Chat GUI**: Beautiful interface for player-villager conversations
-- **🏰 Village Coordination**: Villagers work together on tasks
+The core idea: villagers don't scan the whole world every tick. Three layers with different ranges and costs feed a single structured representation.
+
+| Layer | Range | Component | What it does |
+|---|---|---|---|
+| **Far** | visited chunks | `ChunkMemory` | Remembers *what* a chunk contains (dominant `BlockCategory` + feature tags like `forest`/`farmland`/`water`), not all 2048 blocks. LRU-bounded (~512 chunks). |
+| **Mid** | loaded structure | `WorldStructureIndex` + `BuildingLocator` | Event-driven index of buildings. `BuildingLocator` segments each bed into its room using a multi-source geodesic distance field + synchronous dual-class watershed, then classifies rooms by air fraction. |
+| **Near** | field of view | `FrustumCuller` + `DetailedViewRecorder` | Frustum-culled scan records only notable blocks and entities actually in view. |
+
+All three are merged by `VillagerVisionSystem` into an environment summary (time, weather, biome, position, chunk memories, visible structures, near-field details) that is injected into every LLM call.
+
+`WorldStructureIndex` is **event-driven and persistent**: each bed is scanned only once, work is queued one flood-fill per tick, and results survive restarts via `StructureIndexSavedData` (a `WorldSavedData`).
+
+## ✅ Implemented Features
+
+### Agent Core
+- 🎭 **8 personalities** — friendly, shrewd, cautious, adventurous, wise, cheerful, grumpy, curious
+- 📝 **Long-term memory** — ~40 entries with asynchronous LLM compression into summaries
+- 🎯 **Goal system** — autonomous goal generation + profession-based goals (`ProfessionGoalGenerator`) and long-term agendas
+- 🕐 **Daily schedule** — LLM plans a 4-slot day (morning/afternoon/evening/night) at dawn, reflects in the evening
+- 😀 **Mood & needs** — hunger + fatigue drive a 5-tier mood (HAPPY → DISTRESSED) injected into all LLM prompts
+
+### Social & Interaction
+- 💬 **Player conversation** — right-click to talk, with a custom chat GUI
+- 👋 **Proximity greeting** — villagers notice and greet nearby players (tunable probability, familiarity decay)
+- 🗣️ **Villager-to-villager chat** — relationship-tiered dialogue, gossip propagation, opinion nudging
+- 💭 **Spontaneous thoughts** — ambient inner-thought bubbles near players (off by default)
+
+### World Interaction
+- 🌾 **Farming** — harvest mature crops + replant (with stuck-timeout and seed-wait logic)
+- ⚔️ **Combat** — scan for hostiles, equip best weapon, chase and attack
+- 🔨 **Crafting** — profession-aware recipe catalog and validation
+- 🏗️ **Building** — LLM designs a structure, `BuildOrderPlanner` + `StructureBuilder` place blocks (throttled, retry-limited)
+- 💰 **Trading** — dynamic trading with a custom trade screen
+- 🎒 **Inventory & equipment** — 27-slot inventory, auto item pickup, armor/held-item rendering
+
+### Reliability
+- 🛡️ **Decision harness** — timeout fallback, circuit breaker to rule-only mode, structured decision schema
+- 📓 **Decision journal** — JSONL replay/eval log
+
+### Debugging
+- 🖥️ **Debug overlay** — HUD panel, building wireframes, watershed-field and seed visualization (all config-gated)
 
 ## 📦 Installation
 
-1. Download source code and compile, or wait for jar release
-2. Place it in your Minecraft `mods` folder
-3. Launch Minecraft with Forge 36.2.42 (Minecraft 1.16.5)
-4. Configure your LLM API key (see Configuration below)
+1. Build from source (see below) or grab a release jar.
+2. Drop the jar into your Minecraft `mods` folder.
+3. Launch Minecraft with **Forge 36.2.42** (Minecraft **1.16.5**).
+4. Configure your LLM endpoint (see below).
 
 ## ⚙️ Configuration
 
-After first launch, edit `config/villageragent-common.toml`:
+After first launch, edit `config/villageragent-common.toml`.
 
 ```toml
 [LLM Settings]
-    # API type: "openai" or "anthropic"
+    # Backend type: "openai" | "anthropic" | "ollama" | "gemini"
     llm_api_type = "openai"
-    
-    # Your API key from OpenAI or Anthropic
+
+    # Your API key from OpenAI (or any OpenAI-compatible provider)
     llm_api_key = "sk-your-api-key-here"
-    
+
     # API endpoint URL
     llm_api_url = "https://api.openai.com/v1/chat/completions"
-    
-    # Model to use (e.g., "gpt-3.5-turbo", "gpt-4", "claude-3-sonnet-20240229")
+
+    # Model to use (e.g. "gpt-3.5-turbo", "gpt-4")
     llm_model = "gpt-3.5-turbo"
-    
-    # Maximum tokens for responses (50-1000)
-    llm_max_tokens = 150
-    
-    # Temperature for creativity (0.0-2.0)
-    llm_temperature = 0.7
+
+    llm_max_tokens = 150      # 50 - 1000
+    llm_temperature = 0.7     # 0.0 - 2.0
 
 [Agent Behavior]
-    # Enable/disable AI agents
     enable_ai_agents = true
-    
-    # Ticks between AI updates (20 ticks = 1 second)
-    agent_think_interval = 100
-    
-    # Enable villager-to-villager chat
-    enable_villager_chat = true
-    
-    # Enable world interaction (farming, crafting, etc.)
-    enable_world_interaction = true
+    agent_think_interval = 100        # ticks between AI updates (20 ticks = 1s)
+    enable_villager_chat = true       # villager-to-villager dialogue
+    enable_world_interaction = true   # farming / crafting / combat
+    enable_building = true            # LLM-designed block building
+    enable_auto_pickup = true
+    enable_daily_schedule = true
+    enable_villager_social = true
+    enable_villager_thoughts = false  # ambient thought bubbles
+
+    # Debug overlay (visualization)
+    enable_debug_overlay = false
+    debug_show_buildings = true
+    debug_show_seeds = true
+    debug_show_field = true
+
+[Decision Harness]
+    harness_enabled = true
+    harness_timeout_ms = 8000          # fall back to rules on timeout
+    harness_circuit_failures = 3       # failures before rule-only mode
+    harness_journal_enabled = true     # write JSONL decision journal
 ```
 
-### Getting an API Key
-
-**OpenAI:**
-1. Go to https://platform.openai.com/
-2. Sign up or log in
-3. Navigate to API Keys
-4. Create a new secret key
-5. Copy and paste into config
-
-**Anthropic:**
-1. Go to https://console.anthropic.com/
-2. Sign up or log in
-3. Navigate to API Keys
-4. Create a new key
-5. Copy and paste into config
-6. Change `llm_api_url` to `https://api.anthropic.com/v1/messages`
-7. Change `llm_model` to `claude-3-sonnet-20240229` or similar
+> 💡 You can also change LLM settings at runtime with the in-game command (see below) instead of editing the file.
 
 ## 🎮 How to Use
 
-### Talking to Villagers
+### Talking to villagers
+1. Find a villager.
+2. **Right-click** it to open the chat GUI.
+3. Villagers respond with their personality, mood, and current activity.
 
-1. Find a villager in the world
-2. **Right-Click** on the villager
-3. The villager will greet you with their personality
-4. (Better GUI coming soon!)
+### In-game command (`/villageragent`, permission level 2)
 
-### Observing AI Behavior
+| Command | Purpose |
+|---|---|
+| `/villageragent config get <option>` | Read a config value |
+| `/villageragent config set <option> <true/false>` | Toggle a feature flag |
+| `/villageragent config list` | List options |
+| `/villageragent llm apitype <type>` / `model <m>` / `apikey <k>` / `apiurl <u>` | Switch LLM backend at runtime |
+| `/villageragent info` | Show agent status |
+| `/villageragent reload` | Reload config |
+| `/villageragent build place/break <x> <y> <z> [block]` | Manual block placement/removal |
+| `/villageragent build structure <goal>` | Ask an LLM to design a structure |
 
-- Check the Minecraft logs to see:
-  - AI agent creation
-  - Goal generation
-  - Memory updates
-  - Villager activities
-
-### Example Log Output
+### Observing AI behavior
+Check the Minecraft log for agent creation, goal generation, memory updates and activity. Example:
 
 ```
-[VillagerAgent] Creating new AI agent for villager: 12345678-1234-1234-1234-123456789abc
+[VillagerAgent] Creating new AI agent for villager: 12345678-…
 [VillagerAgent] Generated new goal for Beatrice: Gather wheat (Priority: 7)
 [VillagerAgent] Beatrice: New memory - Talked with player Steve
 ```
 
+### Debug overlay
+Enable `enable_debug_overlay` to see detected buildings as wireframes, watershed room boundaries, and a per-agent HUD.
 
-### Building from Source
+## 🔨 Building from Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/Aaron-AA0721/MinecraftMod-VillagerAgent.git
 cd VillagerAgent
-
-# Build with Gradle (requires Gradle 8.8+)
-gradle build
-
-# Or use your IDE (IntelliJ IDEA recommended)
-# Import as Gradle project and run build task
+gradlew build          # produces build/libs/villageragent-*.jar
 ```
 
-### Requirements
+**Requirements**
 
 - Java 8 JDK
-- Minecraft 1.16.5
-- Forge 36.2.42
-- Gradle 8.8+
+- Minecraft 1.16.5 · Forge 36.2.42
+- Gradle 8.8+ (ForgeGradle 6.x)
 
 ## 📝 Roadmap
 
-- [x] Core AI agent system
-- [x] Personality and memory
-- [x] Goal system
-- [x] Custom inventory
-- [x] LLM integration (OpenAI/Anthropic)
-- [x] Basic player interaction
-- [x] Dynamic trading system
-- [ ] Advanced LLM-based goal generation
-- [ ] Custom chat GUI
-- [ ] World interaction (farming, crafting)
-- [ ] Villager-to-villager communication
-- [ ] Pathfinding and navigation
-- [ ] Village coordination
+**Done**
+
+- [x] Core AI agent system, personality & memory
+- [x] Goal system, daily schedule, mood & needs
+- [x] LLM integration (OpenAI-compatible / Anthropic / Ollama / Gemini)
+- [x] Player conversation + custom chat GUI
+- [x] Villager-to-villager chat, gossip, proximity greeting
+- [x] Farming, combat, crafting, block building
+- [x] Dynamic trading + trade GUI
+- [x] Layered perception (chunk memory / structure index / frustum scan)
+- [x] Building & room detection (distance field + watershed)
+- [x] Decision harness (timeout, circuit breaker, journal)
+- [x] Debug overlay + in-game config command
+
+**Planned**
+
+- [ ] True pathfinding / navigation wired back to the room index (villagers currently navigate via vanilla `HOME` POI)
+- [ ] Village coordination (multi-villager teamwork)
+- [ ] Relationship-based trade price negotiation
+- [ ] Weather reactions (seek shelter in rain)
+- [ ] Death memory (witnesses remember nearby deaths)
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit pull requests.
-
+Contributions are welcome! Feel free to open issues or submit pull requests.
 
 ## 🙏 Acknowledgments
 
 - Minecraft Forge team
-- OpenAI and Anthropic for LLM APIs
 - The Minecraft modding community
+- OpenAI / Anthropic / DeepSeek for LLM APIs
 
 ## 📧 Contact
 
-For questions or support, please open an issue on GitHub.
+For questions or support, open an issue on [GitHub](https://github.com/Aaron-AA0721/MinecraftMod-VillagerAgent).
 
 ---
 
 **Made with ❤️ for the Minecraft community**
-

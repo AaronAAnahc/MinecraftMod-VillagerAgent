@@ -1,14 +1,20 @@
 package com.github.AaronAA0721.villageragent.ai;
 
+import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.entity.ai.brain.memory.MemoryModuleType;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.item.crafting.IRecipe;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.server.ServerWorld;
+import net.minecraftforge.registries.ForgeRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 
@@ -227,7 +233,7 @@ public class VillagerActivitySystem {
                 && cur.getPhase() == VillagerAction.ActionPhase.ACTING) {
             cur.incrementStuckTicks(); // reused as "work timer"
             if (cur.getStuckTicks() >= CRAFT_DURATION) {
-                finalizeCrafting(agent);
+                finalizeCrafting(world, villager, agent);
                 agent.setCurrentAction(null);
             }
             return;
@@ -264,27 +270,48 @@ public class VillagerActivitySystem {
     }
 
     /**
-     * Attempt to craft a recipe from the villager's profession list.
-     * Falls back to a flavour memory if no ingredients are available.
+     * Attempt to craft an item from the villager's profession catalog at its workstation.
+     * This is the goal-driven path ({@link ProfessionCraftCatalog} + {@link NativeRecipeResolver}),
+     * matching what {@code executeCraftGoal} does — the old hard-coded {@code RecipeRegistry}
+     * path is retired so every craft resolves through the same catalogue + native recipe.
      */
-    private static void finalizeCrafting(VillagerAgentData agent) {
-        List<CraftingRecipe> available = RecipeRegistry.getAvailableRecipesForProfession(
-                agent.getProfession(), agent.getInventory());
+    private static void finalizeCrafting(ServerWorld world, VillagerEntity villager, VillagerAgentData agent) {
+        String profession = agent.getProfession();
+        int level = villager.getVillagerData().getLevel();
 
-        if (!available.isEmpty()) {
-            CraftingRecipe recipe = available.get(0); // pick the first craftable recipe
-            boolean success = recipe.craft(agent.getInventory());
-            if (success) {
-                agent.addMemory("Crafted " + recipe.getName() + " at the workstation — good work today!");
-                LOGGER.info("{} crafted '{}'", agent.getName(), recipe.getName());
+        for (String itemId : ProfessionCraftCatalog.getCraftableIds(profession, level)) {
+            Item item = ForgeRegistries.ITEMS.getValue(new ResourceLocation(itemId));
+            if (item == null || item == Items.AIR) continue;
+            IRecipe<?> recipe = NativeRecipeResolver.findRecipe(world, item);
+            if (recipe == null) continue;
+            // consumeAndProduce re-verifies materials at execution time; skip to the next if short.
+            if (!NativeRecipeResolver.consumeAndProduce(agent.getInventory(), recipe, 1)) continue;
+            if (ProfessionCraftCatalog.canEnchant(profession, level, itemId)) {
+                enchantFirstCrafted(agent, item, villager);
+            }
+            agent.addMemory("Crafted " + itemId + " at my workstation — good work today!");
+            LOGGER.info("{} crafted '{}'", agent.getName(), itemId);
+            return;
+        }
+
+        // Nothing craftable right now — flavour memory.
+        agent.addMemory("Spent the session working at my " + profession.toLowerCase()
+                + " station — kept busy tidying and preparing materials");
+        LOGGER.debug("{} crafting session finished (no craftable recipe)", agent.getName());
+    }
+
+    /** Apply a random Master-level enchantment to the first freshly-crafted stack. */
+    private static void enchantFirstCrafted(VillagerAgentData agent, Item target, VillagerEntity villager) {
+        AgentInventory inv = agent.getInventory();
+        for (int i = 0; i < inv.getItems().size(); i++) {
+            ItemStack s = inv.getItems().get(i);
+            if (!s.isEmpty() && s.getItem() == target) {
+                ItemStack enchanted = EnchantmentHelper.enchantItem(
+                        villager.getRandom(), s, 5 + villager.getRandom().nextInt(15), false);
+                inv.getItems().set(i, enchanted);
                 return;
             }
         }
-
-        // Nothing craftable — just add a flavour memory
-        agent.addMemory("Spent the session working at my " + agent.getProfession().toLowerCase()
-                + " station — kept busy tidying and preparing materials");
-        LOGGER.debug("{} crafting session finished (no recipe matched)", agent.getName());
     }
 }
 

@@ -35,6 +35,20 @@ public class ModConfig {
     /** Ambient inner-thought bubbles ('[Name thinks]') broadcast to nearby players. OFF by default. */
     public static final ForgeConfigSpec.BooleanValue ENABLE_VILLAGER_THOUGHTS;
 
+    // ── Decision Harness (plan: 技术力提升计划书 Module 1) ──
+    /** Master switch for the whole harness (resilience + structured LLM decisions). */
+    public static final ForgeConfigSpec.BooleanValue HARNESS_ENABLED;
+    /** Per-LLM-call timeout in ms. On timeout the villager falls back to rule-based behaviour. */
+    public static final ForgeConfigSpec.IntValue HARNESS_TIMEOUT_MS;
+    /** Consecutive LLM failures before a villager enters rule-only mode for a cooldown. */
+    public static final ForgeConfigSpec.IntValue HARNESS_CIRCUIT_FAILURES;
+    /** Ticks a villager stays in rule-only mode after the circuit breaker trips. */
+    public static final ForgeConfigSpec.IntValue HARNESS_CIRCUIT_COOLDOWN_TICKS;
+    /** Write a JSONL decision journal (replay / eval / debugging). */
+    public static final ForgeConfigSpec.BooleanValue HARNESS_JOURNAL_ENABLED;
+    /** When true the harness also decides one structured daily goal per villager at dawn (P1). */
+    public static final ForgeConfigSpec.BooleanValue HARNESS_DRIVE_DAILY_GOAL;
+
     // ── Debug overlay (visualization debugging) ──
     /** Master switch: when true the server streams perception/agent debug snapshots to clients. */
     public static final ForgeConfigSpec.BooleanValue ENABLE_DEBUG_OVERLAY;
@@ -44,6 +58,7 @@ public class ModConfig {
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_HUD;
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_BUILDINGS;
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_SEEDS;
+    public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_FIELD;
 
     static {
         BUILDER.push("LLM Settings");
@@ -180,6 +195,46 @@ public class ModConfig {
                         + "plateau) of each detected building. Interior (room-candidate) seeds are "
                         + "yellow; atmosphere seeds are magenta. Client render toggle.")
                 .define("debug_show_seeds", true);
+
+        DEBUG_SHOW_FIELD = BUILDER
+                .comment("Draw the full watershed collection field of each detected building: every "
+                        + "BFS collection in its own colour, the atmospheric collection in a uniform "
+                        + "cyan, and the watershed boundary (equal-geodesic-distance surface) in white. "
+                        + "Seeds are drawn as a cross at the centre of their block. Client render toggle.")
+                .define("debug_show_field", true);
+
+        BUILDER.pop();
+
+        BUILDER.push("Decision Harness");
+
+        HARNESS_ENABLED = BUILDER
+                .comment("Master switch for the decision harness (resilience + structured LLM decisions). "
+                        + "When false, LLM calls bypass the guard and behave as before.")
+                .define("harness_enabled", true);
+
+        HARNESS_TIMEOUT_MS = BUILDER
+                .comment("Per-LLM-call timeout in milliseconds. On timeout the villager falls back to "
+                        + "rule-based behaviour instead of stalling the decision pipeline.")
+                .defineInRange("harness_timeout_ms", 8000, 1000, 60000);
+
+        HARNESS_CIRCUIT_FAILURES = BUILDER
+                .comment("Consecutive LLM failures before a villager is put into rule-only mode for a cooldown "
+                        + "(prevents an API outage from cascading into a village-wide stall).")
+                .defineInRange("harness_circuit_failures", 3, 1, 20);
+
+        HARNESS_CIRCUIT_COOLDOWN_TICKS = BUILDER
+                .comment("How many ticks a villager stays in rule-only mode after the circuit breaker trips.")
+                .defineInRange("harness_circuit_cooldown_ticks", 1200, 100, 24000);
+
+        HARNESS_JOURNAL_ENABLED = BUILDER
+                .comment("Write a JSONL decision journal to villageragent_decision_journal.jsonl "
+                        + "(for replay / eval / debugging).")
+                .define("harness_journal_enabled", true);
+
+        HARNESS_DRIVE_DAILY_GOAL = BUILDER
+                .comment("When true, the harness also decides one structured daily goal for each villager at dawn "
+                        + "(P1 integration). Off by default so existing behaviour is unchanged until enabled.")
+                .define("harness_drive_daily_goal", false);
 
         BUILDER.pop();
 

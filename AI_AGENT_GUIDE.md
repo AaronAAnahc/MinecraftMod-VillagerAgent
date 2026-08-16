@@ -2,6 +2,8 @@
 
 > **Purpose:** Fast on-boarding for an AI assistant picking up this project. Read this before touching any code.
 
+> ⚠️ **本文档主体快照于 2026-04-23，部分章节已过时**。截至 2026-08-16 的架构演进（分层感知 Far/Mid/Near、决策 Harness、职业合成、世界交互建造、长期任务 Agenda、converse 目标等）**未回写进本文**，请同时参考 `docs/` 下的设计/实现文档与 `docs/项目现状与待办清单.md`。下方 §6/§8 已补记 2026-08-16 增量；其余章节以代码为准。
+
 ---
 
 ## 1. Goal & Environment
@@ -135,9 +137,26 @@ All source lives under `com.github.AaronAA0721.villageragent`.
 - Listener's relation to that third party nudged ±2 (direction matches gossiper's opinion)
 - Both parties receive a memory entry: gossiper records "Told X about Y", listener records "A spoke well/poorly of B (±2)"
 
+## 7. Systems Added After 2026-04-23
+
+> 快照后新增的子系统，仅列要点；实现细节见 `docs/` 下对应文档。
+
+- **分层感知（Far/Mid/Near）** — `ai/memory/ChunkMemory`（按 `BlockCategory`/`ChunkTag`/`ChunkFeature` 打标签，不存 2048 条方块）；`ai/vision/BuildingLocator`（床→房间：距离场+同步双类别分水岭）+ `ai/world/WorldStructureIndex`（事件驱动、队列式、`StructureIndexSavedData` 跨重启持久化）；`ai/vision/FrustumCuller`+`DetailedViewRecorder`（视锥实时精扫）。
+- **决策 Harness**（`ai/harness/`）— `LLMGuard`（超时+熔断+重试）、`DecisionJournal`（JSONL 轨迹）、`DecisionSchema`/`ActionValidator`（schema+接地+安全校验）、`HarnessDecisionPlanner`（`decideDailyGoal`，受 `harness_drive_daily_goal` 门控，默认关）。失败哨兵 `LLMService.FAILURE_PREFIX` 防把错误串当台词广播。
+- **职业合成** — `ProfessionCraftCatalog` + `NativeRecipeResolver`（原版 `RecipeManager` 反查材料），`executeCraftGoal` 走 JOB_SITE、执行刻再校验、大师级随机附魔。
+- **世界交互/建造** — `BlockInteractionAction`（1 格内放置/破坏）、`BuildOrderPlanner`（壳层 BFS 顺序+校验）、`StructureBuilder`（LLM 结构+回修）、`BuildJob`（NBT 续建）；`/va build place/break/structure`。
+- **长期任务/契约** — `LongTermAgenda`（`DebtAgenda`/`AcquireItemAgenda`/`DealAgenda`/`GenericAgenda`）+ `AgendaParser`（`REMEMBER:` 指令）；`playerReputation` 好感度；销账（`settleDebts`）+ 反思派生 + `converse` 目标催账。
+- **目标派发** — `processGoals` 按 `goalType`（craft/gather/move/converse/trade/socialize）switch 到 `executeXxxGoal`，取代 `scheduledActivity` 字符串开关。
+
 ## 8. Pending / Next Steps
+
+> **2026-08-16 增补**：本节原 4 项中「Trade Negotiation」已部分落地（好感度 `playerReputation` 影响销账 ±10 / 催账超限 -5，见 `TradeRequestPacket.settleDebts`）；「Home/Bed Assignment」仍待做（消费断层）。新增待办以 `docs/项目现状与待办清单.md` 为准。
+
 - ⬜ **Weather Reactions** — seek shelter in rain, comment on storms in prompts
 - ⬜ **Death Memory** — nearby villager death adds distress memory to witnesses (hook into `LivingDeathEvent`)
-- ⬜ **Trade Negotiation** — use relationship score to adjust trade prices in `TradeRequestPacket`
-- ⬜ **Home/Bed Assignment** — assign a home position at spawn; use it for `resting` activity navigation
+- ⬜ **Home/Bed Assignment** — 把 `WorldStructureIndex` 的床/建筑接回村民 `MemoryModuleType.HOME`，实现真正"回家睡觉"导航（当前 `VillagerActivitySystem.handleResting` 仍走原版 HOME POI，检测能力已具备但消费侧未接上）
+- ⬜ **G3 索引失效** — `WorldStructureIndex.markDirty` 为死代码，活塞/爆炸/液体改动不触发重扫
+- ⬜ **trade/socialize 目标空壳** — `executeTradeGoal`/`executeSocializeGoal` 仅走到最近玩家+写记忆，无真实经济/关系变化
+- ⬜ **通用采集** — 挖矿/伐木/钓鱼等职业化采集未实现（仅 farmer 收割 + `ItemAttractionSystem` 捡掉落物）
+- ⬜ **Stage 2 建筑精细解析（StructureParser）** — 房间/门窗/柱的结构化解析未实现，`BuildingRecord` 无内部模型
 

@@ -43,10 +43,17 @@ public class VillagerChatHandler {
     }
 
     /**
-     * Receive a trade result
+     * Receive a trade result, including the post-trade inventory/armor snapshot
+     * so the client UI refreshes immediately instead of showing stale data.
      */
-    public static void receiveTradeResult(UUID villagerId, boolean accepted, String message) {
+    public static void receiveTradeResult(UUID villagerId, boolean accepted, String message,
+                                           List<ItemStack> inventory, List<ItemStack> armor) {
         LOGGER.info("Trade result: " + (accepted ? "ACCEPTED" : "REJECTED") + " - " + message);
+
+        // Refresh the cached snapshot on the chat screen (source of truth for re-opening trade)
+        if (currentChatScreen != null && currentChatScreen.getVillagerId().equals(villagerId)) {
+            currentChatScreen.updateVillagerData(inventory, armor);
+        }
 
         Minecraft mc = Minecraft.getInstance();
         Screen currentScreen = mc.screen;
@@ -55,6 +62,7 @@ public class VillagerChatHandler {
         if (currentScreen instanceof VillagerTradeScreen) {
             VillagerTradeScreen tradeScreen = (VillagerTradeScreen) currentScreen;
             if (tradeScreen.getVillagerId().equals(villagerId)) {
+                tradeScreen.updateVillagerData(inventory, armor);
                 tradeScreen.showTradeResult(accepted, message);
                 return;
             }

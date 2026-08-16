@@ -52,6 +52,9 @@ public class DebugDataPacket {
     /** Distance-field seed markers (regional-maximum plateaus) of nearby buildings. */
     public List<SeedPoint> seeds = new ArrayList<>();
 
+    /** Watershed-collection field cells (block resolution, world coords) of nearby buildings. */
+    public List<FieldCell> field = new ArrayList<>();
+
     public static class SeedPoint {
         public BlockPos pos;
         /** true = interior / room-candidate (non-atmosphere) seed; false = atmosphere seed. */
@@ -59,6 +62,18 @@ public class DebugDataPacket {
         public SeedPoint(BlockPos pos, boolean interior) {
             this.pos = pos; this.interior = interior;
         }
+    }
+
+    /** A single watershed-collection cell. flags: bit0=atmospheric, bit1=boundary; bits8.. = setId. */
+    public static class FieldCell {
+        public final int wx, wy, wz;
+        public final int flags;
+        public FieldCell(int wx, int wy, int wz, int flags) {
+            this.wx = wx; this.wy = wy; this.wz = wz; this.flags = flags;
+        }
+        public boolean atmospheric() { return (flags & 1) != 0; }
+        public boolean boundary()    { return (flags & 2) != 0; }
+        public int setId()           { return flags >> 8; }
     }
 
     public static class BuildingBox {
@@ -119,6 +134,11 @@ public class DebugDataPacket {
             b.writeLong(sp.pos.asLong());
             b.writeBoolean(sp.interior);
         }
+
+        b.writeInt(p.field.size());
+        for (FieldCell fc : p.field) {
+            b.writeInt(fc.wx); b.writeInt(fc.wy); b.writeInt(fc.wz); b.writeInt(fc.flags);
+        }
     }
 
     public static DebugDataPacket decode(PacketBuffer b) {
@@ -168,6 +188,12 @@ public class DebugDataPacket {
             BlockPos pos = BlockPos.of(b.readLong());
             boolean interior = b.readBoolean();
             p.seeds.add(new SeedPoint(pos, interior));
+        }
+
+        int fc = b.readInt();
+        for (int i = 0; i < fc; i++) {
+            int wx = b.readInt(), wy = b.readInt(), wz = b.readInt(), fl = b.readInt();
+            p.field.add(new FieldCell(wx, wy, wz, fl));
         }
 
         return p;

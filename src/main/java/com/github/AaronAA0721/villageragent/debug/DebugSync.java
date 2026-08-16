@@ -69,6 +69,10 @@ public final class DebugSync {
                 for (BuildingRecord.DebugSeed s : r.debugSeeds) {
                     pkt.seeds.add(new DebugDataPacket.SeedPoint(s.pos, s.interior));
                 }
+                for (BuildingRecord.DebugFieldCell fc : r.debugField) {
+                    int flags = (fc.atmospheric ? 1 : 0) | (fc.boundary ? 2 : 0) | ((fc.setId & 0xFFFFFF) << 8);
+                    pkt.field.add(new DebugDataPacket.FieldCell(fc.wx, fc.wy, fc.wz, flags));
+                }
             }
         }
         pkt.nearbyBuildings = pkt.buildings.size();

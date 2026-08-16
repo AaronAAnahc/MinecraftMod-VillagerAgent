@@ -31,8 +31,8 @@ public class VillagerChatScreen extends Screen {
     private final String villagerName;
     private final String profession;
     private final String personality;
-    private final List<ItemStack> villagerInventory;
-    private final List<ItemStack> villagerArmor;
+    private List<ItemStack> villagerInventory;
+    private List<ItemStack> villagerArmor;
 
     // Chat components
     private TextFieldWidget chatInput;
@@ -146,6 +146,15 @@ public class VillagerChatScreen extends Screen {
 
     public List<ItemStack> getVillagerInventory() {
         return villagerInventory;
+    }
+
+    /**
+     * Refresh the cached villager inventory/armor in place (e.g. after a trade),
+     * so re-opening the trade screen shows the updated contents immediately.
+     */
+    public void updateVillagerData(List<ItemStack> inventory, List<ItemStack> armor) {
+        this.villagerInventory = new ArrayList<>(inventory);
+        this.villagerArmor = new ArrayList<>(armor);
     }
 
     @Override

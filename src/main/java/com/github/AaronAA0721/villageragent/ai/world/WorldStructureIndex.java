@@ -37,6 +37,13 @@ public class WorldStructureIndex {
     /** Flood fills allowed per world tick. Each one is a ~50x25x50 box scan. */
     public static final int FLOODS_PER_TICK = 1;
 
+    /**
+     * Minimum game-time between two {@link #pruneStaleBeds} reconciliation passes (ticks).
+     * 100 ticks ≈ 5 s at 20 tps — frequent enough that an orphaned "no-bed" building never
+     * lingers for long, infrequent enough not to re-scan every bed every tick.
+     */
+    private static final long PRUNE_INTERVAL = 100L;
+
     private static final Map<World, WorldStructureIndex> INSTANCES = new WeakHashMap<>();
 
     public static WorldStructureIndex instance(World world) {
@@ -67,6 +74,9 @@ public class WorldStructureIndex {
     private final Set<Long> pendingSet = new HashSet<>();
 
     private StructureIndexSavedData savedData;
+
+    /** Last game-time a {@link #pruneStaleBeds} pass ran (throttling). */
+    private long lastPruneTick = -1;
 
     /** Called by {@link StructureIndexSavedData} so mutations can mark the save dirty. */
     void attach(StructureIndexSavedData data) {
@@ -164,7 +174,7 @@ public class WorldStructureIndex {
         while (it.hasNext()) {
             long k = it.next();
             BlockPos bp = BlockPos.of(k);
-            if (region.inflate(BuildingLocator.SCAN_RADIUS).contains(bp.getX() + 0.5, bp.getY() + 0.5, bp.getZ() + 0.5)) {
+            if (region.inflate(BuildingLocator.scanHorizontalHalf()).contains(bp.getX() + 0.5, bp.getY() + 0.5, bp.getZ() + 0.5)) {
                 it.remove();
                 revive.add(k);
             }
@@ -196,23 +206,36 @@ public class WorldStructureIndex {
     /** A bed was destroyed: remove it from its building (and the building if it was the last bed). */
     public synchronized void onBedRemoved(BlockPos bed) {
         long k = bed.asLong();
-        // Find the building that lists this bed (covers seed + extra beds alike).
+        // Find the building that lists this bed — OR its partner half. A bed is two blocks
+        // (head + foot) but we only record one half, so breaking the half we didn't record
+        // must still match (otherwise the building would linger as a "no-bed" ghost).
         BuildingRecord hit = null;
+        BlockPos hitBed = null;
         for (BuildingRecord r : byId.values()) {
-            if (r.hasBed(k)) { hit = r; break; }
+            for (BlockPos b : r.beds) {
+                if (b.asLong() == k || isPartnerHalf(b, bed)) { hit = r; hitBed = b; break; }
+            }
+            if (hit != null) break;
         }
         if (hit != null) {
-            hit.removeBed(bed);
-            claimedBeds.remove(k);
+            hit.removeBed(hitBed);
+            claimedBeds.remove(hitBed.asLong());
             if (hit.beds.isEmpty()) {
-                remove(hit.id); // last bed gone → whole building vanishes
-            } else if (hit.seedBed.asLong() == k) {
-                // promote a surviving bed to seed so the record stays anchored to a live bed
-                hit.seedBed = hit.beds.get(0).immutable();
-                claimedBeds.add(hit.seedBed.asLong());
-                dirty();
+                // Last bed gone → the whole building vanishes (nothing left to anchor it).
+                remove(hit.id);
             } else {
-                dirty();
+                // At least one bed remains. The record was anchored on the (now removed or
+                // stale) seed bed and was NEVER re-flooded, so its geometry is frozen at the
+                // first detection. Drop the stale record and re-detect from a surviving bed so
+                // the building reflects the current world (mirrors onBlockChanged, which does
+                // the same for wall edits). Without this, removing a bed in a multi-bed house
+                // — or any non-seed bed — silently leaves the room unchanged.
+                long newSeed = hit.beds.get(0).asLong();
+                remove(hit.id);              // discard stale record + its claimed entry
+                claimedBeds.remove(newSeed); // clear so enqueue can re-admit the survivor
+                pendingSet.remove(newSeed);
+                pending.remove(newSeed);
+                enqueue(newSeed);            // fresh flood on the next processPending tick
             }
             return;
         }
@@ -221,6 +244,16 @@ public class WorldStructureIndex {
         rejectedBeds.remove(k);
         if (pendingSet.remove(k)) pending.remove(k);
         dirty();
+    }
+
+    /**
+     * Two bed halves are horizontally adjacent (same Y, exactly one of dx/dz == 1). Used so
+     * breaking the half we didn't record still resolves to the same building.
+     */
+    private static boolean isPartnerHalf(BlockPos a, BlockPos b) {
+        int dx = Math.abs(a.getX() - b.getX());
+        int dz = Math.abs(a.getZ() - b.getZ());
+        return a.getY() == b.getY() && ((dx == 1 && dz == 0) || (dx == 0 && dz == 1));
     }
 
     // ── Seeding (event-driven) ────────────────────────────────────────────
@@ -250,6 +283,11 @@ public class WorldStructureIndex {
      * the server in one 1M-block sweep.
      */
     public void processPending(World world, int budget) {
+        // Reconcile every known building's beds against the world each update, so a bed
+        // destroyed through a path the break-event missed (the other half, a piston, an
+        // explosion, or world-save drift) can never leave an orphaned "no-bed" building.
+        pruneStaleBeds(world, world.getGameTime());
+
         for (int i = 0; i < budget; i++) {
             long key;
             synchronized (this) {
@@ -260,11 +298,16 @@ public class WorldStructureIndex {
             BlockPos bed = BlockPos.of(key);
 
             // The surrounding box must be loaded, otherwise the scan would force chunk loads.
-            // (V_UP is the larger vertical half-extent; V_BELOW is tiny, so V_UP covers it.)
-            // Note: IWorldReader.hasChunksAt is @Deprecated in 1.16.5 with no non-deprecated
-            // overload, so we replicate its semantics directly via getChunkNow (returns null if
-            // the column is not yet loaded, without forcing a load).
-            int r = BuildingLocator.SCAN_RADIUS, v = BuildingLocator.V_UP;
+            // The scan box (BuildingLocator.locateBed) is derived from a single block budget and
+            // centred on the bed; its horizontal half-extent is at most
+            // BuildingLocator.scanHorizontalHalf() blocks, so waiting for every chunk column in
+            // [bed ± scanHorizontalHalf] guarantees the flood never touches an unloaded column.
+            // (Conservative upper bound — slightly more chunks than strictly needed, but never
+            // fewer. We deliberately do NOT call getBlockState here, since that could force a
+            // load.) Note: IWorldReader.hasChunksAt is @Deprecated in 1.16.5 with no
+            // non-deprecated overload, so we replicate its semantics via getChunkNow (returns
+            // null if the column is not yet loaded, without forcing a load).
+            int r = BuildingLocator.scanHorizontalHalf();
             int x0 = bed.getX() - r, x1 = bed.getX() + r;
             int z0 = bed.getZ() - r, z1 = bed.getZ() + r;
             boolean chunksLoaded = true;
@@ -326,6 +369,60 @@ public class WorldStructureIndex {
         }
         claimedBeds.remove(key);
         rejectedBeds.remove(key);
+    }
+
+    /**
+     * Reconciliation pass: for every known building, keep only the beds that still exist in the
+     * world. A bed destroyed through a path the break-event missed (the bed's other half, a
+     * piston, an explosion, or world-save drift) is dropped; a building whose last bed is gone
+     * is removed entirely. Throttled to {@link #PRUNE_INTERVAL} so it does not re-scan every bed
+     * every tick. Called from {@link #processPending}, i.e. on every index update.
+     */
+    private synchronized void pruneStaleBeds(World world, long gameTime) {
+        if (lastPruneTick >= 0 && gameTime - lastPruneTick < PRUNE_INTERVAL) return;
+        lastPruneTick = gameTime;
+
+        boolean changed = false;
+        for (BuildingRecord r : new ArrayList<>(byId.values())) {
+            List<BlockPos> survivors = new ArrayList<>();
+            for (BlockPos b : r.beds) {
+                if (bedExists(world, b)) survivors.add(b);
+                else claimedBeds.remove(b.asLong());
+            }
+            if (survivors.isEmpty()) {
+                remove(r.id);                // last bed gone → whole building vanishes
+                changed = true;
+            } else if (survivors.size() != r.beds.size()) {
+                // Some but not all beds removed: keep the survivors, re-anchor the seed if needed.
+                r.beds.clear();
+                for (BlockPos s : survivors) r.beds.add(s.immutable());
+                if (!r.seedBed.equals(survivors.get(0))) {
+                    claimedBeds.remove(r.seedBed.asLong());
+                    r.seedBed = survivors.get(0).immutable();
+                    claimedBeds.add(r.seedBed.asLong());
+                }
+                changed = true;
+            }
+        }
+        if (changed) dirty();
+    }
+
+    /**
+     * True if a bed (or its partner half) still occupies the world at or next to {@code p}.
+     * Unloaded chunks are treated as "present" so we never drop a bed we simply can't see yet.
+     */
+    private boolean bedExists(World world, BlockPos p) {
+        int cx = p.getX() >> 4, cz = p.getZ() >> 4;
+        if (world.getChunkSource().getChunkNow(cx, cz) == null) return true; // unloaded → never drop
+        if (world.getBlockState(p).is(BlockTags.BEDS)) return true;
+        // The recorded half may be gone but the other half could still be present.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if ((dx == 0) == (dz == 0)) continue; // horizontal neighbours only (skip centre + diagonals)
+                if (world.getBlockState(p.offset(dx, 0, dz)).is(BlockTags.BEDS)) return true;
+            }
+        }
+        return false;
     }
 
     private static List<Long> chunksOf(BuildingRecord r) {

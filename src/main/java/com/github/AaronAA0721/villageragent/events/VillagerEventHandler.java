@@ -7,6 +7,7 @@ import com.github.AaronAA0721.villageragent.debug.DebugSync;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
 import com.github.AaronAA0721.villageragent.network.SyncVillagerDataPacket;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.item.ItemEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -14,17 +15,21 @@ import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.inventory.EquipmentSlotType;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.util.Direction;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.StringTextComponent;
 import net.minecraft.world.server.ServerWorld;
+import net.minecraftforge.event.CommandEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.world.BlockEvent;
 import net.minecraftforge.event.world.ChunkEvent;
+import net.minecraftforge.event.world.ExplosionEvent;
+import net.minecraftforge.event.world.PistonEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.eventbus.api.Event;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -341,6 +346,83 @@ public class VillagerEventHandler {
         } else {
             index.onBlockChanged(pos);
         }
+    }
+
+    /**
+     * A piston just moved a column of blocks. This does NOT fire BlockEvent.EntityPlaceEvent /
+     * BreakEvent, so the building index would otherwise go stale — the exact reason
+     * {@code markDirty} existed but had no callers (G3). Invalidate the pushed/pulled column so
+     * any overlapping building is re-detected and nearby rejected beds get a second chance.
+     */
+    @SubscribeEvent
+    public void onPistonPost(PistonEvent.Post event) {
+        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
+        if (event.getWorld().isClientSide()) return;
+
+        Direction dir = event.getDirection();
+        BlockPos pos = event.getPos();
+        // Piston head + the column it just moved (pistons push up to 12 blocks). A generous box
+        // is fine — markDirty only re-floods beds that overlap it.
+        BlockPos head = pos.offset(dir.getStepX(), dir.getStepY(), dir.getStepZ());
+        BlockPos far = head.offset(dir.getStepX() * 12, dir.getStepY() * 12, dir.getStepZ() * 12);
+        AxisAlignedBB region = new AxisAlignedBB(pos).minmax(new AxisAlignedBB(far));
+        WorldStructureIndex.instance((ServerWorld) event.getWorld()).markDirty(region);
+    }
+
+    /**
+     * An explosion just destroyed a set of blocks (again, no BlockEvent place/break fires for it).
+     * Invalidate the bounding box of the affected blocks so buildings are re-detected.
+     */
+    @SubscribeEvent
+    public void onExplosion(ExplosionEvent.Detonate event) {
+        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
+        if (event.getWorld().isClientSide()) return;
+
+        List<BlockPos> affected = event.getAffectedBlocks();
+        if (affected == null || affected.isEmpty()) return;
+        AxisAlignedBB region = new AxisAlignedBB(affected.get(0));
+        for (BlockPos p : affected) {
+            region = region.minmax(new AxisAlignedBB(p));
+        }
+        WorldStructureIndex.instance((ServerWorld) event.getWorld()).markDirty(region.inflate(2));
+    }
+
+    /**
+     * A fluid (water/lava) flowed and placed a new source-ish block — also outside the
+     * place/break events. Invalidate a small region around the new liquid so any building it
+     * floods into is re-detected.
+     */
+    @SubscribeEvent
+    public void onFluidPlace(BlockEvent.FluidPlaceBlockEvent event) {
+        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
+        if (event.getWorld().isClientSide()) return;
+
+        BlockPos pos = event.getLiquidPos();
+        WorldStructureIndex.instance((ServerWorld) event.getWorld()).markDirty(new AxisAlignedBB(pos).inflate(3));
+    }
+
+    /**
+     * A world-edit command (/setblock, /fill, /clone) just changed blocks without firing
+     * BlockEvent.EntityPlaceEvent/BreakEvent — the last gap in the "block change" invalidation.
+     * We can't cheaply parse the exact affected region, so invalidate a generous box around the
+     * command source. markDirty is idempotent: over-invalidating only costs a re-flood.
+     *
+     * <p>Note: a command-placed BED still won't be offered as a seed (that would need parsing the
+     * args), but existing buildings near the edit won't go stale.
+     */
+    @SubscribeEvent
+    public void onCommand(CommandEvent event) {
+        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
+
+        String raw = event.getParseResults().getReader().getString();
+        if (raw == null) return;
+        String c = raw.trim().toLowerCase();
+        if (!c.startsWith("/setblock") && !c.startsWith("/fill") && !c.startsWith("/clone")) return;
+
+        Entity e = event.getParseResults().getContext().getSource().getEntity();
+        if (!(e instanceof ServerPlayerEntity)) return; // only player-run edits (skip command blocks)
+        ServerWorld world = (ServerWorld) e.level;
+        WorldStructureIndex.instance(world).markDirty(new AxisAlignedBB(e.blockPosition()).inflate(48));
     }
 }
 

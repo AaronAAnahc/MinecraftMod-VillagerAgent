@@ -1,8 +1,25 @@
 # 村民世界交互模块设计计划（放置 / 破坏方块）
 
-> **状态**：计划文档（先定方案，后写代码）。
+> **状态**：计划文档 → **已按本方案落地实现（2026-08-15）**。下方 §1–§11 为设计原案；实际代码已全部编码完成（见「实现状态」小节），尚未做游戏内联调验证。
 > **目标模块**：`ai/world interaction` —— 让村民能像玩家一样 **破坏** 与 **放置** 方块，并支持 LLM 下达「大规模建造结构」的指令。
 > **配套文档**：`docs/building_perception_design.md`（已存在的「建筑感知」模块，负责 *发现* 已有建筑）。本文档负责 *动作* 一侧，二者互补：村民用感知模块理解世界，用本模块改变世界。
+
+> ## ✅ 实现状态（2026-08-15，已落地，待联调）
+>
+> 设计原案已全部落地，落地时仅修正 3 处 1.16.5 官方映射 API 名（详见 2026-08-15 工作日志）：
+>
+> | 计划项 | 落地文件 | 状态 |
+> |---|---|---|
+> | 原子放置/破坏（1 格内约束 + 站立点 + 工具感知破坏计时） | `ai/BlockInteractionAction.java`（`isStandable`/`findStandable`/`withinReach`/`tickPlace`/`tickBreak`） | ✅ |
+> | 壳层 BFS 放置顺序 + 站立点求解 + `validateStructure` | `ai/BuildOrderPlanner.java`（`Structure`/`Step`/`ValidationResult`/`validateStructure`） | ✅ |
+> | LLM 结构接口 + 回修循环（最多 N 次） | `ai/StructureBuilder.java`（`requestStructure`/`startBuildJob`） | ✅ |
+> | 大规模建造任务状态 + NBT 持久化 | `ai/BuildJob.java`（`readNBT`/`writeNBT`/`reconcileWithWorld`） | ✅ |
+> | `ActionType` 加 `PLACE/BREAK/BUILD` | `ai/VillagerAction.java` | ✅ |
+> | 工具切换 + 破坏速度=玩家 | `ai/VillagerEquipmentHelper.java`（`equipBestToolForBlock`/`computeBreakTicks`，借 `FakePlayer`+`ForgeHooks.blockStrength`） | ✅ |
+> | `tickBuilding` 快循环 + `ENABLE_BUILDING` 开关 | `ai/VillagerAgentManager.java` + `config/ModConfig.java` + `events/VillagerEventHandler.java:144` | ✅ |
+> | 命令 `/va build place/break/structure` | `commands/VillagerAgentCommand.java` | ✅ |
+>
+> **待办**：`gradlew compileJava` 通过后游戏内联调（place/break 1 格内原子指令、大规模结构 LLM 接口、壳层 BFS 顺序、校验回修、破坏速度=玩家）。
 
 ---
 

@@ -1,5 +1,7 @@
 package com.github.AaronAA0721.villageragent.ai;
 
+import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
+import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
@@ -145,8 +147,10 @@ public class VillagerSocialSystem {
                 + agentB.getName() + "'s recent thoughts: " + memB + "\n"
                 + "Let their mood and relationship colour the conversation. Generate a 4-line conversation:";
 
-        LLMService.queryLLM(sysPrompt, userPrompt).thenAccept(response -> {
-            if (response == null || response.trim().isEmpty()) {
+        LLMGuard.query(agentA.getVillagerId(), world.getGameTime(), sysPrompt, userPrompt).thenAccept(response -> {
+            DecisionJournal.record(agentA.getVillagerId(), DecisionJournal.Kind.SOCIAL,
+                    world.getGameTime(), userPrompt, response, DecisionJournal.outcome(response));
+            if (response == null || response.trim().isEmpty() || LLMService.isFailure(response)) {
                 agentA.setSocializing(false); agentB.setSocializing(false); return;
             }
             world.getServer().execute(() ->

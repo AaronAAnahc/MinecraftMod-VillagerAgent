@@ -1,6 +1,8 @@
 package com.github.AaronAA0721.villageragent.network;
 
+import com.github.AaronAA0721.villageragent.ai.DebtAgenda;
 import com.github.AaronAA0721.villageragent.ai.LLMService;
+import com.github.AaronAA0721.villageragent.ai.LongTermAgenda;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.ai.VillagerEquipmentHelper;
@@ -17,6 +19,8 @@ import net.minecraftforge.fml.network.PacketDistributor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -226,11 +230,16 @@ public class TradeRequestPacket {
                 returnItemsToPlayer(player, packet);
             }
 
-            // Send result to client
+            // Send result to client, including the post-trade inventory/armor snapshot
+            // so the client can refresh its cached display immediately.
+            List<ItemStack> updatedInventory = collectInventorySnapshot(agent);
+            List<ItemStack> updatedArmor = collectArmorSnapshot(villager);
             TradeResultPacket resultPacket = new TradeResultPacket(
                     packet.villagerId,
                     accepted,
-                    reason
+                    reason,
+                    updatedInventory,
+                    updatedArmor
             );
             ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), resultPacket);
         });
@@ -299,8 +308,51 @@ public class TradeRequestPacket {
             VillagerEquipmentHelper.refreshEquipment(villager, agent);
         }
 
+        // If the player just handed over items they owed us, settle the matching DebtAgenda
+        // so the "collect payment" intention is cleared — guaranteed by code, not the LLM.
+        settleDebts(agent, player, packet);
+
         agent.addMemory("Traded with player " + player.getName().getString());
         return true;
+    }
+
+    /**
+     * Settle any DebtAgenda whose debtor is this player and whose owed item was just handed
+     * over in the trade. Payment is matched by registry id + quantity, so a promise of
+     * "64 emeralds" is cleared the moment those emeralds actually change hands.
+     */
+    private static void settleDebts(VillagerAgentData agent, ServerPlayerEntity player, TradeRequestPacket packet) {
+        String playerId = player.getUUID().toString();
+        for (LongTermAgenda agenda : agent.getAgendas()) {
+            if (agenda.isResolved() || !(agenda instanceof DebtAgenda)) continue;
+            DebtAgenda debt = (DebtAgenda) agenda;
+            if (debt.getDebtorId() == null || !debt.getDebtorId().equals(playerId)) continue;
+
+            int paid = countMatchingOffer(packet, debt.getItemId());
+            if (paid >= debt.getQuantity()) {
+                debt.setResolved(true);
+                debt.touch(player.level.getGameTime());
+                // Keeping a promise earns goodwill.
+                agent.getPlayerReputation().merge(player.getUUID(), 10, Integer::sum);
+                agent.addMemory("Player " + player.getName().getString() + " settled their debt: "
+                        + debt.getQuantity() + "x " + debt.getItemId());
+                LOGGER.info("{} settled debt '{}' with {}", agent.getName(), debt.getTitle(),
+                        player.getName().getString());
+            }
+        }
+    }
+
+    private static int countMatchingOffer(TradeRequestPacket packet, String debtItemId) {
+        int count = 0;
+        if (!packet.offerItem1.isEmpty()
+                && packet.offerItem1.getItem().getRegistryName().toString().equals(debtItemId)) {
+            count += packet.offerItem1.getCount();
+        }
+        if (!packet.offerItem2.isEmpty()
+                && packet.offerItem2.getItem().getRegistryName().toString().equals(debtItemId)) {
+            count += packet.offerItem2.getCount();
+        }
+        return count;
     }
 
     /**
@@ -350,6 +402,35 @@ public class TradeRequestPacket {
                 }
             }
         }
+    }
+
+    /**
+     * Snapshot the villager's current inventory (post-trade) for client display refresh.
+     */
+    private static List<ItemStack> collectInventorySnapshot(VillagerAgentData agent) {
+        List<ItemStack> items = new ArrayList<>();
+        for (ItemStack stack : agent.getInventory().getItems()) {
+            if (!stack.isEmpty()) {
+                items.add(stack.copy());
+            }
+        }
+        return items;
+    }
+
+    /**
+     * Snapshot the villager's currently equipped armor (HEAD, CHEST, LEGS, FEET).
+     */
+    private static List<ItemStack> collectArmorSnapshot(VillagerEntity villager) {
+        List<ItemStack> armor = new ArrayList<>();
+        if (villager != null) {
+            armor.add(villager.getItemBySlot(EquipmentSlotType.HEAD).copy());
+            armor.add(villager.getItemBySlot(EquipmentSlotType.CHEST).copy());
+            armor.add(villager.getItemBySlot(EquipmentSlotType.LEGS).copy());
+            armor.add(villager.getItemBySlot(EquipmentSlotType.FEET).copy());
+        } else {
+            for (int i = 0; i < 4; i++) armor.add(ItemStack.EMPTY);
+        }
+        return armor;
     }
 }
 

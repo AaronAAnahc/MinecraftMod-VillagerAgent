@@ -36,9 +36,9 @@ public class VillagerTradeScreen extends Screen {
     private final String villagerName;
     private final String profession;
     private final String personality;
-    private final List<ItemStack> villagerInventory;
+    private List<ItemStack> villagerInventory;
     /** Equipped armor: HEAD(0), CHEST(1), LEGS(2), FEET(3) */
-    private final List<ItemStack> villagerArmor;
+    private List<ItemStack> villagerArmor;
     private final VillagerChatScreen parentScreen;
 
     // Trade slots - what player offers to give and wants to receive
@@ -202,6 +202,15 @@ public class VillagerTradeScreen extends Screen {
 
     public UUID getVillagerId() {
         return villagerId;
+    }
+
+    /**
+     * Refresh the displayed villager inventory/armor in place (e.g. after a trade).
+     * Replaces the cached snapshot rather than mutating the list identity.
+     */
+    public void updateVillagerData(List<ItemStack> inventory, List<ItemStack> armor) {
+        this.villagerInventory = new ArrayList<>(inventory);
+        this.villagerArmor = new ArrayList<>(armor);
     }
 
     @Override

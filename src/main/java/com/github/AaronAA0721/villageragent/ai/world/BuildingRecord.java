@@ -41,6 +41,16 @@ public class BuildingRecord {
      */
     public List<DebugSeed> debugSeeds = new ArrayList<>();
 
+    /**
+     * Debug-only: the watershed collection field at block resolution, for in-world visualization.
+     * Each cell belongs to one collection (Voronoi region of a seed): atmospheric cells are flagged
+     * so the client paints them with one uniform colour, non-atmospheric cells carry a distinct set
+     * id for per-collection colouring, and boundary cells (the equal-geodesic-distance meeting
+     * surface between two fronts) are flagged so they can be drawn separately. Transient debug data
+     * — NOT serialized to NBT. Never relied upon by gameplay logic.
+     */
+    public List<DebugFieldCell> debugField = new ArrayList<>();
+
     /** A single distance-field seed, for in-world debug visualization. */
     public static class DebugSeed {
         public final BlockPos pos;
@@ -49,6 +59,18 @@ public class BuildingRecord {
         public DebugSeed(BlockPos pos, boolean interior) {
             this.pos = pos.immutable();
             this.interior = interior;
+        }
+    }
+
+    /** A single watershed-collection cell (block resolution, world coordinates). */
+    public static class DebugFieldCell {
+        public final int wx, wy, wz;       // world block coordinates
+        public final boolean atmospheric;  // true → uniform atmospheric colour
+        public final boolean boundary;     // true → watershed boundary (excluded from collections)
+        public final int setId;            // distinct colour id for non-atmospheric collections (>=0)
+        public DebugFieldCell(int wx, int wy, int wz, boolean atmospheric, boolean boundary, int setId) {
+            this.wx = wx; this.wy = wy; this.wz = wz;
+            this.atmospheric = atmospheric; this.boundary = boundary; this.setId = setId;
         }
     }
 

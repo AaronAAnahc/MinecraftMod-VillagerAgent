@@ -1,5 +1,7 @@
 # VillagerAgent 视觉模块设计草案（v2）
 
+> ⚠️ **本文档部分内容已过时（设计草案，非当前实现）**：大气判定原案为"通天列 OR 长串空气占比"，与 2026-08-16 实际代码**不完全一致**——当前 `BuildingLocator` 的大气判定 = `skyOpen ∪ longRun`（两条独立测试 OR）：`skyOpen`=竖直列通天，`longRun`=某轴**双向严格大于 `AIR_RUN=16`** 的连续空气。`longRun`/`computeBigAir`/`growBigAir` 均保留，但 `AIR_RUN` 由 12→16 且改双向严格，使普通封闭房间不再被误判为大气。以 `bed_room_search_implementation.md` / `building_detection_implementation.md` 为准。
+
 > 目标：把现有 `VillagerVisionSystem`（随机采样 → 一段文字 → 注入 LLM）升级为**分层感知**系统：
 > 远景靠 **chunk 内容记忆**、中景靠 **建筑结构识别**、近景靠 **视锥体精扫**。
 > 核心约束（沿用 `building_perception_design.md`）：**不引入额外神经网络/模型**，所有"检测"在 Java/模组侧用确定性几何算法完成，产物为结构化文本/JSON 喂给 LLM。

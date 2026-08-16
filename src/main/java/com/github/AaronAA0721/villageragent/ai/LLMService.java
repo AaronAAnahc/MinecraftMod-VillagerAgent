@@ -24,7 +24,31 @@ import java.util.concurrent.Executors;
 public class LLMService {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final ExecutorService executor = Executors.newFixedThreadPool(4);
-    
+
+    /**
+     * Sentinel prefix marking a SEMANTIC failure (API error / timeout / circuit open / no key).
+     * Downstream code MUST treat any string starting with this prefix as a failure and never
+     * broadcast it as villager speech — this is the P0 fix for "API down -> villager reads the
+     * error text to the player".
+     */
+    public static final String FAILURE_PREFIX = "\u0000LLM_FAIL\u0000";
+
+    /** Wrap a failure reason in the sentinel marker. */
+    public static String fail(String reason) {
+        return FAILURE_PREFIX + (reason == null ? "unknown" : reason);
+    }
+
+    /** True if the LLM response is a semantic failure marker rather than real content. */
+    public static boolean isFailure(String response) {
+        return response != null && response.startsWith(FAILURE_PREFIX);
+    }
+
+    /** Extract the failure reason (without the prefix), or null if not a failure. */
+    public static String failureReason(String response) {
+        if (!isFailure(response)) return null;
+        return response.substring(FAILURE_PREFIX.length());
+    }
+
     public static CompletableFuture<String> queryLLM(String systemPrompt, String userPrompt) {
         return CompletableFuture.supplyAsync(() -> {
             try {
@@ -40,11 +64,11 @@ public class LLMService {
                     return queryGemini(systemPrompt, userPrompt);
                 } else {
                     LOGGER.warn("Unknown LLM API type: " + apiType);
-                    return "I cannot respond right now.";
+                    return fail("unknown-api:" + apiType);
                 }
             } catch (Exception e) {
                 LOGGER.error("Error querying LLM: ", e);
-                return "I'm having trouble thinking right now.";
+                return fail("exception:" + e.getClass().getSimpleName());
             }
         }, executor);
     }
@@ -63,7 +87,7 @@ public class LLMService {
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("OpenAI API key is empty!");
-            return "I need an API key to think.";
+            return fail("no-api-key");
         }
 
         URL url = new URL(apiUrl);
@@ -137,7 +161,7 @@ public class LLMService {
             }
             LOGGER.debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("OpenAI API error " + responseCode + ": " + errorResponse.toString());
-            return "I'm having trouble connecting to my thoughts. (Error: " + responseCode + ")";
+            return fail("http-" + responseCode);
         }
     }
     
@@ -155,7 +179,7 @@ public class LLMService {
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("Anthropic API key is empty!");
-            return "I need an API key to think.";
+            return fail("no-api-key");
         }
 
         URL url = new URL(apiUrl);
@@ -224,7 +248,7 @@ public class LLMService {
             }
             LOGGER.debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Anthropic API error " + responseCode + ": " + errorResponse.toString());
-            return "I'm having trouble connecting to my thoughts. (Error: " + responseCode + ")";
+            return fail("http-" + responseCode);
         }
     }
 
@@ -300,7 +324,7 @@ public class LLMService {
             }
             LOGGER.debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Ollama API error " + responseCode + ": " + errorResponse.toString());
-            return "I'm having trouble connecting to my thoughts. (Error: " + responseCode + ")";
+            return fail("http-" + responseCode);
         }
     }
 
@@ -323,7 +347,7 @@ public class LLMService {
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("Gemini API key is empty!");
-            return "I need an API key to think.";
+            return fail("no-api-key");
         }
 
         // Append API key to URL
@@ -413,7 +437,7 @@ public class LLMService {
             }
             LOGGER.debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Gemini API error " + responseCode + ": " + errorResponse.toString());
-            return "I'm having trouble connecting to my thoughts. (Error: " + responseCode + ")";
+            return fail("http-" + responseCode);
         }
     }
 }

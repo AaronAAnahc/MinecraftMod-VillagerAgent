@@ -44,6 +44,8 @@ public class VillagerAction {
     private BlockPos targetBlockPos; // The block the villager is walking toward
     private UUID targetEntityId;    // The entity the villager is targeting (for ATTACK)
     private int stuckTicks;         // How many ticks the villager has been unable to reach target
+    /** True when this action was started by the goal dispatcher (as opposed to the daily schedule). */
+    private boolean goalDriven = false;
 
     // ── World-interaction (PLACE / BREAK / BUILD) fields ──
     /** The legal standing cell the villager must occupy to reach targetBlockPos (Chebyshev <= 1). */
@@ -89,6 +91,9 @@ public class VillagerAction {
     public int getStuckTicks() { return stuckTicks; }
     public void incrementStuckTicks() { this.stuckTicks++; }
     public void resetStuckTicks() { this.stuckTicks = 0; }
+
+    public boolean isGoalDriven() { return goalDriven; }
+    public void setGoalDriven(boolean goalDriven) { this.goalDriven = goalDriven; }
 
     // ── World-interaction accessors ──
     public BlockPos getStandCell() { return standCell; }

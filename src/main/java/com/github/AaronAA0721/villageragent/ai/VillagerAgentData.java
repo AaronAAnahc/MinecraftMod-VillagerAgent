@@ -1,5 +1,7 @@
 package com.github.AaronAA0721.villageragent.ai;
 
+import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
+import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
 import com.github.AaronAA0721.villageragent.ai.memory.ChunkFeature;
 import com.github.AaronAA0721.villageragent.ai.memory.ChunkMemory;
 import com.github.AaronAA0721.villageragent.ai.memory.ChunkTag;
@@ -9,6 +11,8 @@ import com.github.AaronAA0721.villageragent.ai.world.BuildingRecord;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.merchant.villager.VillagerEntity;
+import net.minecraft.inventory.EquipmentSlotType;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.CompoundNBT;
 import net.minecraft.nbt.ListNBT;
@@ -57,6 +61,9 @@ public class VillagerAgentData {
     private List<String> memories;
     private Map<String, Integer> relationships; // villager UUID -> relationship score
     private List<AgentGoal> goals;
+    private List<LongTermAgenda> agendas;
+    /** Player UUID -> reputation with this villager (-100..100). Drives debt/duty accountability. */
+    private final Map<UUID, Integer> playerReputation = new HashMap<>();
     private AgentInventory inventory;
     private Map<String, Object> preferences; // trading preferences, item values, etc.
     private long lastThinkTime;
@@ -87,6 +94,10 @@ public class VillagerAgentData {
     private long lastSocialTick = -6001L;
     /** The activity the daily schedule intends this villager to do right now. */
     private String scheduledActivity = null;
+
+    // ── Goals lifecycle ──
+    /** The Minecraft day (gameTime / 24000) when goals were last pruned / fallback-generated. */
+    private long lastGoalPruneDay = -1L;
 
     // ── Needs system ──
     /** Current hunger level (0 = starving, 100 = full). Starts full. */
@@ -159,6 +170,7 @@ public class VillagerAgentData {
         this.memories = new ArrayList<>();
         this.relationships = new HashMap<>();
         this.goals = new ArrayList<>();
+        this.agendas = new ArrayList<>();
         this.inventory = new AgentInventory();
         this.preferences = new HashMap<>();
         this.lastThinkTime = 0;
@@ -351,6 +363,8 @@ public class VillagerAgentData {
     public List<String> getMemories() { return memories; }
     public Map<String, Integer> getRelationships() { return relationships; }
     public List<AgentGoal> getGoals() { return goals; }
+    public List<LongTermAgenda> getAgendas() { return agendas; }
+    public Map<UUID, Integer> getPlayerReputation() { return playerReputation; }
     public AgentInventory getInventory() { return inventory; }
     public Map<String, Object> getPreferences() { return preferences; }
     public long getLastThinkTime() { return lastThinkTime; }
@@ -399,6 +413,9 @@ public class VillagerAgentData {
     public void setLastSocialTick(long tick) { this.lastSocialTick = tick; }
     public String getScheduledActivity() { return scheduledActivity; }
     public void setScheduledActivity(String activity) { this.scheduledActivity = activity; }
+
+    public long getLastGoalPruneDay() { return lastGoalPruneDay; }
+    public void setLastGoalPruneDay(long day) { this.lastGoalPruneDay = day; }
 
     // ── Needs system accessors ──
     public float getHunger() { return hunger; }
@@ -578,7 +595,7 @@ public class VillagerAgentData {
                 int removeCount = Math.min(count, memories.size());
                 memories.subList(0, removeCount).clear();
                 // Prepend the summary so it reads as "old context" at the front
-                if (summary != null && !summary.trim().isEmpty()) {
+                if (summary != null && !summary.trim().isEmpty() && !LLMService.isFailure(summary)) {
                     memories.add(0, "[Summary of earlier memories] " + summary.trim());
                 }
             }
@@ -659,13 +676,8 @@ public class VillagerAgentData {
         // Set memories
         request.setMemories(new java.util.ArrayList<>(memories));
 
-        // Set available recipes for this profession
-        java.util.List<CraftingRecipe> profRecipes = RecipeRegistry.getRecipesForProfession(profession);
-        java.util.List<String> recipeNames = new java.util.ArrayList<>();
-        for (CraftingRecipe recipe : profRecipes) {
-            recipeNames.add(recipe.getName() + " (requires: " + recipe.getWorkstationType() + ")");
-        }
-        request.setAvailableRecipes(recipeNames);
+        // Set craftable items for this profession (goal-driven catalogue)
+        request.setAvailableRecipes(new java.util.ArrayList<>(ProfessionCraftCatalog.getAllIds(profession)));
 
         // Set available actions
         java.util.List<String> actions = new java.util.ArrayList<>();
@@ -699,7 +711,8 @@ public class VillagerAgentData {
      * @param gameTick      The current world game tick (used for timestamping)
      * @return CompletableFuture with the villager's response
      */
-    public CompletableFuture<String> generateChatResponse(String playerName, String playerMessage, long gameTick) {
+    public CompletableFuture<String> generateChatResponse(String playerName, String playerMessage, long gameTick,
+                                                          VillagerEntity entity, UUID playerUuid) {
         // Prune stale entries before building the prompt
         pruneExpiredConversations(gameTick);
 
@@ -711,21 +724,38 @@ public class VillagerAgentData {
                 .append("Your personality: ").append(personality).append(". ")
                 .append("Respond in character as this villager. Keep responses short (1-2 sentences). ")
                 .append("Be friendly but stay in character. Don't break the fourth wall. ")
-                .append("Your responses should reflect your profession - for example, a Farmer talks about crops, ")
-                .append("a Librarian about books, a Blacksmith about tools and armor. ")
+                .append("Your profession shapes your skills and interests, but it does NOT determine what you own or trade. ")
+                .append("Never claim you lack an item just because of your profession — always check your inventory. ")
                 .append("You remember conversations from today. If the player refers to something said earlier, ")
-                .append("use the conversation history below to give a consistent, contextual reply.");
+                .append("use the conversation history below to give a consistent, contextual reply. ")
+                .append("If the player asks whether you have an item, or wants to buy or trade something, ")
+                .append("answer strictly from your ACTUAL inventory: if it is there, say so and discuss a deal; ")
+                .append("if it is not, say you do not have it. Never guess from your profession. ");
 
-        // Inject the latest environment snapshot so the LLM can reference surroundings naturally.
-        if (lastEnvironmentSummary != null && !lastEnvironmentSummary.isEmpty()) {
-            systemPromptBuilder.append(" Current environment around you: ").append(lastEnvironmentSummary);
+        // Inject the craftable catalog + the TODO directive protocol so the villager can turn
+        // conversation into executable goals (craft / move / gather / socialize / trade).
+        java.util.List<String> craftable = ProfessionCraftCatalog.getAllIds(profession);
+        if (!craftable.isEmpty()) {
+            systemPromptBuilder.append(" As a ").append(profession)
+                    .append(", you are ABLE TO CRAFT the following (this is a CRAFTING CAPABILITY only, ")
+                    .append("NOT what you currently hold): ").append(String.join(", ", craftable)).append(". ");
+            systemPromptBuilder.append("If you decide to act — now, or as a task to remember — append one or more "
+                    + "lines starting with TODO: (each on its own line): ")
+                    .append("TODO: craft minecraft:<item_id> x<qty>  |  TODO: move <x> <y> <z>  |  "
+                            + "TODO: gather minecraft:<item> x<n>  |  TODO: goto house  |  TODO: goto cave_house  |  "
+                            + "TODO: socialize  |  TODO: trade villager <profession-or-any>  |  "
+                            + "TODO: converse player <uuid>  |  TODO: converse villager <profession-or-any> . ")
+                    .append("Use the exact minecraft:<id> form for items you can make. ")
+                    .append("To go to a nearby building, use TODO: goto <type> where <type> is one of the building "
+                            + "types you see in your environment (e.g. house, cave_house) or just 'building'. ")
+                    .append("These TODO lines are hidden from the player, so write your spoken reply first, "
+                            + "then the TODO lines.");
         }
 
-        // Inject current needs state (hunger/fatigue) so the LLM reflects physical condition.
-        String needsDesc = VillagerNeedsSystem.buildNeedsDescription(this);
-        if (!needsDesc.isEmpty()) {
-            systemPromptBuilder.append(" ").append(needsDesc);
-        }
+        // Centralised, ground-truth snapshot of the villager's full current state.
+        // One method = one source of truth, so future state fields can't accidentally
+        // be left out of the prompt the way the backpack once was.
+        systemPromptBuilder.append(" ").append(buildVillagerStateBlock(entity, playerName, playerUuid));
 
         String systemPrompt = systemPromptBuilder.toString();
 
@@ -760,8 +790,15 @@ public class VillagerAgentData {
         }
 
         final long tick = gameTick; // capture for lambda
-        return LLMService.queryLLM(systemPrompt, userPrompt)
+        UUID id = getVillagerId();
+        return LLMGuard.query(id, tick, systemPrompt, userPrompt)
                 .thenApply(response -> {
+                    // P0 fix: a failure sentinel is never the villager's actual speech.
+                    if (LLMService.isFailure(response)) {
+                        DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response, "failure");
+                        return "Hmm... I seem to have lost my train of thought.";
+                    }
+                    DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response, "ok");
                     // Store both sides of the exchange with the current game tick
                     addConversation(playerName + ": " + (playerMessage != null ? playerMessage : "[greeting]"), tick);
                     addConversation(name + ": " + response, tick);
@@ -771,6 +808,178 @@ public class VillagerAgentData {
                     LOGGER.error("Error generating chat response: " + e.getMessage());
                     return "Hmm... I seem to have lost my train of thought.";
                 });
+    }
+
+    /**
+     * Render the villager's ACTUAL inventory (what it truly holds right now) for the chat
+     * prompt. Mirrors {@code TradeRequestPacket.buildInventoryDescription} but items-only,
+     * since the chat path has no {@link VillagerEntity} reference for equipped armor.
+     * This is the ground-truth the LLM must use instead of guessing from its profession.
+     */
+    private String buildInventoryDescription() {
+        java.util.Map<String, Integer> itemCounts = new java.util.HashMap<>();
+        for (net.minecraft.item.ItemStack stack : inventory.getItems()) {
+            if (!stack.isEmpty()) {
+                String regName = stack.getItem().getRegistryName().toString();
+                if (regName.contains(":")) regName = regName.substring(regName.indexOf(":") + 1);
+                regName = regName.replace("_", " ");
+                itemCounts.merge(regName, stack.getCount(), Integer::sum);
+            }
+        }
+        if (itemCounts.isEmpty()) {
+            return "Your inventory is currently EMPTY - you are not holding any items right now.";
+        }
+        StringBuilder sb = new StringBuilder(
+                "Your ACTUAL inventory (GROUND TRUTH — the ONLY items you physically hold, regardless of your profession): ");
+        boolean first = true;
+        for (java.util.Map.Entry<String, Integer> entry : itemCounts.entrySet()) {
+            if (!first) sb.append(", ");
+            sb.append(entry.getValue()).append("x ").append(entry.getKey());
+            first = false;
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Single source of truth for "what is the villager's current state" — rendered once and
+     * injected into the chat system prompt. Every piece of villager-related context the LLM
+     * should know lives here, so adding new state means editing ONE method instead of hunting
+     * through scattered append() calls (the gap that let the backpack go untransmitted before).
+     *
+     * @param entity     the live entity (may be null); supplies armor, profession level, health, location
+     * @param playerName the player currently talking (for the familiarity line)
+     * @param playerUuid the player's UUID (for the greet-count lookup)
+     */
+    private String buildVillagerStateBlock(VillagerEntity entity, String playerName, UUID playerUuid) {
+        StringBuilder sb = new StringBuilder();
+
+        // Profession level (lives on the entity, not the data bag)
+        if (entity != null) {
+            int lvl = entity.getVillagerData().getLevel();
+            sb.append("Profession level: ").append(lvl).append(" (").append(levelName(lvl)).append("). ");
+        }
+
+        // Mood + hunger/fatigue (buildNeedsDescription already folds mood in)
+        String needs = VillagerNeedsSystem.buildNeedsDescription(this);
+        if (!needs.isEmpty()) sb.append(needs).append(" ");
+
+        // What the villager is doing right now
+        if (currentActivity != null && !currentActivity.isEmpty()) {
+            sb.append("Right now you are ").append(currentActivity.toLowerCase()).append(". ");
+        }
+        if (currentAction != null && currentAction.getActionType() != VillagerAction.ActionType.UNKNOWN) {
+            sb.append("Your current action: ").append(currentAction.getActionType().name().toLowerCase()).append(". ");
+        }
+
+        // ACTUAL inventory (ground truth, not profession stereotype)
+        sb.append(buildInventoryDescription()).append(" ");
+
+        // Equipped armor / gear (lives on the entity, NOT in AgentInventory)
+        if (entity != null) {
+            sb.append(describeEquipment(entity)).append(" ");
+        }
+
+        // Current goals / objectives (by importance, capped)
+        if (goals != null && !goals.isEmpty()) {
+            List<AgentGoal> active = new ArrayList<>();
+            for (AgentGoal g : goals) if (!g.isCompleted()) active.add(g);
+            active.sort((a, b) -> Integer.compare(b.getImportance(), a.getImportance()));
+            if (!active.isEmpty()) {
+                sb.append("Your current goals (by importance): ");
+                int n = Math.min(active.size(), 6);
+                for (int i = 0; i < n; i++) {
+                    AgentGoal g = active.get(i);
+                    sb.append(g.getDescription());
+                    if (g.getTargetItem() != null) sb.append(" (target: ").append(g.getTargetItem()).append(")");
+                    sb.append("; ");
+                }
+                sb.append(" ");
+            }
+        }
+
+        // Long-term commitments (persistent intentions: debts, deals, acquisitions).
+        // Unlike goals, these stay until resolved and are re-expressed as todos by reflection.
+        if (agendas != null && !agendas.isEmpty()) {
+            List<LongTermAgenda> active = new ArrayList<>();
+            for (LongTermAgenda a : agendas) if (!a.isResolved()) active.add(a);
+            if (!active.isEmpty()) {
+                sb.append("Your long-term commitments (persistent, keep these in mind): ");
+                int n = Math.min(active.size(), 8);
+                for (int i = 0; i < n; i++) {
+                    sb.append(active.get(i).describe()).append("; ");
+                }
+                sb.append(" ");
+            }
+        }
+
+        // Today's plan
+        if (scheduledActivity != null && !scheduledActivity.isEmpty()) {
+            sb.append("Your scheduled activity right now: ").append(scheduledActivity).append(". ");
+        } else if (dailySchedule != null) {
+            sb.append("You have a daily schedule planned. ");
+        }
+
+        // Active build job
+        if (currentBuildJob != null && !currentBuildJob.isComplete()) {
+            sb.append("You are building project '").append(currentBuildJob.getName())
+              .append("' (").append(currentBuildJob.getCursor()).append("/")
+              .append(currentBuildJob.getTotal()).append(" blocks placed). ");
+        }
+
+        // Familiarity with THIS player
+        if (playerUuid != null) {
+            Integer seen = greetCount.get(playerUuid);
+            int n = (seen == null) ? 0 : seen;
+            String fam = n == 0 ? "you have never met before"
+                        : n <= 2 ? "you have met a few times"
+                        : "you know them fairly well";
+            sb.append("Your relationship with this player (").append(playerName)
+              .append("): ").append(fam).append(". ");
+        }
+
+        // Location (cheap grounding)
+        if (entity != null) {
+            BlockPos p = entity.blockPosition();
+            sb.append("Your location: x=").append(p.getX()).append(", y=").append(p.getY())
+              .append(", z=").append(p.getZ()).append(". ");
+        }
+
+        // Environment snapshot (refreshed each chat by ChatMessagePacket)
+        if (lastEnvironmentSummary != null && !lastEnvironmentSummary.isEmpty()) {
+            sb.append("Environment around you: ").append(lastEnvironmentSummary).append(" ");
+        }
+
+        return sb.toString().trim();
+    }
+
+    private static String levelName(int level) {
+        switch (level) {
+            case 1: return "Novice";
+            case 2: return "Apprentice";
+            case 3: return "Journeyman";
+            case 4: return "Expert";
+            case 5: return "Master";
+            default: return "Novice";
+        }
+    }
+
+    private static String describeEquipment(VillagerEntity entity) {
+        EquipmentSlotType[] slots = {
+            EquipmentSlotType.HEAD, EquipmentSlotType.CHEST, EquipmentSlotType.LEGS,
+            EquipmentSlotType.FEET, EquipmentSlotType.MAINHAND, EquipmentSlotType.OFFHAND
+        };
+        List<String> parts = new ArrayList<>();
+        for (EquipmentSlotType slot : slots) {
+            ItemStack stack = entity.getItemBySlot(slot);
+            if (stack != null && !stack.isEmpty()) {
+                String reg = stack.getItem().getRegistryName().toString();
+                if (reg.contains(":")) reg = reg.substring(reg.indexOf(":") + 1);
+                reg = reg.replace("_", " ");
+                parts.add(reg + " (" + slot.name().toLowerCase() + ")");
+            }
+        }
+        if (parts.isEmpty()) return "You are not wearing any armor or holding any gear.";
+        return "You are equipped with: " + String.join(", ", parts) + ".";
     }
 
     // NBT serialization for saving/loading
@@ -821,6 +1030,64 @@ public class VillagerAgentData {
         if (currentBuildJob != null) {
             nbt.put("BuildJob", currentBuildJob.writeNBT());
         }
+
+        // ── Relationship graph: other villager UUID (string) -> affinity score ──
+        // Without this, every restart wipes inter-villager relationships (gossip ±2, etc.).
+        if (!relationships.isEmpty()) {
+            ListNBT relList = new ListNBT();
+            for (Map.Entry<String, Integer> e : relationships.entrySet()) {
+                CompoundNBT relNBT = new CompoundNBT();
+                relNBT.putString("Id", e.getKey());
+                relNBT.putInt("Score", e.getValue());
+                relList.add(relNBT);
+            }
+            nbt.put("Relationships", relList);
+        }
+
+        // ── Greeting familiarity per player: UUID -> last greeted tick / greet count ──
+        // Without this, villagers "forget" they already greeted a player after a restart.
+        if (!lastGreetedPlayer.isEmpty()) {
+            ListNBT greetList = new ListNBT();
+            for (Map.Entry<UUID, Long> e : lastGreetedPlayer.entrySet()) {
+                CompoundNBT gNBT = new CompoundNBT();
+                gNBT.putUUID("Player", e.getKey());
+                gNBT.putLong("Tick", e.getValue());
+                greetList.add(gNBT);
+            }
+            nbt.put("LastGreetedPlayer", greetList);
+        }
+        if (!greetCount.isEmpty()) {
+            ListNBT countList = new ListNBT();
+            for (Map.Entry<UUID, Integer> e : greetCount.entrySet()) {
+                CompoundNBT cNBT = new CompoundNBT();
+                cNBT.putUUID("Player", e.getKey());
+                cNBT.putInt("Count", e.getValue());
+                countList.add(cNBT);
+            }
+            nbt.put("GreetCount", countList);
+        }
+
+        // ── Long-term agendas (persistent intentions: debts, deals, acquisitions) ──
+        if (!agendas.isEmpty()) {
+            ListNBT agendaList = new ListNBT();
+            for (LongTermAgenda a : agendas) agendaList.add(a.writeNBT());
+            nbt.put("Agendas", agendaList);
+        }
+
+        // ── Player reputation: UUID -> affinity score ──
+        if (!playerReputation.isEmpty()) {
+            ListNBT repList = new ListNBT();
+            for (Map.Entry<UUID, Integer> e : playerReputation.entrySet()) {
+                CompoundNBT repNBT = new CompoundNBT();
+                repNBT.putUUID("Player", e.getKey());
+                repNBT.putInt("Score", e.getValue());
+                repList.add(repNBT);
+            }
+            nbt.put("PlayerReputation", repList);
+        }
+
+        // ── Current mood (derived from needs; cheap to restore, avoids a NEUTRAL flicker) ──
+        nbt.putInt("Mood", mood.ordinal());
 
         return nbt;
     }
@@ -887,6 +1154,64 @@ public class VillagerAgentData {
             } catch (Exception e) {
                 LOGGER.warn("Failed to load BuildJob from NBT: " + e.getMessage());
                 currentBuildJob = null;
+            }
+        }
+
+        // ── Relationship graph ──
+        relationships.clear();
+        if (nbt.contains("Relationships")) {
+            ListNBT relList = nbt.getList("Relationships", 10);
+            for (int i = 0; i < relList.size(); i++) {
+                CompoundNBT relNBT = relList.getCompound(i);
+                relationships.put(relNBT.getString("Id"), relNBT.getInt("Score"));
+            }
+        }
+
+        // ── Greeting familiarity per player ──
+        lastGreetedPlayer.clear();
+        if (nbt.contains("LastGreetedPlayer")) {
+            ListNBT greetList = nbt.getList("LastGreetedPlayer", 10);
+            for (int i = 0; i < greetList.size(); i++) {
+                CompoundNBT gNBT = greetList.getCompound(i);
+                lastGreetedPlayer.put(gNBT.getUUID("Player"), gNBT.getLong("Tick"));
+            }
+        }
+        greetCount.clear();
+        if (nbt.contains("GreetCount")) {
+            ListNBT countList = nbt.getList("GreetCount", 10);
+            for (int i = 0; i < countList.size(); i++) {
+                CompoundNBT cNBT = countList.getCompound(i);
+                greetCount.put(cNBT.getUUID("Player"), cNBT.getInt("Count"));
+            }
+        }
+
+        // ── Mood ──
+        if (nbt.contains("Mood")) {
+            int ord = nbt.getInt("Mood");
+            Mood[] vals = Mood.values();
+            mood = (ord >= 0 && ord < vals.length) ? vals[ord] : Mood.NEUTRAL;
+        }
+
+        // ── Long-term agendas ──
+        agendas.clear();
+        if (nbt.contains("Agendas")) {
+            ListNBT agendaList = nbt.getList("Agendas", 10);
+            for (int i = 0; i < agendaList.size(); i++) {
+                try {
+                    agendas.add(LongTermAgenda.fromNBT(agendaList.getCompound(i)));
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to load LongTermAgenda from NBT: " + e.getMessage());
+                }
+            }
+        }
+
+        // ── Player reputation ──
+        playerReputation.clear();
+        if (nbt.contains("PlayerReputation")) {
+            ListNBT repList = nbt.getList("PlayerReputation", 10);
+            for (int i = 0; i < repList.size(); i++) {
+                CompoundNBT repNBT = repList.getCompound(i);
+                playerReputation.put(repNBT.getUUID("Player"), repNBT.getInt("Score"));
             }
         }
     }

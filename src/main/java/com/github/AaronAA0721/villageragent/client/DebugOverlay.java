@@ -143,16 +143,28 @@ public final class DebugOverlay {
         }
 
         if (ModConfig.DEBUG_SHOW_SEEDS.get()) {
-            // Distance-field seeds (regional-maximum plateaus). Interior / room-candidate seeds are
-            // yellow; atmosphere seeds are magenta — so the debug view shows where the watershed
-            // thinks room-centres vs open-air centres are.
+            // Seed markers: a cross at the centre of the seed block. Interior / room-candidate seeds
+            // are yellow; atmosphere (front-start ring) seeds are magenta.
             for (DebugDataPacket.SeedPoint sp : p.seeds) {
                 float[] col = sp.interior
                         ? new float[]{1.0F, 0.85F, 0.0F}   // yellow  — room-candidate seed
-                        : new float[]{1.0F, 0.20F, 0.80F};  // magenta — atmosphere seed
-                addBox(b, sp.pos.getX(), sp.pos.getY(), sp.pos.getZ(),
-                        sp.pos.getX() + 1, sp.pos.getY() + 1, sp.pos.getZ() + 1,
-                        col[0], col[1], col[2], 0.95F);
+                        : new float[]{1.0F, 0.20F, 0.80F};  // magenta — atmosphere (front) seed
+                double cx = sp.pos.getX() + 0.5, cy = sp.pos.getY() + 0.5, cz = sp.pos.getZ() + 0.5;
+                addCross(b, cx, cy, cz, 0.45, col[0], col[1], col[2], 1.0F);
+            }
+        }
+
+        if (ModConfig.DEBUG_SHOW_FIELD.get()) {
+            // Full watershed collection field. Each non-atmospheric collection gets a distinct colour
+            // from the palette; the atmospheric collection is uniform cyan; boundaries are white.
+            for (DebugDataPacket.FieldCell fc : p.field) {
+                float[] col;
+                if (fc.boundary())          col = new float[]{1.0F, 1.0F, 1.0F};        // white  — boundary
+                else if (fc.atmospheric())   col = new float[]{0.0F, 0.85F, 0.95F};     // cyan   — atmosphere
+                else                         col = palette(fc.setId());                 // per-collection hue
+                double x0 = fc.wx + 0.08, y0 = fc.wy + 0.08, z0 = fc.wz + 0.08;
+                double x1 = fc.wx + 0.92, y1 = fc.wy + 0.92, z1 = fc.wz + 0.92;
+                addBox(b, x0, y0, z0, x1, y1, z1, col[0], col[1], col[2], 0.35F);
             }
         }
 
@@ -178,6 +190,27 @@ public final class DebugOverlay {
             b.vertex(cx[e[0]], cy[e[1]], cz[e[2]]).color(r, g, bl, a).endVertex();
             b.vertex(cx[e[3]], cy[e[4]], cz[e[5]]).color(r, g, bl, a).endVertex();
         }
+    }
+
+    /** Draw a small 3-axis cross centred at (cx,cy,cz) — used to mark a seed block. */
+    private static void addCross(BufferBuilder b, double cx, double cy, double cz, double r,
+                                 float cr, float cg, float cb, float ca) {
+        b.vertex(cx - r, cy, cz).color(cr, cg, cb, ca).endVertex();
+        b.vertex(cx + r, cy, cz).color(cr, cg, cb, ca).endVertex();
+        b.vertex(cx, cy - r, cz).color(cr, cg, cb, ca).endVertex();
+        b.vertex(cx, cy + r, cz).color(cr, cg, cb, ca).endVertex();
+        b.vertex(cx, cy, cz - r).color(cr, cg, cb, ca).endVertex();
+        b.vertex(cx, cy, cz + r).color(cr, cg, cb, ca).endVertex();
+    }
+
+    /** Distinct, deterministic colour per collection id (used for watershed sets). */
+    private static final float[][] PALETTE = {
+            {1.0F, 0.45F, 0.45F}, {0.45F, 1.0F, 0.45F}, {0.45F, 0.65F, 1.0F},
+            {1.0F, 1.0F, 0.45F},  {1.0F, 0.45F, 1.0F},  {0.45F, 1.0F, 1.0F},
+            {1.0F, 0.70F, 0.40F}, {0.70F, 0.45F, 1.0F}
+    };
+    private static float[] palette(int id) {
+        return PALETTE[Math.abs(id) % PALETTE.length];
     }
 
     private static float[] colorForType(String type) {

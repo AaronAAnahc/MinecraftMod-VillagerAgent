@@ -1,5 +1,7 @@
 # VillagerAgent 视觉模块实现总结（v3 → v4 床判定重写）
 
+> ⚠️ **大气判定章节已过时**：本文 Step 4 仍写"通天格 OR 大气方块占比(`AIR_RUN=4`)"，与 2026-08-16 实际代码不符——当前大气 = `skyOpen ∪ longRun`（两条独立测试 OR）：`skyOpen`=竖直列通天，`longRun`=某轴**双向严格大于 `AIR_RUN=16`** 的连续空气。`longRun`/`computeBigAir`/`growBigAir` 均保留，但 `AIR_RUN` 由 12→16 且改双向严格。以 `bed_room_search_implementation.md` / `building_detection_implementation.md` 为准。
+
 > 配套文档：`vision_module_design.md`（设计草案）。
 > 本文记录**已落地的代码**、如何接线、编译状态，以及剩余待办。
 > 状态：**基础层 + 近景实时精扫 + v4 床判定（距离场+分水岭）已实现，并通过 `compileJava` 干净编译（0 error；仅 1 处 `hasChunksAt` 弃用告警）**。
