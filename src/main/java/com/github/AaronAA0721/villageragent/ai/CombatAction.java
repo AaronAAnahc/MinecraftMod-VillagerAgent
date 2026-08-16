@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.ai.attributes.Attributes;
 import net.minecraft.entity.MobEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.monster.*;
@@ -153,15 +154,6 @@ public class CombatAction {
     }
 
     /**
-     * Scan the entire inventory for the best weapon (highest damage) and return its damage.
-     * Considers swords, axes, and other tool items (pickaxes, shovels, hoes).
-     * Also equips the best weapon in the villager's main hand so it is visually displayed.
-     */
-    private static float calculateDamage(VillagerAgentData agent) {
-        return findBestWeaponDamage(agent, null);
-    }
-
-    /**
      * Scan the entire inventory for the best weapon. If a villager entity is provided,
      * equip the best weapon in its main hand for visual display.
      *
@@ -198,6 +190,70 @@ public class CombatAction {
         }
 
         return bestDamage;
+    }
+
+    // ── Combat decision: time-to-kill (TTK) + rally ─────────────────────────
+    // A villager fights when it can kill the threat faster than the threat can kill it
+    // (time to kill = hits needed × interval). If it would lose, it flees and shouts for
+    // help — VillageSignalBoard records how many villagers answered the call so a group that
+    // individually cannot win can mob the threat together ("strength in numbers" as an
+    // emergent rally, not a hard-coded per-villager check).
+
+    /** How far (blocks) a villager backs off per flee step. */
+    public static final double FLEE_DISTANCE = 6.0;
+
+    /** Once this far (blocks) from the threat, a fleeing villager holds its ground instead of
+     *  running forever — it keeps shouting for help and can turn to charge when others arrive. */
+    public static final double FLEE_HOLD_DIST = 7.0;
+
+    /** A chasing villager gives up if the target gets this far (blocks) away. Larger than the
+     *  rally radius so villagers charging a rally can run in from a distance. */
+    public static final double CHASE_MAX_DIST = 24.0;
+
+    /** Vanilla melee mobs swing roughly once a second. Their ATTACK_SPEED attribute is a
+     *  player-centric stat, so we estimate a fixed interval rather than misreading it. */
+    private static final double MOB_ATTACK_INTERVAL_TICKS = 20.0;
+
+    /** Villager's damage per second (best weapon — or bare hands — × attacks/sec on
+     *  {@link #ATTACK_COOLDOWN_TICKS}). */
+    public static double villagerDps(VillagerAgentData agent) {
+        float damagePerHit = findBestWeaponDamage(agent, null); // BASE_DAMAGE if unarmed
+        double attacksPerSecond = 20.0 / ATTACK_COOLDOWN_TICKS;
+        return damagePerHit * attacksPerSecond;
+    }
+
+    /** Threat's estimated damage per second (attack damage × ~1 swing/sec). */
+    public static double threatDps(LivingEntity threat) {
+        double damage = 1.0;
+        if (threat.getAttribute(Attributes.ATTACK_DAMAGE) != null) {
+            damage = threat.getAttribute(Attributes.ATTACK_DAMAGE).getValue();
+        }
+        return Math.max(0.0, damage) * (20.0 / MOB_ATTACK_INTERVAL_TICKS);
+    }
+
+    /**
+     * Time-to-kill comparison: fight only if the time to kill the threat is strictly less than
+     * the time for the threat to kill the villager.
+     */
+    public static boolean wouldWinSolo(VillagerEntity villager, VillagerAgentData agent, LivingEntity threat) {
+        double myDps = villagerDps(agent);
+        double tDps = threatDps(threat);
+        if (tDps <= 0.0) return true;  // threat can't hurt us → free win
+        if (myDps <= 0.0) return false;
+        double myTimeToKill = threat.getHealth() / myDps;
+        double threatTimeToKill = villager.getHealth() / tDps;
+        return myTimeToKill < threatTimeToKill;
+    }
+
+    /** Panic-flee: run directly away from the threat by {@link #FLEE_DISTANCE} blocks. */
+    public static void flee(VillagerEntity villager, LivingEntity threat) {
+        double dx = villager.getX() - threat.getX();
+        double dz = villager.getZ() - threat.getZ();
+        double len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 1e-3) { dx = 1.0; dz = 0.0; len = 1.0; }
+        double nx = villager.getX() + (dx / len) * FLEE_DISTANCE;
+        double nz = villager.getZ() + (dz / len) * FLEE_DISTANCE;
+        villager.getNavigation().moveTo(nx, villager.getY(), nz, 0.5);
     }
 
     /**

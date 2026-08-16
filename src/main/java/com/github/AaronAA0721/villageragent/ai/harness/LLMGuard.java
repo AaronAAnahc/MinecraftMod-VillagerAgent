@@ -76,11 +76,13 @@ public final class LLMGuard {
      */
     public static CompletableFuture<String> query(UUID villagerId, long gameTick, String system, String user) {
         if (!ModConfig.HARNESS_ENABLED.get()) {
-            // Harness disabled — behave exactly as before.
+            // Harness disabled — behave exactly as before, but still log the call.
+            LOGGER.debug("[LLMGuard] harness disabled; calling LLM directly for {}", villagerId);
             return LLMService.queryLLM(system, user);
         }
 
         if (isCircuitOpen(villagerId, gameTick)) {
+            LOGGER.info("[LLMGuard] circuit OPEN for {} — skipping LLM call (rule-only mode)", villagerId);
             return CompletableFuture.completedFuture(LLMService.fail("circuit-open"));
         }
 
@@ -88,6 +90,7 @@ public final class LLMGuard {
 
         // Manual timeout watchdog (Java 8 compatible).
         long timeoutMs = ModConfig.HARNESS_TIMEOUT_MS.get();
+        LOGGER.debug("[LLMGuard] calling LLM for {} (timeout={}ms, tick={})", villagerId, timeoutMs, gameTick);
         ScheduledFuture<?> watchdog = WATCHDOG.schedule(() -> {
             if (!inner.isDone()) {
                 inner.completeExceptionally(new TimeoutException("llm-timeout:" + timeoutMs + "ms"));
@@ -95,15 +98,27 @@ public final class LLMGuard {
         }, timeoutMs, TimeUnit.MILLISECONDS);
         inner.whenComplete((r, e) -> watchdog.cancel(false));
 
-        // Translate exceptions / semantic failures into a single failure marker and
+        // Translate exceptions / semantic failures into a failure marker and
         // maintain the circuit-breaker counters.
         return inner.handle((result, error) -> {
-            if (error != null || LLMService.isFailure(result)) {
+            if (error != null) {
                 recordFailure(villagerId, gameTick);
-                String reason = (error == null) ? "llm-error" : error.getClass().getSimpleName();
+                String reason = error.getClass().getSimpleName()
+                        + (error.getMessage() != null ? (": " + error.getMessage()) : "");
+                LOGGER.warn("[LLMGuard] LLM call FAILED for {} — {} (tick {})", villagerId, reason, gameTick);
                 return LLMService.fail("guard:" + reason);
             }
+            if (LLMService.isFailure(result)) {
+                // Preserve the inner semantic failure reason (http-401, no-api-key, etc.)
+                // instead of collapsing it into an opaque guard:llm-error.
+                recordFailure(villagerId, gameTick);
+                String innerReason = LLMService.failureReason(result);
+                LOGGER.warn("[LLMGuard] LLM returned failure marker for {} — {} (tick {})",
+                        villagerId, innerReason, gameTick);
+                return result; // keep the original reason intact
+            }
             resetFailures(villagerId);
+            LOGGER.debug("[LLMGuard] LLM OK for {} — {} chars", villagerId, result == null ? 0 : result.length());
             return result;
         });
     }

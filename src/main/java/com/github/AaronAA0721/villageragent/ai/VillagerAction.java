@@ -22,6 +22,7 @@ public class VillagerAction {
         PLACE,          // Place a single block within 1 block of the villager
         BREAK,          // Break a single block within 1 block of the villager
         BUILD,          // Marker: villager is mid-way through a multi-block BuildJob
+        FLEE,           // Flee from a threat while raising a rally alarm (waiting to charge)
         UNKNOWN         // Unknown action from LLM
     }
 

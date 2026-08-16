@@ -44,6 +44,11 @@ public class VillagerAgentCommand {
                 .then(Commands.literal("get")
                     .then(Commands.argument("option", StringArgumentType.word())
                         .executes(VillagerAgentCommand::getConfig)))
+                .then(Commands.literal("settimeout")
+                    .then(Commands.argument("ms", IntegerArgumentType.integer(1000, 120000))
+                        .executes(VillagerAgentCommand::setTimeout)))
+                .then(Commands.literal("gettimeout")
+                    .executes(VillagerAgentCommand::getTimeout))
                 .then(Commands.literal("list")
                     .executes(VillagerAgentCommand::listConfig)))
             .then(Commands.literal("llm")
@@ -112,9 +117,17 @@ public class VillagerAgentCommand {
                 ModConfig.ENABLE_DEBUG_OVERLAY.set(value);
                 optionName = "Debug Overlay";
                 break;
+            case "harness":
+                ModConfig.HARNESS_ENABLED.set(value);
+                optionName = "Decision Harness";
+                break;
+            case "harnessdaily":
+                ModConfig.HARNESS_DRIVE_DAILY_GOAL.set(value);
+                optionName = "Harness Daily Goal";
+                break;
             default:
                 source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Unknown option: " + option), false);
-                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay"), false);
+                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay, harness, harnessdaily"), false);
                 success = false;
         }
         
@@ -158,6 +171,14 @@ public class VillagerAgentCommand {
                 value = ModConfig.ENABLE_DEBUG_OVERLAY.get();
                 optionName = "Debug Overlay";
                 break;
+            case "harness":
+                value = ModConfig.HARNESS_ENABLED.get();
+                optionName = "Decision Harness";
+                break;
+            case "harnessdaily":
+                value = ModConfig.HARNESS_DRIVE_DAILY_GOAL.get();
+                optionName = "Harness Daily Goal";
+                break;
             default:
                 source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Unknown option: " + option), false);
                 found = false;
@@ -179,6 +200,8 @@ public class VillagerAgentCommand {
         sendConfigLine(source, "World Interaction", ModConfig.ENABLE_WORLD_INTERACTION.get());
         sendConfigLine(source, "Building", ModConfig.ENABLE_BUILDING.get());
         sendConfigLine(source, "Debug Overlay", ModConfig.ENABLE_DEBUG_OVERLAY.get());
+        sendConfigLine(source, "Decision Harness", ModConfig.HARNESS_ENABLED.get());
+        sendConfigLine(source, "Harness Daily Goal", ModConfig.HARNESS_DRIVE_DAILY_GOAL.get());
         source.sendSuccess(new StringTextComponent(TextFormatting.GOLD + "==========================="), false);
         return 1;
     }
@@ -216,6 +239,23 @@ public class VillagerAgentCommand {
             source.sendSuccess(new StringTextComponent(TextFormatting.RED + "✗ Error: " + e.getMessage()), false);
             return 0;
         }
+    }
+
+    private static int setTimeout(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        int ms = IntegerArgumentType.getInteger(context, "ms");
+        ModConfig.HARNESS_TIMEOUT_MS.set(ms);
+        ModConfig.SPEC.save();
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "✓ Harness LLM timeout set to "
+                + ms + " ms (will apply to new LLM calls)"), true);
+        return 1;
+    }
+
+    private static int getTimeout(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        int ms = ModConfig.HARNESS_TIMEOUT_MS.get();
+        source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Harness LLM timeout: " + ms + " ms"), false);
+        return 1;
     }
 
     private static int setApiType(CommandContext<CommandSource> context) {

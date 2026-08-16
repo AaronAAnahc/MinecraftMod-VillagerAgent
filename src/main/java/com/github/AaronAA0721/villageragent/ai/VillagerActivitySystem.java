@@ -64,6 +64,7 @@ public class VillagerActivitySystem {
                 || cur.getActionType() == VillagerAction.ActionType.GROW
                 || cur.getActionType() == VillagerAction.ActionType.PLACE
                 || cur.getActionType() == VillagerAction.ActionType.BREAK
+                || cur.getActionType() == VillagerAction.ActionType.FLEE
                 || cur.getActionType() == VillagerAction.ActionType.BUILD)) return;
 
         String scheduled = agent.getScheduledActivity();
@@ -172,9 +173,10 @@ public class VillagerActivitySystem {
 
         if (cur != null) return;
 
+        BlockPos homePos = null;
         Optional<GlobalPos> homeOpt = villager.getBrain().getMemory(MemoryModuleType.HOME);
         if (homeOpt.isPresent()) {
-            BlockPos homePos = homeOpt.get().pos();
+            homePos = homeOpt.get().pos();
             double distSq = villager.blockPosition().distSqr(homePos);
             if (distSq > 9.0) {
                 VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Going home to rest");
@@ -185,8 +187,30 @@ public class VillagerActivitySystem {
                 return;
             }
         }
-        // Near home (or no home) — simply stop navigation; the mixin handles vanilla suppression
+
+        // Near home (or no home) — stop navigation.
+        // Sleeping (startSleeping / isSleeping) is owned by vanilla / another module; here we only
+        // walk the villager home. Healing while asleep is handled by
+        // VillagerAgentManager.tickSleepHealing (a per-tick pass that just checks isSleeping()).
         villager.getNavigation().stop();
+    }
+
+    /** Sleep-heal: regenerate 1 HP every {@code healInterval} ticks while actually sleeping, so a
+     *  full night's rest restores ~25% of max health. healInterval = night length / (25% × max HP).
+     *  Sleeping itself is driven by vanilla / another module — this only checks {@code isSleeping()}. */
+    private static final long NIGHT_DURATION_TICKS = 10000L;  // 13000 → 23000
+    private static final float SLEEP_HEAL_FRACTION = 0.25f;   // full night restores 25% max HP
+
+    public static void applySleepHealing(ServerWorld world, VillagerEntity villager) {
+        if (!villager.isSleeping()) return;
+        if (villager.getHealth() >= villager.getMaxHealth()) return;
+
+        // 20 HP → 25% = 5 HP → healInterval = 10000 / 5 = 2000 ticks (100 s) per 1 HP.
+        int healInterval = Math.max(1, (int) (NIGHT_DURATION_TICKS / (villager.getMaxHealth() * SLEEP_HEAL_FRACTION)));
+
+        if (world.getGameTime() % healInterval == 0) {
+            villager.heal(1.0f);
+        }
     }
 
     // ── Crafting ─────────────────────────────────────────────────────────────

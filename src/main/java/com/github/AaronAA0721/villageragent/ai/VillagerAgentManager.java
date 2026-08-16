@@ -75,6 +75,9 @@ public class VillagerAgentManager {
      */
     private static final int COMBAT_SCAN_INTERVAL = 10;
 
+    /** How many threat scans (~0.5 s each) a fleeing villager keeps shouting before giving up. */
+    private static final int FLEE_GIVE_UP_SCANS = 30;
+
     private static final Logger LOGGER = LogManager.getLogger();
     private static final Map<UUID, VillagerAgentData> agents = new ConcurrentHashMap<>();
 
@@ -122,7 +125,14 @@ public class VillagerAgentManager {
         // queued bed flood-fills. Beds were queued by ChunkEvent.Load / block-place events,
         // so this just trickles the discovery work across ticks — no periodic world sweep.
         if (world instanceof ServerWorld) {
+            ServerWorld sw = (ServerWorld) world;
             WorldStructureIndex.instance(world).processPending(world, WorldStructureIndex.FLOODS_PER_TICK);
+
+            // Sleep healing — every tick, only touches villagers that are actually sleeping.
+            tickSleepHealing(sw);
+
+            // Forget stale rally alarms (village "shouts" that nobody answered).
+            VillageSignalBoard.get().pruneExpired(sw);
         }
 
         long currentTime = world.getGameTime();
@@ -136,6 +146,18 @@ public class VillagerAgentManager {
                 agent.setLastThinkTime(currentTime);
                 updateAgent(world, agent);
             }
+        }
+    }
+
+    /**
+     * Sleep healing — run every tick. Only touches villagers that are actually asleep
+     * (isSleeping() is driven by vanilla / another module, not by this mod).
+     */
+    private static void tickSleepHealing(ServerWorld world) {
+        for (VillagerAgentData agent : agents.values()) {
+            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+            if (villager == null) continue;
+            VillagerActivitySystem.applySleepHealing(world, villager);
         }
     }
 
@@ -233,7 +255,13 @@ public class VillagerAgentManager {
             return;
         }
 
-        // ── 2. Don't interrupt ANY active action with combat scanning ──
+        // ── 1b. Fleeing while raising a rally alarm ──
+        if (current != null && current.getActionType() == VillagerAction.ActionType.FLEE) {
+            continueFleeAction(villager, world, agent, current);
+            return;
+        }
+
+        // ── 2. Don't interrupt ANY other active action with combat scanning ──
         // Only scan for threats when the villager is truly idle (no current action).
         // This prevents combat from overriding farming, crafting, gathering, etc.
         if (current != null) return;
@@ -241,7 +269,31 @@ public class VillagerAgentManager {
         // ── 3. Idle — scan for threats ──
         LivingEntity threat = CombatAction.findNearestThreat(villager, world);
         if (threat != null) {
-            startCombatAction(villager, agent, threat);
+            // Fight if we can win the exchange; otherwise flee and shout for help.
+            if (CombatAction.wouldWinSolo(villager, agent, threat)) {
+                startCombatAction(villager, agent, threat);
+            } else {
+                rallyOrFlee(villager, world, agent, threat);
+            }
+            return;
+        }
+
+        // ── 4. No direct threat — listen for a rally shout and come help ──
+        VillageSignalBoard board = VillageSignalBoard.get();
+        VillageSignalBoard.RallyCall rally = board.nearestRally(villager, VillageSignalBoard.RALLY_RADIUS);
+        if (rally != null) {
+            Entity rallyThreat = world.getEntity(rally.threatUuid);
+            if (rallyThreat instanceof LivingEntity && rallyThreat.isAlive()) {
+                LivingEntity target = (LivingEntity) rallyThreat;
+                board.respond(villager, agent, target);
+                if (board.shouldCharge(target)) {
+                    startCombatAction(villager, agent, target);
+                } else {
+                    // Answer the call: run toward the rally point.
+                    villager.getNavigation().moveTo(
+                            rally.lastPos.getX() + 0.5, rally.lastPos.getY(), rally.lastPos.getZ() + 0.5, 0.4);
+                }
+            }
         }
     }
 
@@ -249,6 +301,9 @@ public class VillagerAgentManager {
      * Start chasing a hostile target.
      */
     private static void startCombatAction(VillagerEntity villager, VillagerAgentData agent, LivingEntity target) {
+        // A sleeping villager can't navigate — wake it before engaging.
+        if (villager.isSleeping()) villager.stopSleeping();
+
         VillagerAction action = new VillagerAction(VillagerAction.ActionType.ATTACK,
                 "Attacking " + target.getType().getRegistryName());
         action.setTargetEntityId(target.getUUID());
@@ -265,6 +320,80 @@ public class VillagerAgentManager {
 
         agent.addMemory("Engaging hostile: " + target.getType().getRegistryName());
         LOGGER.debug("{} engaging {}", agent.getName(), target.getType().getRegistryName());
+    }
+
+    /**
+     * Can't win solo → register on the village alarm and either flee (keeping the call alive) or,
+     * if enough villagers have already answered, charge together.
+     */
+    private static void rallyOrFlee(VillagerEntity villager, ServerWorld world,
+                                    VillagerAgentData agent, LivingEntity threat) {
+        VillageSignalBoard board = VillageSignalBoard.get();
+        board.respond(villager, agent, threat);
+        if (board.shouldCharge(threat)) {
+            startCombatAction(villager, agent, threat);
+        } else {
+            startFleeAction(villager, agent, threat);
+        }
+    }
+
+    /** Begin fleeing from a threat while raising the alarm (see {@link VillageSignalBoard}). */
+    private static void startFleeAction(VillagerEntity villager, VillagerAgentData agent, LivingEntity threat) {
+        VillagerAction action = new VillagerAction(VillagerAction.ActionType.FLEE,
+                "Fleeing from " + threat.getType().getRegistryName() + " and calling for help");
+        action.setTargetEntityId(threat.getUUID());
+        action.setPhase(VillagerAction.ActionPhase.WALKING);
+        agent.setCurrentAction(action);
+        agent.setCurrentActivity("fleeing");
+        CombatAction.flee(villager, threat);
+        LOGGER.debug("{} fleeing from {} and raising the alarm", agent.getName(), threat.getType().getRegistryName());
+    }
+
+    /**
+     * Keep fleeing while the alarm is raised. Once enough villagers answer (see
+     * {@link VillageSignalBoard#shouldCharge}), turn around and charge the threat together.
+     * Give up after {@link #FLEE_GIVE_UP_SCANS} scans if nobody comes.
+     */
+    private static void continueFleeAction(VillagerEntity villager, ServerWorld world,
+                                           VillagerAgentData agent, VillagerAction action) {
+        UUID threatId = action.getTargetEntityId();
+        if (threatId == null) { agent.setCurrentAction(null); return; }
+
+        Entity raw = world.getEntity(threatId);
+        if (!(raw instanceof LivingEntity) || !raw.isAlive()) {
+            agent.setCurrentAction(null);
+            agent.setCurrentActivity("idle");
+            LOGGER.debug("{} stopped fleeing (threat gone)", agent.getName());
+            return;
+        }
+
+        LivingEntity threat = (LivingEntity) raw;
+        VillageSignalBoard board = VillageSignalBoard.get();
+        board.respond(villager, agent, threat); // keep the alarm alive while we kite
+
+        if (board.shouldCharge(threat)) {
+            // Enough villagers answered — turn and mob the threat together.
+            agent.setCurrentAction(null);
+            startCombatAction(villager, agent, threat);
+            return;
+        }
+
+        action.incrementStuckTicks(); // +1 per scan (~0.5 s)
+        if (action.getStuckTicks() > FLEE_GIVE_UP_SCANS) {
+            agent.setCurrentAction(null);
+            agent.setCurrentActivity("idle");
+            villager.getNavigation().stop();
+            LOGGER.debug("{} gave up rallying against {}", agent.getName(), threat.getType().getRegistryName());
+            return;
+        }
+
+        // Keep a safe distance rather than running forever: back off only while too close,
+        // otherwise hold ground and keep the alarm alive so we can turn and charge together.
+        if (villager.distanceToSqr(threat) < CombatAction.FLEE_HOLD_DIST * CombatAction.FLEE_HOLD_DIST) {
+            CombatAction.flee(villager, threat);
+        } else {
+            villager.getNavigation().stop();
+        }
     }
 
     /**
@@ -290,8 +419,8 @@ public class VillagerAgentManager {
         LivingEntity target = (LivingEntity) rawTarget;
         double distSq = villager.distanceToSqr(target);
 
-        // Check if target moved out of scan range — disengage
-        if (distSq > CombatAction.SCAN_RANGE * CombatAction.SCAN_RANGE * 1.5) {
+        // Check if target moved out of chase range — disengage
+        if (distSq > CombatAction.CHASE_MAX_DIST * CombatAction.CHASE_MAX_DIST) {
             disengageCombat(villager, agent);
             LOGGER.debug("{} lost sight of target, disengaging", agent.getName());
             return;
@@ -1208,7 +1337,8 @@ public class VillagerAgentManager {
             VillagerAction.ActionType t = ca.getActionType();
             if (t == VillagerAction.ActionType.ATTACK || t == VillagerAction.ActionType.HARVEST
                     || t == VillagerAction.ActionType.GROW || t == VillagerAction.ActionType.PLACE
-                    || t == VillagerAction.ActionType.BREAK || t == VillagerAction.ActionType.BUILD) {
+                    || t == VillagerAction.ActionType.BREAK || t == VillagerAction.ActionType.FLEE
+                    || t == VillagerAction.ActionType.BUILD) {
                 return;
             }
         }

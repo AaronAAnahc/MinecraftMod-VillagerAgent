@@ -13,6 +13,8 @@ public class ModConfig {
     public static final ForgeConfigSpec.ConfigValue<String> LLM_MODEL;
     public static final ForgeConfigSpec.IntValue LLM_MAX_TOKENS;
     public static final ForgeConfigSpec.DoubleValue LLM_TEMPERATURE;
+    /** Verbose LLM I/O debug logging (request/response dumps, prompts). Off by default. */
+    public static final ForgeConfigSpec.BooleanValue LLM_DEBUG;
 
     // Agent Behavior Settings
     public static final ForgeConfigSpec.BooleanValue ENABLE_AI_AGENTS;
@@ -86,7 +88,14 @@ public class ModConfig {
         LLM_TEMPERATURE = BUILDER
                 .comment("LLM temperature (creativity) - 0.0 to 2.0")
                 .defineInRange("llm_temperature", 0.7, 0.0, 2.0);
-        
+
+        LLM_DEBUG = BUILDER
+                .comment("Verbose LLM I/O debug logging: prints full request/response bodies, prompts, and "
+                        + "HTTP details at INFO level. Off by default to avoid log spam; flip to true when "
+                        + "diagnosing LLM/API problems. (Always-on failure diagnostics are logged separately "
+                        + "at WARN and do NOT depend on this flag.)")
+                .define("llm_debug", false);
+
         BUILDER.pop();
         
         BUILDER.push("Agent Behavior");
@@ -214,8 +223,10 @@ public class ModConfig {
 
         HARNESS_TIMEOUT_MS = BUILDER
                 .comment("Per-LLM-call timeout in milliseconds. On timeout the villager falls back to "
-                        + "rule-based behaviour instead of stalling the decision pipeline.")
-                .defineInRange("harness_timeout_ms", 8000, 1000, 60000);
+                        + "rule-based behaviour instead of stalling the decision pipeline. "
+                        + "Tune via /va config settimeout <ms>; default raised to 15000 to cover real "
+                        + "OpenAI round-trips (~12-13s observed).")
+                .defineInRange("harness_timeout_ms", 15000, 1000, 120000);
 
         HARNESS_CIRCUIT_FAILURES = BUILDER
                 .comment("Consecutive LLM failures before a villager is put into rule-only mode for a cooldown "
@@ -233,8 +244,10 @@ public class ModConfig {
 
         HARNESS_DRIVE_DAILY_GOAL = BUILDER
                 .comment("When true, the harness also decides one structured daily goal for each villager at dawn "
-                        + "(P1 integration). Off by default so existing behaviour is unchanged until enabled.")
-                .define("harness_drive_daily_goal", false);
+                        + "(P1 integration). Enabled by default so the LLM acts as a decision engine, not just a "
+                        + "dialogue generator; set false (or /va config set harnessdaily false) to restore the old "
+                        + "rule-only daily goal behaviour.")
+                .define("harness_drive_daily_goal", true);
 
         BUILDER.pop();
 

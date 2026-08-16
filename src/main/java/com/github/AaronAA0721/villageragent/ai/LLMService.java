@@ -49,6 +49,21 @@ public class LLMService {
         return response.substring(FAILURE_PREFIX.length());
     }
 
+    /**
+     * Diagnostic log. Prints at INFO when {@code llm_debug} is enabled, otherwise at DEBUG
+     * (suppressed by Forge's default INFO log level). Use for verbose request/response dumps.
+     */
+    private static void debug(String msg) {
+        if (ModConfig.LLM_DEBUG.get()) LOGGER.info("[LLM-DEBUG] " + msg);
+        else LOGGER.debug(msg);
+    }
+
+    /** Wrap a failure with an always-visible INFO line so the reason never gets swallowed. */
+    private static String failWithLog(String reason) {
+        LOGGER.info("[LLM] returning failure marker: " + reason);
+        return fail(reason);
+    }
+
     public static CompletableFuture<String> queryLLM(String systemPrompt, String userPrompt) {
         return CompletableFuture.supplyAsync(() -> {
             try {
@@ -64,11 +79,11 @@ public class LLMService {
                     return queryGemini(systemPrompt, userPrompt);
                 } else {
                     LOGGER.warn("Unknown LLM API type: " + apiType);
-                    return fail("unknown-api:" + apiType);
+                    return failWithLog("unknown-api:" + apiType);
                 }
             } catch (Exception e) {
                 LOGGER.error("Error querying LLM: ", e);
-                return fail("exception:" + e.getClass().getSimpleName());
+                return failWithLog("exception:" + e.getClass().getSimpleName());
             }
         }, executor);
     }
@@ -78,16 +93,16 @@ public class LLMService {
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
 
-        LOGGER.debug("=== OpenAI API Request ===");
-        LOGGER.debug("URL: " + apiUrl);
-        LOGGER.debug("Model: " + model);
-        LOGGER.debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
-        LOGGER.debug("System Prompt: " + systemPrompt);
-        LOGGER.debug("User Prompt: " + userPrompt);
+        debug("=== OpenAI API Request ===");
+        debug("URL: " + apiUrl);
+        debug("Model: " + model);
+        debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
+        debug("System Prompt: " + systemPrompt);
+        debug("User Prompt: " + userPrompt);
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("OpenAI API key is empty!");
-            return fail("no-api-key");
+            return failWithLog("no-api-key");
         }
 
         URL url = new URL(apiUrl);
@@ -116,7 +131,7 @@ public class LLMService {
 
         requestBody.add("messages", messages);
 
-        LOGGER.debug("Request Body: " + requestBody.toString());
+        debug("Request Body: " + requestBody.toString());
 
         try (OutputStream os = conn.getOutputStream()) {
             byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
@@ -125,9 +140,9 @@ public class LLMService {
 
         int responseCode = conn.getResponseCode();
         String responseMessage = conn.getResponseMessage();
-        LOGGER.debug("=== OpenAI API Response ===");
-        LOGGER.debug("Response Code: " + responseCode + " " + responseMessage);
-        LOGGER.debug("Response Headers: " + conn.getHeaderFields());
+        debug("=== OpenAI API Response ===");
+        debug("Response Code: " + responseCode + " " + responseMessage);
+        debug("Response Headers: " + conn.getHeaderFields());
 
         if (responseCode == 200) {
             BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
@@ -137,7 +152,7 @@ public class LLMService {
                 response.append(responseLine.trim());
             }
 
-            LOGGER.debug("Raw Response Body: " + response.toString());
+            debug("Raw Response Body: " + response.toString());
 
             JsonParser parser = new JsonParser();
             JsonElement element = parser.parse(response.toString());
@@ -146,7 +161,7 @@ public class LLMService {
                     .get(0).getAsJsonObject()
                     .getAsJsonObject("message")
                     .get("content").getAsString();
-            LOGGER.debug("Parsed Content: " + content);
+            debug("Parsed Content: " + content);
             LOGGER.info("OpenAI response received successfully");
             return content;
         } else {
@@ -159,9 +174,9 @@ public class LLMService {
             while ((line = br.readLine()) != null) {
                 errorResponse.append(line);
             }
-            LOGGER.debug("Error Response Body: " + errorResponse.toString());
+            debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("OpenAI API error " + responseCode + ": " + errorResponse.toString());
-            return fail("http-" + responseCode);
+            return failWithLog("http-" + responseCode);
         }
     }
     
@@ -170,16 +185,16 @@ public class LLMService {
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
 
-        LOGGER.debug("=== Anthropic API Request ===");
-        LOGGER.debug("URL: " + apiUrl);
-        LOGGER.debug("Model: " + model);
-        LOGGER.debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
-        LOGGER.debug("System Prompt: " + systemPrompt);
-        LOGGER.debug("User Prompt: " + userPrompt);
+        debug("=== Anthropic API Request ===");
+        debug("URL: " + apiUrl);
+        debug("Model: " + model);
+        debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
+        debug("System Prompt: " + systemPrompt);
+        debug("User Prompt: " + userPrompt);
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("Anthropic API key is empty!");
-            return fail("no-api-key");
+            return failWithLog("no-api-key");
         }
 
         URL url = new URL(apiUrl);
@@ -205,7 +220,7 @@ public class LLMService {
 
         requestBody.add("messages", messages);
 
-        LOGGER.debug("Request Body: " + requestBody.toString());
+        debug("Request Body: " + requestBody.toString());
 
         try (OutputStream os = conn.getOutputStream()) {
             byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
@@ -214,9 +229,9 @@ public class LLMService {
 
         int responseCode = conn.getResponseCode();
         String responseMessage = conn.getResponseMessage();
-        LOGGER.debug("=== Anthropic API Response ===");
-        LOGGER.debug("Response Code: " + responseCode + " " + responseMessage);
-        LOGGER.debug("Response Headers: " + conn.getHeaderFields());
+        debug("=== Anthropic API Response ===");
+        debug("Response Code: " + responseCode + " " + responseMessage);
+        debug("Response Headers: " + conn.getHeaderFields());
 
         if (responseCode == 200) {
             BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
@@ -226,7 +241,7 @@ public class LLMService {
                 response.append(responseLine.trim());
             }
 
-            LOGGER.debug("Raw Response Body: " + response.toString());
+            debug("Raw Response Body: " + response.toString());
 
             JsonParser parser = new JsonParser();
             JsonElement element = parser.parse(response.toString());
@@ -234,7 +249,7 @@ public class LLMService {
             String content = jsonResponse.getAsJsonArray("content")
                     .get(0).getAsJsonObject()
                     .get("text").getAsString();
-            LOGGER.debug("Parsed Content: " + content);
+            debug("Parsed Content: " + content);
             LOGGER.info("Anthropic response received successfully");
             return content;
         } else {
@@ -246,9 +261,9 @@ public class LLMService {
             while ((line = br.readLine()) != null) {
                 errorResponse.append(line);
             }
-            LOGGER.debug("Error Response Body: " + errorResponse.toString());
+            debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Anthropic API error " + responseCode + ": " + errorResponse.toString());
-            return fail("http-" + responseCode);
+            return failWithLog("http-" + responseCode);
         }
     }
 
@@ -261,11 +276,11 @@ public class LLMService {
             apiUrl = "http://localhost:11434/api/generate";
         }
 
-        LOGGER.debug("=== Ollama API Request ===");
-        LOGGER.debug("URL: " + apiUrl);
-        LOGGER.debug("Model: " + model);
-        LOGGER.debug("System Prompt: " + systemPrompt);
-        LOGGER.debug("User Prompt: " + userPrompt);
+        debug("=== Ollama API Request ===");
+        debug("URL: " + apiUrl);
+        debug("Model: " + model);
+        debug("System Prompt: " + systemPrompt);
+        debug("User Prompt: " + userPrompt);
 
         URL url = new URL(apiUrl);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -283,7 +298,7 @@ public class LLMService {
         requestBody.addProperty("prompt", combinedPrompt);
         requestBody.addProperty("stream", false);
 
-        LOGGER.debug("Request Body: " + requestBody.toString());
+        debug("Request Body: " + requestBody.toString());
 
         try (OutputStream os = conn.getOutputStream()) {
             byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
@@ -292,9 +307,9 @@ public class LLMService {
 
         int responseCode = conn.getResponseCode();
         String responseMessage = conn.getResponseMessage();
-        LOGGER.debug("=== Ollama API Response ===");
-        LOGGER.debug("Response Code: " + responseCode + " " + responseMessage);
-        LOGGER.debug("Response Headers: " + conn.getHeaderFields());
+        debug("=== Ollama API Response ===");
+        debug("Response Code: " + responseCode + " " + responseMessage);
+        debug("Response Headers: " + conn.getHeaderFields());
 
         if (responseCode == 200) {
             BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
@@ -304,13 +319,13 @@ public class LLMService {
                 response.append(responseLine.trim());
             }
 
-            LOGGER.debug("Raw Response Body: " + response.toString());
+            debug("Raw Response Body: " + response.toString());
 
             JsonParser parser = new JsonParser();
             JsonElement element = parser.parse(response.toString());
             JsonObject jsonResponse = element.getAsJsonObject();
             String content = jsonResponse.get("response").getAsString();
-            LOGGER.debug("Parsed Content: " + content);
+            debug("Parsed Content: " + content);
             LOGGER.info("Ollama response received successfully");
             return content;
         } else {
@@ -322,9 +337,9 @@ public class LLMService {
             while ((line = br.readLine()) != null) {
                 errorResponse.append(line);
             }
-            LOGGER.debug("Error Response Body: " + errorResponse.toString());
+            debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Ollama API error " + responseCode + ": " + errorResponse.toString());
-            return fail("http-" + responseCode);
+            return failWithLog("http-" + responseCode);
         }
     }
 
@@ -338,16 +353,16 @@ public class LLMService {
             apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
         }
 
-        LOGGER.debug("=== Gemini API Request ===");
-        LOGGER.debug("URL: " + apiUrl);
-        LOGGER.debug("Model: " + model);
-        LOGGER.debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
-        LOGGER.debug("System Prompt: " + systemPrompt);
-        LOGGER.debug("User Prompt: " + userPrompt);
+        debug("=== Gemini API Request ===");
+        debug("URL: " + apiUrl);
+        debug("Model: " + model);
+        debug("API Key: " + (apiKey.isEmpty() ? "NOT SET" : apiKey.substring(0, Math.min(8, apiKey.length())) + "..."));
+        debug("System Prompt: " + systemPrompt);
+        debug("User Prompt: " + userPrompt);
 
         if (apiKey.isEmpty()) {
             LOGGER.warn("Gemini API key is empty!");
-            return fail("no-api-key");
+            return failWithLog("no-api-key");
         }
 
         // Append API key to URL
@@ -390,7 +405,7 @@ public class LLMService {
         generationConfig.addProperty("temperature", ModConfig.LLM_TEMPERATURE.get());
         requestBody.add("generationConfig", generationConfig);
 
-        LOGGER.debug("Request Body: " + requestBody.toString());
+        debug("Request Body: " + requestBody.toString());
 
         try (OutputStream os = conn.getOutputStream()) {
             byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
@@ -399,8 +414,8 @@ public class LLMService {
 
         int responseCode = conn.getResponseCode();
         String responseMessage = conn.getResponseMessage();
-        LOGGER.debug("=== Gemini API Response ===");
-        LOGGER.debug("Response Code: " + responseCode + " " + responseMessage);
+        debug("=== Gemini API Response ===");
+        debug("Response Code: " + responseCode + " " + responseMessage);
 
         if (responseCode == 200) {
             BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
@@ -410,7 +425,7 @@ public class LLMService {
                 response.append(responseLine.trim());
             }
 
-            LOGGER.debug("Raw Response Body: " + response.toString());
+            debug("Raw Response Body: " + response.toString());
 
             JsonParser parser = new JsonParser();
             JsonElement element = parser.parse(response.toString());
@@ -423,7 +438,7 @@ public class LLMService {
                     .getAsJsonArray("parts")
                     .get(0).getAsJsonObject()
                     .get("text").getAsString();
-            LOGGER.debug("Parsed Content: " + content);
+            debug("Parsed Content: " + content);
             LOGGER.info("Gemini response received successfully");
             return content;
         } else {
@@ -435,9 +450,9 @@ public class LLMService {
             while ((line = br.readLine()) != null) {
                 errorResponse.append(line);
             }
-            LOGGER.debug("Error Response Body: " + errorResponse.toString());
+            debug("Error Response Body: " + errorResponse.toString());
             LOGGER.error("Gemini API error " + responseCode + ": " + errorResponse.toString());
-            return fail("http-" + responseCode);
+            return failWithLog("http-" + responseCode);
         }
     }
 }

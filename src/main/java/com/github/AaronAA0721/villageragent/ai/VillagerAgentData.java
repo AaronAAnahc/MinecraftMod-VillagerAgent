@@ -716,6 +716,9 @@ public class VillagerAgentData {
         // Prune stale entries before building the prompt
         pruneExpiredConversations(gameTick);
 
+        LOGGER.info("[Chat] villager {} handling chat from player {} (uuid={}, message=\"{}\")",
+                name, playerName, playerUuid, playerMessage);
+
         // ── System prompt ──
         StringBuilder systemPromptBuilder = new StringBuilder();
         systemPromptBuilder.append("You are ").append(name).append(", a ").append(profession)
@@ -795,7 +798,11 @@ public class VillagerAgentData {
                 .thenApply(response -> {
                     // P0 fix: a failure sentinel is never the villager's actual speech.
                     if (LLMService.isFailure(response)) {
-                        DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response, "failure");
+                        String reason = LLMService.failureReason(response);
+                        LOGGER.warn("[Chat] villager {} chat FELL BACK to default reply (player={}, reason={})",
+                                name, playerName, reason);
+                        DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response,
+                                "failure:" + reason);
                         return "Hmm... I seem to have lost my train of thought.";
                     }
                     DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response, "ok");
@@ -805,7 +812,8 @@ public class VillagerAgentData {
                     return response;
                 })
                 .exceptionally(e -> {
-                    LOGGER.error("Error generating chat response: " + e.getMessage());
+                    LOGGER.error("[Chat] Exception while generating chat response for villager " + name
+                            + " (player=" + playerName + ")", e);
                     return "Hmm... I seem to have lost my train of thought.";
                 });
     }
