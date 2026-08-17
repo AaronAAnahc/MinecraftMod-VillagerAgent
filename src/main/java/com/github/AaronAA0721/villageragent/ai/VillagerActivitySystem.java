@@ -6,12 +6,12 @@ import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.item.crafting.IRecipe;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.server.ServerWorld;
 import net.minecraftforge.registries.ForgeRegistries;
+import com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -150,49 +150,13 @@ public class VillagerActivitySystem {
 
     // ── Resting ───────────────────────────────────────────────────────────────
 
+    /**
+     * Resting is a reflex/skill, not LLM micro-control: resolve the bed (from the structure index
+     * if no vanilla HOME exists) and walk/sleep. Delegates to {@link SleepSkill}, which also closes
+     * the HOME-refill gap (P0) by remembering the chosen bed in the agent's persisted home bed.
+     */
     private static void handleResting(ServerWorld world, VillagerEntity villager, VillagerAgentData agent) {
-        VillagerAction cur = agent.getCurrentAction();
-
-        // If a home-walk MOVE action is in progress, handle it generically
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE) {
-            BlockPos target = cur.getTargetBlockPos();
-            if (target == null) { agent.setCurrentAction(null); return; }
-            double distSq = villager.blockPosition().distSqr(target);
-            if (distSq <= ARRIVE_SQ) {
-                agent.setCurrentAction(null);
-                villager.getNavigation().stop();
-            } else {
-                cur.incrementStuckTicks();
-                if (cur.getStuckTicks() > EXPLORE_STUCK_TIMEOUT) {
-                    agent.setCurrentAction(null);
-                    villager.getNavigation().stop();
-                }
-            }
-            return;
-        }
-
-        if (cur != null) return;
-
-        BlockPos homePos = null;
-        Optional<GlobalPos> homeOpt = villager.getBrain().getMemory(MemoryModuleType.HOME);
-        if (homeOpt.isPresent()) {
-            homePos = homeOpt.get().pos();
-            double distSq = villager.blockPosition().distSqr(homePos);
-            if (distSq > 9.0) {
-                VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Going home to rest");
-                move.setTargetBlockPos(homePos);
-                move.setPhase(VillagerAction.ActionPhase.WALKING);
-                agent.setCurrentAction(move);
-                villager.getNavigation().moveTo(homePos.getX() + 0.5, homePos.getY(), homePos.getZ() + 0.5, 0.3);
-                return;
-            }
-        }
-
-        // Near home (or no home) — stop navigation.
-        // Sleeping (startSleeping / isSleeping) is owned by vanilla / another module; here we only
-        // walk the villager home. Healing while asleep is handled by
-        // VillagerAgentManager.tickSleepHealing (a per-tick pass that just checks isSleeping()).
-        villager.getNavigation().stop();
+        SleepSkill.tickRest(agent, villager, world);
     }
 
     /** Sleep-heal: regenerate 1 HP every {@code healInterval} ticks while actually sleeping, so a
@@ -306,10 +270,10 @@ public class VillagerActivitySystem {
         for (String itemId : ProfessionCraftCatalog.getCraftableIds(profession, level)) {
             Item item = ForgeRegistries.ITEMS.getValue(new ResourceLocation(itemId));
             if (item == null || item == Items.AIR) continue;
-            IRecipe<?> recipe = NativeRecipeResolver.findRecipe(world, item);
+            ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, item);
             if (recipe == null) continue;
             // consumeAndProduce re-verifies materials at execution time; skip to the next if short.
-            if (!NativeRecipeResolver.consumeAndProduce(agent.getInventory(), recipe, 1)) continue;
+            if (!recipe.consumeAndProduce(agent.getInventory(), 1)) continue;
             if (ProfessionCraftCatalog.canEnchant(profession, level, itemId)) {
                 enchantFirstCrafted(agent, item, villager);
             }

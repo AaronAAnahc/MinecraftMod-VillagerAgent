@@ -1,0 +1,58 @@
+{
+  "_comment": "Custom (non-vanilla) crafting recipes for villager craftables that have no vanilla recipe. Edit freely — loaded at runtime, no recompile needed. Tunable inputs/counts.",
+  "recipes": [
+    {
+      "output": "minecraft:chainmail_helmet",
+      "count": 1,
+      "inputs": [ { "item": "minecraft:iron_ingot", "count": 5 } ]
+    },
+    {
+      "output": "minecraft:chainmail_chestplate",
+      "count": 1,
+      "inputs": [ { "item": "minecraft:iron_ingot", "count": 8 } ]
+    },
+    {
+      "output": "minecraft:chainmail_leggings",
+      "count": 1,
+      "inputs": [ { "item": "minecraft:iron_ingot", "count": 7 } ]
+    },
+    {
+      "output": "minecraft:chainmail_boots",
+      "count": 1,
+      "inputs": [ { "item": "minecraft:iron_ingot", "count": 4 } ]
+    },
+    {
+      "output": "minecraft:saddle",
+      "count": 1,
+      "inputs": [
+        { "item": "minecraft:leather", "count": 6 },
+        { "item": "minecraft:iron_ingot", "count": 2 }
+      ]
+    },
+    {
+      "output": "minecraft:filled_map",
+      "count": 1,
+      "inputs": [
+        { "item": "minecraft:map", "count": 1 },
+        { "item": "minecraft:compass", "count": 1 }
+      ]
+    },
+    {
+      "output": "minecraft:quill",
+      "count": 1,
+      "inputs": [
+        { "item": "minecraft:book", "count": 1 },
+        { "item": "minecraft:feather", "count": 1 },
+        { "item": "minecraft:ink_sac", "count": 1 }
+      ]
+    },
+    {
+      "output": "minecraft:ender_pearl",
+      "count": 1,
+      "inputs": [
+        { "item": "minecraft:blaze_powder", "count": 1 },
+        { "item": "minecraft:slime_ball", "count": 1 }
+      ]
+    }
+  ]
+}

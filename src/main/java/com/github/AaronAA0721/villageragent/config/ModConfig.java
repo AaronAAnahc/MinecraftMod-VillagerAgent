@@ -62,6 +62,14 @@ public class ModConfig {
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_SEEDS;
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_FIELD;
 
+    // ── Proficiency (villager experience / level system) ──
+    /** Mirror proficiency level onto vanilla VillagerData.level so trade UI/pools follow it. */
+    public static final ForgeConfigSpec.BooleanValue PROFICIENCY_SYNC_TO_VANILLA;
+    /** Chunks radius for the sleep skill's bed search (HOME refill). Behavioural switch, not game data. */
+    public static final ForgeConfigSpec.IntValue HOME_SEARCH_RADIUS_CHUNKS;
+    /** Cadence (ticks) of the autonomous behavior executor that runs goals via skills. */
+    public static final ForgeConfigSpec.IntValue BEHAVIOR_EXECUTOR_INTERVAL_TICKS;
+
     static {
         BUILDER.push("LLM Settings");
         
@@ -248,6 +256,25 @@ public class ModConfig {
                         + "dialogue generator; set false (or /va config set harnessdaily false) to restore the old "
                         + "rule-only daily goal behaviour.")
                 .define("harness_drive_daily_goal", true);
+
+        BUILDER.pop();
+
+        BUILDER.push("Proficiency");
+
+        PROFICIENCY_SYNC_TO_VANILLA = BUILDER
+                .comment("Mirror the proficiency level onto the vanilla VillagerData level so the vanilla trading UI "
+                        + "and trade offers unlock in step with proficiency. Set false to keep the two fully independent.")
+                .define("proficiency_sync_to_vanilla", true);
+
+        HOME_SEARCH_RADIUS_CHUNKS = BUILDER
+                .comment("How many chunks around a villager to search the structure index for a bed when it has no "
+                        + "vanilla HOME (sleep skill / HOME refill). Larger = finds more distant homes but costs more.")
+                .defineInRange("home_search_radius_chunks", 8, 1, 64);
+
+        BEHAVIOR_EXECUTOR_INTERVAL_TICKS = BUILDER
+                .comment("How often (in ticks) the autonomous behavior executor re-scans the goal list and dispatches "
+                        + "to a skill. It is cheap, so 20 (=1s) is a sane default; lower = more responsive.")
+                .defineInRange("behavior_executor_interval_ticks", 20, 1, 1200);
 
         BUILDER.pop();
 

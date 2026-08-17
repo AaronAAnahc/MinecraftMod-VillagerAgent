@@ -2,6 +2,8 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import net.minecraft.block.*;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
+import net.minecraft.inventory.EquipmentSlotType;
+import net.minecraft.item.HoeItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -407,6 +409,167 @@ public class FarmingAction {
             }
         }
         return false;
+    }
+
+    // ---------------------------------------------------------------
+    //  TILL primitives (ploughing dirt -> farmland)
+    // ---------------------------------------------------------------
+
+    /** Vanilla farmland hydration radius: a water block within 4 blocks keeps soil moist. */
+    public static final int WATER_RADIUS = 4;
+
+    /** A block a hoe can turn into farmland (dirt / grass / grass path / coarse dirt). */
+    public static boolean isTillableDirt(ServerWorld world, BlockPos pos) {
+        Block b = world.getBlockState(pos).getBlock();
+        return b == Blocks.DIRT || b == Blocks.GRASS_BLOCK
+                || b == Blocks.GRASS_PATH || b == Blocks.COARSE_DIRT;
+    }
+
+    /** True if any water (source or flowing) is within {@link #WATER_RADIUS} horizontally. */
+    public static boolean hasWaterNearby(ServerWorld world, BlockPos pos) {
+        for (int dx = -WATER_RADIUS; dx <= WATER_RADIUS; dx++) {
+            for (int dz = -WATER_RADIUS; dz <= WATER_RADIUS; dz++) {
+                for (int dy = -1; dy <= 0; dy++) {
+                    if (world.getBlockState(pos.offset(dx, dy, dz)).getBlock() == Blocks.WATER) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** "Cultivatable" dirt: tillable AND within water range — the precondition for ploughing. */
+    public static boolean isCultivatableDirt(ServerWorld world, BlockPos pos) {
+        return isTillableDirt(world, pos) && hasWaterNearby(world, pos);
+    }
+
+    public static boolean isFarmland(ServerWorld world, BlockPos pos) {
+        return world.getBlockState(pos).getBlock() instanceof FarmlandBlock;
+    }
+
+    /** Count farmland blocks among the 8 neighbours of {@code pos}. */
+    public static int countFarmlandNeighbors(ServerWorld world, BlockPos pos) {
+        int n = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                if (world.getBlockState(pos.offset(dx, 0, dz)).getBlock() instanceof FarmlandBlock) n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * A "reverted old farmland": a dirt block with >=3 farmland neighbours. When farmland gets
+     * trampled back to dirt it still sits among its former peers — that is the maintenance case.
+     */
+    public static boolean isRevertedFarmland(ServerWorld world, BlockPos pos) {
+        return isTillableDirt(world, pos) && countFarmlandNeighbors(world, pos) >= 3;
+    }
+
+    public static boolean hasRevertedFarmlandNearby(ServerWorld world, BlockPos center, int radius) {
+        return !findRevertedFarmlandSorted(world, center, radius).isEmpty();
+    }
+
+    public static List<BlockPos> findRevertedFarmlandSorted(ServerWorld world, BlockPos center) {
+        return findRevertedFarmlandSorted(world, center, SCAN_RADIUS);
+    }
+
+    public static List<BlockPos> findRevertedFarmlandSorted(ServerWorld world, BlockPos center, int radius) {
+        List<BlockPos> out = new ArrayList<>();
+        for (int x = -radius; x <= radius; x++) {
+            for (int z = -radius; z <= radius; z++) {
+                BlockPos p = center.offset(x, 0, z);
+                if (isRevertedFarmland(world, p)) out.add(p.immutable());
+            }
+        }
+        out.sort(Comparator.comparingDouble(p -> p.distSqr(center)));
+        return out;
+    }
+
+    /** Nearest cultivatable dirt (already near water by definition) — a good starting block. */
+    public static BlockPos findNearestCultivatableDirt(ServerWorld world, BlockPos center) {
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int x = -SCAN_RADIUS; x <= SCAN_RADIUS; x++) {
+            for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
+                BlockPos p = center.offset(x, 0, z);
+                if (isCultivatableDirt(world, p)) {
+                    double d = p.distSqr(center);
+                    if (d < bestD) { bestD = d; best = p; }
+                }
+            }
+        }
+        return best == null ? null : best.immutable();
+    }
+
+    /** Does the villager possess a hoe (in inventory)? Required to plough. */
+    public static boolean hasHoe(VillagerAgentData agent) {
+        for (ItemStack s : agent.getInventory().getItems()) {
+            if (!s.isEmpty() && s.getItem() instanceof HoeItem) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Plough a dirt block into farmland (moisture 7 = hydrated). Requires a hoe in inventory.
+     * @return true if the block was tilled
+     */
+    public static boolean tillBlockAt(VillagerEntity villager, ServerWorld world,
+                                      VillagerAgentData agent, BlockPos dirtPos) {
+        if (!isTillableDirt(world, dirtPos)) return false;
+        if (!hasHoe(agent)) return false;
+        world.setBlock(dirtPos, Blocks.FARMLAND.defaultBlockState()
+                .setValue(FarmlandBlock.MOISTURE, 7), 3);
+        // equip the hoe for visual display
+        for (ItemStack s : agent.getInventory().getItems()) {
+            if (!s.isEmpty() && s.getItem() instanceof HoeItem) {
+                villager.setItemSlot(EquipmentSlotType.MAINHAND, s.copy());
+                break;
+            }
+        }
+        agent.addMemory("Tilled " + dirtPos + " into farmland");
+        LOGGER.info(agent.getName() + " tilled " + dirtPos);
+        return true;
+    }
+
+    /**
+     * Walk the villager toward {@code target} (or, if already there, report arrival).
+     * Uses a {@code farmMove} MOVE action so the farm skills recognise their own in-progress walk.
+     * @return 0 = still walking, 1 = arrived, 2 = blocked/unreachable
+     */
+    public static int approachTarget(VillagerAgentData agent, VillagerEntity villager, BlockPos target,
+                                      boolean goalDriven, double arriveSq, int stuckTimeout, String desc) {
+        VillagerAction cur = agent.getCurrentAction();
+        if (cur != null && cur.isFarmMove()) {
+            BlockPos t = cur.getTargetBlockPos();
+            if (t == null) { agent.setCurrentAction(null); return 2; }
+            if (villager.blockPosition().distSqr(t) <= arriveSq) {
+                agent.setCurrentAction(null);
+                villager.getNavigation().stop();
+                return 1;
+            }
+            cur.incrementStuckTicks();
+            if (cur.getStuckTicks() > stuckTimeout) {
+                agent.setCurrentAction(null);
+                villager.getNavigation().stop();
+                return 2;
+            }
+            if (cur.getStuckTicks() % 40 == 0) {
+                villager.getNavigation().moveTo(t.getX() + 0.5, t.getY(), t.getZ() + 0.5, 0.35);
+            }
+            return 0;
+        }
+        if (cur != null) return 0; // unrelated action owns the villager
+        if (target == null) return 2;
+        if (villager.blockPosition().distSqr(target) <= arriveSq) return 1;
+        VillagerAction mv = new VillagerAction(VillagerAction.ActionType.MOVE, desc);
+        mv.setTargetBlockPos(target);
+        mv.setPhase(VillagerAction.ActionPhase.WALKING);
+        mv.setFarmMove(true);
+        mv.setGoalDriven(goalDriven);
+        agent.setCurrentAction(mv);
+        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
+        return 0;
     }
 
     // ---------------------------------------------------------------

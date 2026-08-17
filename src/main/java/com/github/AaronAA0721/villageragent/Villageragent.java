@@ -2,6 +2,8 @@ package com.github.AaronAA0721.villageragent;
 
 import com.github.AaronAA0721.villageragent.commands.VillagerAgentCommand;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
+import com.github.AaronAA0721.villageragent.ai.config.VillagerAgentConfigDir;
+import com.github.AaronAA0721.villageragent.ai.proficiency.ProficiencyCapability;
 import com.github.AaronAA0721.villageragent.events.VillagerEventHandler;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
 import net.minecraft.block.Block;
@@ -64,6 +66,17 @@ public class Villageragent {
         LOGGER.info("Villager Chat Enabled: " + ModConfig.ENABLE_VILLAGER_CHAT.get());
         LOGGER.info("World Interaction Enabled: " + ModConfig.ENABLE_WORLD_INTERACTION.get());
         LOGGER.info("===========================================");
+
+        // Register the villager proficiency (experience / level) capability before any world loads.
+        ProficiencyCapability.register();
+        LOGGER.info("VillagerAgent proficiency capability registered!");
+
+        // Extract editable config files into <config>/villageragent/ on first run (only if absent),
+        // so players / modpacks can tune recipes, the proficiency table, and per-level unlocks.
+        VillagerAgentConfigDir.ensureDir();
+        VillagerAgentConfigDir.extractDefault("custom_recipes.json");
+        VillagerAgentConfigDir.extractDefault("proficiency.json");
+        LOGGER.info("VillagerAgent editable configs are in config/villageragent/");
 
         // Register network packets
         event.enqueueWork(() -> {

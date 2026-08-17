@@ -9,6 +9,7 @@ import com.github.AaronAA0721.villageragent.ai.memory.EntityCategory;
 import com.github.AaronAA0721.villageragent.ai.vision.ChunkContentSampler;
 import com.github.AaronAA0721.villageragent.ai.world.BuildingRecord;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
+import com.github.AaronAA0721.villageragent.ai.behavior.FarmReclaimState;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
@@ -92,8 +93,12 @@ public class VillagerAgentData {
     private volatile boolean socializing = false;
     /** Game tick of the last social interaction (used for cooldown). */
     private long lastSocialTick = -6001L;
+    /** Persisted home bed (resolved from the structure index at first rest). "This is my house." Null until first rest. */
+    private BlockPos homeBedPos = null;
     /** The activity the daily schedule intends this villager to do right now. */
     private String scheduledActivity = null;
+    /** In-progress farmland-reclaim plan (flood-filled patch). Null when not reclaiming. */
+    private FarmReclaimState reclaimState = null;
 
     // ── Goals lifecycle ──
     /** The Minecraft day (gameTime / 24000) when goals were last pruned / fallback-generated. */
@@ -379,6 +384,9 @@ public class VillagerAgentData {
     public long getActionStartTime() { return actionStartTime; }
     public BuildJob getBuildJob() { return currentBuildJob; }
     public void setBuildJob(BuildJob job) { this.currentBuildJob = job; }
+
+    public BlockPos getHomeBedPos() { return homeBedPos; }
+    public void setHomeBedPos(BlockPos pos) { this.homeBedPos = pos; }
     public boolean hasLLMGenerationFailed() { return llmGenerationFailed; }
     public String getLLMErrorMessage() { return llmErrorMessage; }
     public long getLastRestockTime() { return lastRestockTime; }
@@ -413,6 +421,9 @@ public class VillagerAgentData {
     public void setLastSocialTick(long tick) { this.lastSocialTick = tick; }
     public String getScheduledActivity() { return scheduledActivity; }
     public void setScheduledActivity(String activity) { this.scheduledActivity = activity; }
+
+    public FarmReclaimState getReclaimState() { return reclaimState; }
+    public void setReclaimState(FarmReclaimState state) { this.reclaimState = state; }
 
     public long getLastGoalPruneDay() { return lastGoalPruneDay; }
     public void setLastGoalPruneDay(long day) { this.lastGoalPruneDay = day; }
@@ -1094,6 +1105,12 @@ public class VillagerAgentData {
             nbt.put("PlayerReputation", repList);
         }
 
+        // ── Persisted home bed (resolved from the structure index; "this is my house") ──
+        if (homeBedPos != null) nbt.putLong("HomeBed", homeBedPos.asLong());
+
+        // ── In-progress farmland reclaim plan (survives restarts) ──
+        if (reclaimState != null) nbt.put("ReclaimState", reclaimState.writeNBT());
+
         // ── Current mood (derived from needs; cheap to restore, avoids a NEUTRAL flicker) ──
         nbt.putInt("Mood", mood.ordinal());
 
@@ -1212,6 +1229,13 @@ public class VillagerAgentData {
                 }
             }
         }
+
+        // ── Persisted home bed ──
+        homeBedPos = nbt.contains("HomeBed") ? BlockPos.of(nbt.getLong("HomeBed")) : null;
+
+        // ── In-progress farmland reclaim plan ──
+        reclaimState = nbt.contains("ReclaimState")
+                ? FarmReclaimState.readNBT(nbt.getCompound("ReclaimState")) : null;
 
         // ── Player reputation ──
         playerReputation.clear();

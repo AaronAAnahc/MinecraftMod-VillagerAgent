@@ -46,6 +46,24 @@ public final class NativeRecipeResolver {
     }
 
     /**
+     * Resolve a craftable item to a {@link ResolvedRecipe}. Tries the game's own vanilla recipe
+     * (crafting table / furnace) first; if none exists, falls back to a {@link CustomRecipe}
+     * loaded from {@code custom_recipes.json}. Returns null when neither applies.
+     */
+    public static ResolvedRecipe resolveRecipe(ServerWorld world, String itemId) {
+        IRecipe<?> vanilla = findRecipe(world, itemId);
+        if (vanilla != null) return ResolvedRecipe.vanilla(vanilla);
+        CustomRecipe custom = CustomRecipeRegistry.get(itemId);
+        if (custom != null) return ResolvedRecipe.custom(custom);
+        return null;
+    }
+
+    public static ResolvedRecipe resolveRecipe(ServerWorld world, Item target) {
+        if (target == null) return null;
+        return resolveRecipe(world, target.getRegistryName().toString());
+    }
+
+    /**
      * Consume the recipe's ingredients from the inventory and produce the output.
      * Materials are verified and consumed <em>here, at execution time</em> — never at goal
      * creation — so a goal whose materials are lost beforehand fails honestly.

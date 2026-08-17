@@ -47,6 +47,10 @@ public class VillagerAction {
     private int stuckTicks;         // How many ticks the villager has been unable to reach target
     /** True when this action was started by the goal dispatcher (as opposed to the daily schedule). */
     private boolean goalDriven = false;
+    /** True for a "go to bed and rest" walk, so SleepSkill recognises its own in-progress move. */
+    private boolean restMove = false;
+    /** True for a farm-skill walk (till/plough), so the farm skills recognise their own move. */
+    private boolean farmMove = false;
 
     // ── World-interaction (PLACE / BREAK / BUILD) fields ──
     /** The legal standing cell the villager must occupy to reach targetBlockPos (Chebyshev <= 1). */
@@ -95,6 +99,12 @@ public class VillagerAction {
 
     public boolean isGoalDriven() { return goalDriven; }
     public void setGoalDriven(boolean goalDriven) { this.goalDriven = goalDriven; }
+
+    public boolean isRestMove() { return restMove; }
+    public void setRestMove(boolean restMove) { this.restMove = restMove; }
+
+    public boolean isFarmMove() { return farmMove; }
+    public void setFarmMove(boolean farmMove) { this.farmMove = farmMove; }
 
     // ── World-interaction accessors ──
     public BlockPos getStandCell() { return standCell; }

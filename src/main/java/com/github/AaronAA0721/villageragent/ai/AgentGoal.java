@@ -18,6 +18,7 @@ public class AgentGoal {
     private String targetProfession; // profession filter, e.g. "toolsmith" (converse)
     private String targetKind;       // "player" | "villager" (converse)
     private String targetBuildingType; // building type filter, e.g. "house"/"cave_house"/"any" (goto)
+    private String farmMode;            // for "farm" goals: "maintain" | "reclaim" (null = auto)
     private boolean completed;
     private long createdTime;
     /** How much the villager cares about this goal (1-10). Drives daily pruning + boosts. */
@@ -50,6 +51,10 @@ public class AgentGoal {
     public void setTargetKind(String kind) { this.targetKind = kind; }
     public String getTargetBuildingType() { return targetBuildingType; }
     public void setTargetBuildingType(String buildingType) { this.targetBuildingType = buildingType; }
+
+    /** For "farm" goals: "maintain" (reverted-old-farmland) or "reclaim" (open new land). */
+    public String getFarmMode() { return farmMode; }
+    public void setFarmMode(String mode) { this.farmMode = mode; }
     public boolean isCompleted() { return completed; }
     public void setCompleted(boolean completed) { this.completed = completed; }
     public long getCreatedTime() { return createdTime; }

@@ -114,7 +114,7 @@ public final class ActionValidator {
         if (!ProfessionCraftCatalog.isCraftable(agent.getProfession(), level, item)) {
             return ValidationResult.reject("craft:not-in-catalog:" + item, schema);
         }
-        if (world != null && NativeRecipeResolver.findRecipe(world, item) == null) {
+        if (world != null && NativeRecipeResolver.resolveRecipe(world, item) == null) {
             return ValidationResult.reject("craft:no-recipe:" + item, schema);
         }
         return ValidationResult.accept(schema);

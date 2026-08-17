@@ -4,6 +4,9 @@ import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
 import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
 import com.github.AaronAA0721.villageragent.ai.world.BuildingRecord;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
+import com.github.AaronAA0721.villageragent.ai.behavior.BehaviorExecutor;
+import com.github.AaronAA0721.villageragent.ai.behavior.SkillResult;
+import com.github.AaronAA0721.villageragent.ai.behavior.VillagerSkill;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.entity.Entity;
@@ -18,7 +21,6 @@ import net.minecraft.item.HoeItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.item.crafting.IRecipe;
 import net.minecraft.pathfinding.Path;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.Util;
@@ -939,9 +941,12 @@ public class VillagerAgentManager {
     private static void performFarmerActions(VillagerEntity villager, ServerWorld world, VillagerAgentData agent) {
         // ── 1. Walking to a target block — continue the action ──
         VillagerAction current = agent.getCurrentAction();
-        if (current != null && isFarmingAction(current)) {
-            continueFarmingAction(villager, world, agent, current);
-            return;
+        if (current != null) {
+            if (current.isFarmMove()) return;   // a farm skill owns this tick — don't fight it
+            if (isFarmingAction(current)) {
+                continueFarmingAction(villager, world, agent, current);
+                return;
+            }
         }
 
         // ── 2. Cooldown after a farming session ──
@@ -949,6 +954,9 @@ public class VillagerAgentManager {
             agent.tickFarmingCooldown(FARMING_TICK_INTERVAL);
             return; // resting — do nothing
         }
+
+        // ── 2b. Routine farm goal (tilling) — single unified funnel ──
+        ensureFarmRoutineGoal(villager, world, agent);
 
         // ── 3. In farming state — scan 360° for the next reachable block ──
         if (agent.isInFarmingState()) {
@@ -1005,6 +1013,30 @@ public class VillagerAgentManager {
                 return;
             }
         }
+    }
+
+    /**
+     * While the daily schedule says "farming", keep a single routine {@code farm} goal alive so
+     * the BehaviourExecutor routes tilling through the farm skills (maintain / reclaim). This is
+     * the concrete embodiment of "mode generates routine goals": the mode never drives behaviour
+     * directly, it only seeds the unified goal list. The goal is chosen by context — maintain when
+     * there is reverted farmland to fix, otherwise reclaim new land.
+     */
+    private static void ensureFarmRoutineGoal(VillagerEntity villager, ServerWorld world, VillagerAgentData agent) {
+        if (agent.getScheduledActivity() == null || !"farming".equals(agent.getScheduledActivity())) return;
+        for (AgentGoal g : agent.getGoals()) {
+            if ("farm".equals(g.getGoalType())) return; // already have one
+        }
+        VillagerAction ca = agent.getCurrentAction();
+        if (ca != null && ca.isFarmMove()) return;       // let an in-progress till finish first
+
+        String mode = FarmingAction.hasRevertedFarmlandNearby(world, villager.blockPosition(), FarmingAction.SCAN_RADIUS)
+                ? "maintain" : "reclaim";
+        AgentGoal g = new AgentGoal("farm",
+                mode.equals("maintain") ? "Maintain reverted farmland" : "Reclaim new farmland", 5);
+        g.setFarmMode(mode);
+        g.setImportance(6);
+        agent.getGoals().add(g);
     }
 
     /** Enter farming state — the villager commits to working the area. */
@@ -1347,9 +1379,29 @@ public class VillagerAgentManager {
         goals.sort((a, b) -> Integer.compare(b.getPriority(), a.getPriority()));
         AgentGoal currentGoal = goals.get(0);
 
+        // ── Autonomous skill dispatch (no LLM) ──
+        // The LLM only authors/adjusts goals; this executor runs them by priority on a fixed cadence.
+        // A skill that claims the top goal takes over and (on SUCCESS/FAIL) closes the goal. Goals no
+        // skill claims fall through to the legacy per-type handlers below.
+        long gt = villager.level.getGameTime();
+        if (gt % ModConfig.BEHAVIOR_EXECUTOR_INTERVAL_TICKS.get() == 0) {
+            VillagerSkill handler = BehaviorExecutor.findHandler(agent, currentGoal,
+                    villager, (ServerWorld) villager.level);
+            if (handler != null) {
+                SkillResult r = handler.execute(agent, currentGoal, villager, (ServerWorld) villager.level);
+                if (r == SkillResult.SUCCESS || r == SkillResult.FAIL) currentGoal.setCompleted(true);
+                goals.removeIf(AgentGoal::isCompleted);
+                return;
+            }
+        }
+
         // Hand movement control to the goal system so the daily-schedule activity system
-        // (explore / rest / craft via scheduledActivity) doesn't fight it.
-        agent.setScheduledActivity(null);
+        // (explore / rest / craft via scheduledActivity) doesn't fight it. Farm goals are the
+        // exception: their routine is re-seeded by the farming-mode scan, so clearing the mode
+        // here would kill the tilling loop.
+        if (!"farm".equals(currentGoal.getGoalType())) {
+            agent.setScheduledActivity(null);
+        }
 
         switch (currentGoal.getGoalType()) {
             case "gather":    executeGatherGoal(villager, agent, currentGoal);   break;
@@ -1360,8 +1412,9 @@ public class VillagerAgentManager {
             case "move":      executeMoveGoal(villager, agent, currentGoal);     break;
             case "goto":      executeGotoBuildingGoal(villager, agent, currentGoal); break;
             default:
-                LOGGER.warn("Unknown goal type: " + currentGoal.getGoalType());
-                currentGoal.setCompleted(true);
+                LOGGER.debug("No handler for goal type '{}' — leaving it for the skill system / next tick",
+                        currentGoal.getGoalType());
+                return;
         }
 
         // Remove completed goals
@@ -1529,7 +1582,7 @@ public class VillagerAgentManager {
             goal.setCompleted(true);
             return;
         }
-        IRecipe<?> recipe = NativeRecipeResolver.findRecipe(world, target);
+        ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, target);
         if (recipe == null) {
             agent.addMemory("No known recipe for " + itemId);
             goal.setCompleted(true);
@@ -1573,7 +1626,7 @@ public class VillagerAgentManager {
             if (cur.getStuckTicks() >= CRAFT_WORK_TICKS) {
                 int qty = Math.max(1, goal.getTargetQuantity());
                 // Execute-time re-check: materials may have been lost since the goal was set.
-                boolean ok = NativeRecipeResolver.consumeAndProduce(agent.getInventory(), recipe, qty);
+                boolean ok = recipe.consumeAndProduce(agent.getInventory(), qty);
                 if (ok && ProfessionCraftCatalog.canEnchant(agent.getProfession(), level, itemId)) {
                     enchantFirstStack(agent, target, villager);
                 }
