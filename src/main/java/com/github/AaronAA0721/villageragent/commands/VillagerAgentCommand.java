@@ -259,12 +259,12 @@ public class VillagerAgentCommand {
     }
 
     private static int setApiType(CommandContext<CommandSource> context) {
-        String type = StringArgumentType.getString(context, "type");
+        String type = StringArgumentType.getString(context, "type").toLowerCase(java.util.Locale.ROOT);
         CommandSource source = context.getSource();
 
-        if (!type.equals("openai") && !type.equals("anthropic") && !type.equals("ollama")) {
+        if (!type.equals("openai") && !type.equals("anthropic") && !type.equals("ollama") && !type.equals("gemini")) {
             source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Invalid API type: " + type), false);
-            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Valid types: openai, anthropic, ollama"), false);
+            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Valid types: openai, anthropic, ollama, gemini"), false);
             return 0;
         }
 

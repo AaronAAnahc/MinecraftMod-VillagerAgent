@@ -106,6 +106,8 @@ public class VillagerAgentData {
     private float fatigue = 0f;
     /** Game tick when the environment summary was last refreshed autonomously. */
     private long lastEnvRefreshTick = -1L;
+    /** Game tick when needs (hunger/fatigue) were last decayed. */
+    private long lastNeedsTick = 0L;
 
     // ── Mood system ──
     /**
@@ -424,6 +426,8 @@ public class VillagerAgentData {
     public void setFatigue(float fatigue) { this.fatigue = Math.max(0f, Math.min(100f, fatigue)); }
     public long getLastEnvRefreshTick() { return lastEnvRefreshTick; }
     public void setLastEnvRefreshTick(long tick) { this.lastEnvRefreshTick = tick; }
+    public long getLastNeedsTick() { return lastNeedsTick; }
+    public void setLastNeedsTick(long tick) { this.lastNeedsTick = tick; }
 
     // ── Spatial memory accessors ──
 
@@ -1004,6 +1008,7 @@ public class VillagerAgentData {
         nbt.putLong("LastDayReflected", lastDayReflected);
         nbt.putFloat("Hunger", hunger);
         nbt.putFloat("Fatigue", fatigue);
+        nbt.putLong("LastNeedsTick", lastNeedsTick);
 
         // Save chunk memories (each chunk's sampled content + entities)
         if (!chunkMemories.isEmpty()) {
@@ -1112,6 +1117,7 @@ public class VillagerAgentData {
         this.lastDayReflected = nbt.contains("LastDayReflected") ? nbt.getLong("LastDayReflected") : -1L;
         this.hunger  = nbt.contains("Hunger")  ? nbt.getFloat("Hunger")  : 100f;
         this.fatigue = nbt.contains("Fatigue") ? nbt.getFloat("Fatigue") : 0f;
+        this.lastNeedsTick = nbt.contains("LastNeedsTick") ? nbt.getLong("LastNeedsTick") : 0L;
 
         // Load chunk memories (old "VisitedChunks" long-array saves are ignored — no crash)
         chunkMemories.clear();

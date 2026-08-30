@@ -35,7 +35,7 @@ public class VillagerSchedulePlanner {
     public static void tick(ServerWorld world, VillagerEntity villager, VillagerAgentData agent) {
         long gameTime = world.getGameTime();
         long dayTime  = world.getDayTime() % MINECRAFT_DAY;
-        long today    = gameTime / MINECRAFT_DAY;
+        long today    = world.getDayTime() / MINECRAFT_DAY;
 
         // 1. Daily planning at dawn
         if (agent.getLastDayPlanned() < today && dayTime < PLAN_WINDOW_END) {

@@ -502,6 +502,8 @@ public final class BuildingLocator {
 
         // Union the room blob (boundary & non-room cells excluded) into the room AABB.
         boolean[][][] roomBlock = new boolean[SX][SY][SZ];
+        int minBX = Integer.MAX_VALUE, minBY = Integer.MAX_VALUE, minBZ = Integer.MAX_VALUE;
+        int maxBX = Integer.MIN_VALUE, maxBY = Integer.MIN_VALUE, maxBZ = Integer.MIN_VALUE;
         int minWX = Integer.MAX_VALUE, minWY = Integer.MAX_VALUE, minWZ = Integer.MAX_VALUE;
         int maxWX = Integer.MIN_VALUE, maxWY = Integer.MIN_VALUE, maxWZ = Integer.MIN_VALUE;
         int roomBlocks = 0;
@@ -517,6 +519,9 @@ public final class BuildingLocator {
             if (!roomBlock[bx][by][bz]) {
                 roomBlock[bx][by][bz] = true;
                 roomBlocks++;
+                minBX = Math.min(minBX, bx); maxBX = Math.max(maxBX, bx);
+                minBY = Math.min(minBY, by); maxBY = Math.max(maxBY, by);
+                minBZ = Math.min(minBZ, bz); maxBZ = Math.max(maxBZ, bz);
                 int wx = xMin + bx, wy = yMin + by, wz = zMin + bz;
                 minWX = Math.min(minWX, wx); maxWX = Math.max(maxWX, wx);
                 minWY = Math.min(minWY, wy); maxWY = Math.max(maxWY, wy);
@@ -527,7 +532,7 @@ public final class BuildingLocator {
         if (roomBlocks < MIN_ROOM) return null;
 
         // Step 8: cave vs normal house from the room AABB border blocks.
-        String type = classifyType(blockSolid, roomBlock, SX, SY, SZ, minWX, minWY, minWZ, maxWX, maxWY, maxWZ);
+        String type = classifyType(blockSolid, roomBlock, SX, SY, SZ, minBX, minBY, minBZ, maxBX, maxBY, maxBZ);
 
         // Expand the AABB by one block in ±x / ±y / ±z so the house shell (walls, floor & ceiling)
         // is enclosed. We do NOT clamp to the scan box: the scan box only bounds where we *sampled*

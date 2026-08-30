@@ -143,8 +143,11 @@ public class VillagerAgentManager {
 
             // Only update periodically to avoid performance issues
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
-                agent.setLastThinkTime(currentTime);
-                updateAgent(world, agent);
+                VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+                if (villager != null) {
+                    agent.setLastThinkTime(currentTime);
+                    updateAgent(world, villager, agent);
+                }
             }
         }
     }
@@ -214,7 +217,10 @@ public class VillagerAgentManager {
         ServerWorld serverWorld = (ServerWorld) world;
 
         for (VillagerAgentData agent : agents.values()) {
-            // Tick attack cooldown every tick
+            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+            if (villager == null) continue;
+
+            // Tick attack cooldown once per tick in the villager's active world
             agent.tickAttackCooldown();
 
             // Check if this villager is already in a combat action
@@ -228,9 +234,6 @@ public class VillagerAgentManager {
                 // Idle scan — run every COMBAT_SCAN_INTERVAL ticks
                 if (currentTime % COMBAT_SCAN_INTERVAL != 0) continue;
             }
-
-            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
-            if (villager == null) continue;
 
             performCombatActions(villager, serverWorld, agent);
         }
@@ -609,9 +612,7 @@ public class VillagerAgentManager {
      * Update a single agent's AI (slow tick — goals, restocking, etc.)
      * Farming and combat are handled separately by tickFarming()/tickCombat().
      */
-    private static void updateAgent(World world, VillagerAgentData agent) {
-        // Find the actual villager entity
-        VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+    private static void updateAgent(World world, VillagerEntity villager, VillagerAgentData agent) {
         if (villager == null) {
             return; // Villager not loaded or doesn't exist
         }

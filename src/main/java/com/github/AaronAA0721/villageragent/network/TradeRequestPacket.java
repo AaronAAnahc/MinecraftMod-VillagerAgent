@@ -216,18 +216,13 @@ public class TradeRequestPacket {
 
             LOGGER.info("Trade " + (accepted ? "ACCEPTED" : "REJECTED") + ": " + reason);
 
-            // Execute trade if accepted, otherwise return items to player
+            // Execute trade if accepted
             if (accepted) {
                 boolean success = executeTrade(player, agent, packet, villager);
                 if (!success) {
-                    // Trade failed (items not available) - return items to player
-                    reason = "Wait, I don't actually have those items. Sorry!";
+                    reason = "Wait, we don't have the required items for this trade. Sorry!";
                     accepted = false;
-                    returnItemsToPlayer(player, packet);
                 }
-            } else {
-                // Trade rejected - return the offered items to player
-                returnItemsToPlayer(player, packet);
             }
 
             // Send result to client, including the post-trade inventory/armor snapshot
@@ -246,17 +241,38 @@ public class TradeRequestPacket {
     }
 
     /**
-     * Return offered items to player when trade is rejected or fails
+     * Check whether the player has the required item stack in their inventory.
      */
-    private static void returnItemsToPlayer(ServerPlayerEntity player, TradeRequestPacket packet) {
-        if (!packet.offerItem1.isEmpty()) {
-            player.addItem(packet.offerItem1.copy());
-            LOGGER.info("Returned to player: " + packet.offerItem1.getCount() + "x " + packet.offerItem1.getItem().getRegistryName());
+    private static boolean playerHasItem(ServerPlayerEntity player, ItemStack stack) {
+        if (stack.isEmpty()) return true;
+        int count = 0;
+        for (ItemStack invStack : player.inventory.items) {
+            if (!invStack.isEmpty() && ItemStack.isSame(invStack, stack)) {
+                count += invStack.getCount();
+            }
         }
-        if (!packet.offerItem2.isEmpty()) {
-            player.addItem(packet.offerItem2.copy());
-            LOGGER.info("Returned to player: " + packet.offerItem2.getCount() + "x " + packet.offerItem2.getItem().getRegistryName());
+        return count >= stack.getCount();
+    }
+
+    /**
+     * Remove the specified item stack from the player's inventory.
+     */
+    private static boolean removePlayerItem(ServerPlayerEntity player, ItemStack stack) {
+        if (stack.isEmpty()) return true;
+        int remaining = stack.getCount();
+        for (int i = 0; i < player.inventory.items.size(); i++) {
+            ItemStack invStack = player.inventory.items.get(i);
+            if (!invStack.isEmpty() && ItemStack.isSame(invStack, stack)) {
+                int toRemove = Math.min(remaining, invStack.getCount());
+                invStack.shrink(toRemove);
+                remaining -= toRemove;
+                if (invStack.isEmpty()) {
+                    player.inventory.items.set(i, ItemStack.EMPTY);
+                }
+                if (remaining <= 0) return true;
+            }
         }
+        return remaining == 0;
     }
 
     /**
@@ -267,26 +283,54 @@ public class TradeRequestPacket {
      */
     private static boolean executeTrade(ServerPlayerEntity player, VillagerAgentData agent,
                                          TradeRequestPacket packet, VillagerEntity villager) {
-        // Verify villager has requested items (check inventory + equipped armor)
-        if (!packet.requestItem1.isEmpty()) {
-            if (!villagerHasItem(agent, villager, packet.requestItem1)) {
-                LOGGER.warn("Villager doesn't have: " + packet.requestItem1);
+        // Verify player has offered items
+        if (!packet.offerItem1.isEmpty() && !packet.offerItem2.isEmpty()
+                && ItemStack.isSame(packet.offerItem1, packet.offerItem2)) {
+            ItemStack combined = packet.offerItem1.copy();
+            combined.setCount(packet.offerItem1.getCount() + packet.offerItem2.getCount());
+            if (!playerHasItem(player, combined)) {
+                LOGGER.warn("Player doesn't have combined offered items: " + combined);
+                return false;
+            }
+        } else {
+            if (!packet.offerItem1.isEmpty() && !playerHasItem(player, packet.offerItem1)) {
+                LOGGER.warn("Player doesn't have: " + packet.offerItem1);
+                return false;
+            }
+            if (!packet.offerItem2.isEmpty() && !playerHasItem(player, packet.offerItem2)) {
+                LOGGER.warn("Player doesn't have: " + packet.offerItem2);
                 return false;
             }
         }
-        if (!packet.requestItem2.isEmpty()) {
-            if (!villagerHasItem(agent, villager, packet.requestItem2)) {
+
+        // Verify villager has requested items (check inventory + equipped armor)
+        if (!packet.requestItem1.isEmpty() && !packet.requestItem2.isEmpty()
+                && ItemStack.isSame(packet.requestItem1, packet.requestItem2)) {
+            ItemStack combined = packet.requestItem1.copy();
+            combined.setCount(packet.requestItem1.getCount() + packet.requestItem2.getCount());
+            if (!villagerHasItem(agent, villager, combined)) {
+                LOGGER.warn("Villager doesn't have combined requested items: " + combined);
+                return false;
+            }
+        } else {
+            if (!packet.requestItem1.isEmpty() && !villagerHasItem(agent, villager, packet.requestItem1)) {
+                LOGGER.warn("Villager doesn't have: " + packet.requestItem1);
+                return false;
+            }
+            if (!packet.requestItem2.isEmpty() && !villagerHasItem(agent, villager, packet.requestItem2)) {
                 LOGGER.warn("Villager doesn't have: " + packet.requestItem2);
                 return false;
             }
         }
 
-        // Add player's offered items to villager inventory
+        // Remove offered items from player
         if (!packet.offerItem1.isEmpty()) {
+            removePlayerItem(player, packet.offerItem1);
             agent.getInventory().addItem(packet.offerItem1.copy());
             LOGGER.info("Villager received: " + packet.offerItem1.getCount() + "x " + packet.offerItem1.getItem().getRegistryName());
         }
         if (!packet.offerItem2.isEmpty()) {
+            removePlayerItem(player, packet.offerItem2);
             agent.getInventory().addItem(packet.offerItem2.copy());
             LOGGER.info("Villager received: " + packet.offerItem2.getCount() + "x " + packet.offerItem2.getItem().getRegistryName());
         }
