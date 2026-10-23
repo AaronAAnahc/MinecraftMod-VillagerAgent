@@ -1,8 +1,11 @@
 package com.github.AaronAA0721.villageragent.ai;
 
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.item.ItemEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.item.ArmorItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.SoundCategory;
 import net.minecraft.util.SoundEvents;
@@ -52,7 +55,6 @@ public class ItemAttractionSystem {
      */
     public static void processItemAttraction(VillagerEntity villager, World world, VillagerAgentData agent) {
         if (villager == null || world == null || agent == null) return;
-
         // Search area: villager bounding box inflated by attraction range
         AxisAlignedBB searchBox = villager.getBoundingBox().inflate(ATTRACTION_RANGE);
         List<ItemEntity> nearbyItems = world.getEntitiesOfClass(ItemEntity.class, searchBox);
@@ -157,6 +159,9 @@ public class ItemAttractionSystem {
             itemEntity.remove();
             LOGGER.debug("{} picked up {}x {}", agent.getName(), originalCount,
                     stack.getItem().getRegistryName());
+            // Absorbing a drop trains the matching capability (ores→smithing, crops→farming, else gathering).
+            agent.gainCapabilityXp(capabilityForItem(stack), ModConfig.CAPABILITY_PRACTICE_XP.get(),
+                    villager, villager.level.getGameTime());
             // After adding items to inventory, re-evaluate equipment
             // (e.g. armor that wasn't better at direct-equip time may now
             // allow a full refresh to find the best combination)
@@ -179,6 +184,25 @@ public class ItemAttractionSystem {
                 0.2F,
                 ((villager.getRandom().nextFloat() - villager.getRandom().nextFloat()) * 0.7F + 1.0F) * 2.0F
         );
+    }
+
+    /** Map an absorbed drop to the capability it trains (ores→smithing, crops→farming, else gathering). */
+    private static CapabilityId capabilityForItem(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return CapabilityId.GATHERING;
+        Item item = stack.getItem();
+        if (item == null) return CapabilityId.GATHERING;
+        String id = item.getRegistryName() == null ? "" : item.getRegistryName().toString();
+        if (id.contains("ore") || id.contains("ingot") || id.contains("nugget")
+                || id.contains("diamond") || id.contains("emerald") || id.contains("gold")
+                || id.contains("iron") || id.contains("coal")) {
+            return CapabilityId.SMITHING;
+        }
+        if (id.contains("wheat") || id.contains("carrot") || id.contains("potato")
+                || id.contains("beetroot") || id.contains("seed") || id.contains("pumpkin")
+                || id.contains("melon") || id.contains("sugar_cane") || id.contains("apple")) {
+            return CapabilityId.FARMING;
+        }
+        return CapabilityId.GATHERING;
     }
 
     /** Attraction range in blocks. */

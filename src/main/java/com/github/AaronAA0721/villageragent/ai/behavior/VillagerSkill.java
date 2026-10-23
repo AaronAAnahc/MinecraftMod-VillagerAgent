@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai.behavior;
 
 import com.github.AaronAA0721.villageragent.ai.AgentGoal;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.world.server.ServerWorld;
 
@@ -23,6 +24,12 @@ public interface VillagerSkill {
     /** Stable unique id (e.g. {@code "sleep"}). Used for logging/debug only, never for routing. */
     String id();
 
+    /** Composite skills retain root ownership between internal steps. */
+    default boolean isComposite() { return false; }
+
+    /** Primitive roots are reserved for explicit LLM/player requests. */
+    default boolean isPrimitive() { return false; }
+
     /**
      * Whether this skill can satisfy {@code goal} for this villager right now.
      * Must be a pure predicate — never mutate state. The executor uses it to pick a handler.
@@ -35,4 +42,23 @@ public interface VillagerSkill {
      * executor whether to keep going, mark done, or escalate.
      */
     SkillResult execute(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world);
+
+    /**
+     * The capability this skill trains / requires, or {@code null} for a universal skill
+     * (sleep, move) with no capability gate. Paired with {@link #minLevel()}.
+     */
+    default CapabilityId requiredCapability() { return null; }
+
+    /** Minimum capability level to attempt this skill (0 = always allowed). */
+    default int minLevel() { return 0; }
+
+    /**
+     * Whether the villager's capability pool meets this skill's gate. Always true when the
+     * skill declares no {@link #requiredCapability()}. Implementations should call this at the
+     * top of {@link #canHandle} so the executor never routes an unqualified villager here.
+     */
+    default boolean passesCapabilityGate(VillagerAgentData agent) {
+        if (requiredCapability() == null || minLevel() <= 0) return true;
+        return agent.getCapabilityPool().levelOf(requiredCapability()) >= minLevel();
+    }
 }

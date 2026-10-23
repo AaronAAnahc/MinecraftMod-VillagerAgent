@@ -19,15 +19,14 @@ import java.util.Optional;
 import java.util.Random;
 
 /**
- * Translates a villager's {@code scheduledActivity} (set by {@link VillagerSchedulePlanner})
- * into real movement and world actions.
+ * <b>Legacy</b> scheduled-activity translator. The daily-schedule planner that fed
+ * {@code scheduledActivity} was removed (行为生成器统一重构方案): behaviour now flows through the
+ * goal funnel ({@code RoutineScheduler} → {@code GoalScheduler} → skills), so {@link #tick} is no
+ * longer called and the explore/rest/craft branches here are dead.
  *
- * <ul>
- *   <li><b>exploring</b> — picks a random point 20–50 blocks away and navigates there.</li>
- *   <li><b>resting</b>   — navigates to the villager's bed (HOME memory), then stops navigation.</li>
- *   <li><b>crafting</b>  — walks to the job-site block and logs work activity.</li>
- *   <li><b>farming / socializing</b> — handled by other systems; this class ignores them.</li>
- * </ul>
+ * <p>Two methods remain live and are called from {@code VillagerAgentManager.tickSleepHealing}:
+ * {@link #applySleepHealing} (regen while asleep) and {@link #wakeAtDawn} (get out of bed at dawn).
+ * Keep this class only for those two; do not re-wire {@code scheduledActivity} back into it.</p>
  */
 public class VillagerActivitySystem {
 
@@ -54,14 +53,18 @@ public class VillagerActivitySystem {
         long gameTime = world.getGameTime();
         if (gameTime % TICK_INTERVAL != 0) return;
 
-        // Never interrupt farming or combat — those systems manage themselves
-        if (agent.isInFarmingState() || agent.isOnFarmingCooldown()) return;
+        // A sleeping villager must not be driven by the daily-schedule activity system (explore /
+        // craft / rest all issue navigation) — that is what made it slide around while lying down.
+        // Sleep is owned by SleepSkill; wakeAtDawn (every tick) gets it out of bed in the morning.
+        if (villager.isSleeping()) return;
+
         // Never interrupt an in-progress build (single block or multi-block BuildJob)
         if (agent.getBuildJob() != null) return;
         VillagerAction cur = agent.getCurrentAction();
         if (cur != null && (cur.getActionType() == VillagerAction.ActionType.ATTACK
                 || cur.getActionType() == VillagerAction.ActionType.HARVEST
                 || cur.getActionType() == VillagerAction.ActionType.GROW
+                || cur.getActionType() == VillagerAction.ActionType.GATHER
                 || cur.getActionType() == VillagerAction.ActionType.PLACE
                 || cur.getActionType() == VillagerAction.ActionType.BREAK
                 || cur.getActionType() == VillagerAction.ActionType.FLEE
@@ -177,6 +180,19 @@ public class VillagerActivitySystem {
         }
     }
 
+    /**
+     * Wake a villager that is still asleep after the sleep window has ended. Called every tick;
+     * mirrors vanilla {@code SleepAtHomeTask} — when the REST activity ends at dawn the task's
+     * {@code stop()} calls {@code stopSleeping()}, so the villager gets out of bed exactly at dawn.
+     */
+    public static void wakeAtDawn(ServerWorld world, VillagerEntity villager) {
+        VillagerAgentData agent = VillagerAgentManager.getAgent(villager.getUUID());
+        if (agent != null && SleepSkill.isSleepGoal(agent.getRunningGoal())) return;
+        if (villager.isSleeping() && !SleepSkill.isNightTime(world.getDayTime())) {
+            villager.stopSleeping();
+        }
+    }
+
     // ── Crafting ─────────────────────────────────────────────────────────────
 
     /** Ticks the villager must remain at the workstation before crafting completes (~10 s). */
@@ -259,22 +275,22 @@ public class VillagerActivitySystem {
 
     /**
      * Attempt to craft an item from the villager's profession catalog at its workstation.
-     * This is the goal-driven path ({@link ProfessionCraftCatalog} + {@link NativeRecipeResolver}),
-     * matching what {@code executeCraftGoal} does — the old hard-coded {@code RecipeRegistry}
+     * This is the goal-driven path ({@link SkillCraftCatalog} + {@link NativeRecipeResolver}),
+     * matching what {@code CraftSkill} does — the old hard-coded {@code RecipeRegistry}
      * path is retired so every craft resolves through the same catalogue + native recipe.
      */
     private static void finalizeCrafting(ServerWorld world, VillagerEntity villager, VillagerAgentData agent) {
         String profession = agent.getProfession();
         int level = villager.getVillagerData().getLevel();
 
-        for (String itemId : ProfessionCraftCatalog.getCraftableIds(profession, level)) {
+        for (String itemId : SkillCraftCatalog.getCraftableIds(profession, level)) {
             Item item = ForgeRegistries.ITEMS.getValue(new ResourceLocation(itemId));
             if (item == null || item == Items.AIR) continue;
             ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, item);
             if (recipe == null) continue;
             // consumeAndProduce re-verifies materials at execution time; skip to the next if short.
             if (!recipe.consumeAndProduce(agent.getInventory(), 1)) continue;
-            if (ProfessionCraftCatalog.canEnchant(profession, level, itemId)) {
+            if (SkillCraftCatalog.canEnchant(profession, level, itemId)) {
                 enchantFirstCrafted(agent, item, villager);
             }
             agent.addMemory("Crafted " + itemId + " at my workstation — good work today!");

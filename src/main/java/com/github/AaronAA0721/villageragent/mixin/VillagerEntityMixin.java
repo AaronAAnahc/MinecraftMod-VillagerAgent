@@ -11,36 +11,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * Mixin into VillagerEntity to suppress vanilla brain AI when our agent system
- * is actively controlling the villager.
- *
- * <p>{@code customServerAiStep()} is the method called every server tick that:
- * <ol>
- *   <li>Ticks the Brain (runs all behavior tasks for CORE, WORK, IDLE, MEET, REST, etc.)</li>
- *   <li>Updates the schedule (switches activities based on time of day)</li>
- *   <li>Runs vanilla farmer harvesting, villager socializing, pathfinding to beds/job sites, etc.</li>
- * </ol>
- *
- * <p>When our agent has an active task (farming, crafting, socializing, etc.) we cancel
- * this method entirely so vanilla behaviors don't fight with our navigation and actions.
- * When the agent is truly idle, we let vanilla run so the villager wanders, sleeps, and
- * behaves naturally.
- *
- * <p>As we implement more custom systems (sleeping, socializing, combat), we can expand
- * the "agent is active" condition until we eventually always suppress vanilla.
- *
- * <h3>Vanilla activities suppressed when active:</h3>
- * <ul>
- *   <li><b>CORE</b> — MoveToTargetSink, LookAtTargetSink, AcquirePoi, ValidateNearbyPoi</li>
- *   <li><b>WORK</b> — StrollAroundPoi, StrollToPoi, WorkAtPoi, HarvestFarmland, UseBonemeal</li>
- *   <li><b>IDLE</b> — StrollAroundPoi, SetWalkTargetFromBlockMemory, InteractWith, DoNothing</li>
- *   <li><b>MEET</b> — StrollToPoiList, SocializeAtBell, InteractWith (gossip)</li>
- *   <li><b>REST</b> — SetWalkTargetFromBlockMemory (walk to bed), SleepInBed, InsideBrownianWalk</li>
- *   <li><b>PANIC</b> — SetWalkTargetAwayFrom (flee from threats)</li>
- *   <li><b>PRE_RAID/RAID/HIDE</b> — raid-related hiding and celebration</li>
- * </ul>
- */
+/** Managed adult villagers use the rule brain for all intentions. Vanilla navigation and
+ * physics still advance normally; vanilla activity scheduling never resumes between actions. */
 @Mixin(VillagerEntity.class)
 public abstract class VillagerEntityMixin {
 
@@ -64,47 +36,11 @@ public abstract class VillagerEntityMixin {
         // Suppress vanilla brain when our agent is actively doing something.
         // This prevents vanilla WORK/IDLE/MEET/REST activities from issuing
         // competing navigation commands.
-        if (isAgentActive(agent)) {
+        // A sleeping villager also counts as "active": SleepSkill drives sleep, and vanilla
+        // wandering at night would otherwise drag the lying villager around.
+        if (!self.isBaby()) {
             ci.cancel();
         }
-    }
-
-    /**
-     * Determine whether our agent system is actively controlling this villager.
-     * When true, vanilla brain is suppressed.
-     *
-     * <p>Currently active when:
-     * <ul>
-     *   <li>The agent has a current action (farming, crafting, walking to target, etc.)</li>
-     *   <li>The agent is in farming state (scanning for crops, between individual harvests)</li>
-     *   <li>The agent is on farming cooldown (brief rest between farming sessions)</li>
-     *   <li>The scheduled activity is "resting" — we park the villager at home ourselves,
-     *       so vanilla REST/IDLE paths must not override that.</li>
-     * </ul>
-     */
-    private static boolean isAgentActive(VillagerAgentData agent) {
-        // Has an in-progress action (walking to crop, harvesting, planting, crafting, etc.)
-        if (agent.getCurrentAction() != null) {
-            return true;
-        }
-
-        // In farming state — actively scanning for next crop/farmland
-        if (agent.isInFarmingState()) {
-            return true;
-        }
-
-        // On farming cooldown — brief rest, don't let vanilla yank the villager away
-        if (agent.isOnFarmingCooldown()) {
-            return true;
-        }
-
-        // Resting — VillagerActivitySystem has navigated the villager home and stopped navigation;
-        // suppress vanilla so it doesn't drag the villager back to its job site or bell.
-        if ("resting".equals(agent.getScheduledActivity())) {
-            return true;
-        }
-
-        return false;
     }
 
     /**

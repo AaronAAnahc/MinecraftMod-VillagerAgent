@@ -1,10 +1,11 @@
 package com.github.AaronAA0721.villageragent.network;
 
 import com.github.AaronAA0721.villageragent.ai.DebtAgenda;
-import com.github.AaronAA0721.villageragent.ai.LLMService;
 import com.github.AaronAA0721.villageragent.ai.LongTermAgenda;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
+import com.github.AaronAA0721.villageragent.ai.VillagerEconomySystem;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import com.github.AaronAA0721.villageragent.ai.VillagerEquipmentHelper;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
@@ -78,12 +79,12 @@ public class TradeRequestPacket {
             Entity entity = serverWorld.getEntity(packet.villagerId);
             VillagerEntity villager = (entity instanceof VillagerEntity) ? (VillagerEntity) entity : null;
 
-            // Build trade description for LLM
+            // Build trade description for logging
             String tradeDescription = buildTradeDescription(packet, agent);
             LOGGER.info("Trade request: " + tradeDescription);
 
-            // Ask LLM to evaluate the trade (pass villager for armor-aware inventory description)
-            evaluateTradeWithLLM(player, agent, packet, tradeDescription, villager);
+            // Evaluate the trade deterministically from the value table (LLM-free).
+            evaluateTradeWithValueTable(player, agent, packet, villager);
         });
         ctx.get().setPacketHandled(true);
     }
@@ -176,73 +177,57 @@ public class TradeRequestPacket {
         return sb.toString();
     }
 
-    private static void evaluateTradeWithLLM(ServerPlayerEntity player, VillagerAgentData agent,
-                                              TradeRequestPacket packet, String tradeDescription,
-                                              VillagerEntity villager) {
-        String profession = agent.getProfession();
-        String inventoryDesc = buildInventoryDescription(agent, villager);
+    /**
+     * Evaluate a player-initiated trade deterministically from the per-profession value table — no LLM needed.
+     * The villager values what the player offers at its own <b>buy</b> price (what it would pay to acquire
+     * those goods) and what the player requests at its own <b>sell</b> price (what it charges to part with
+     * them). Accepted when offered value >= requested value × tolerance. Items absent from this profession's
+     * trade table count as 0.01 (physically received but not valued), so a player cannot trade junk for
+     * valuables — nor trade goods this profession simply does not deal in.
+     */
+    private static void evaluateTradeWithValueTable(ServerPlayerEntity player, VillagerAgentData agent,
+                                                   TradeRequestPacket packet, VillagerEntity villager) {
+        double offered = buyValueOf(packet.offerItem1, agent) + buyValueOf(packet.offerItem2, agent);
+        double requested = sellValueOf(packet.requestItem1, agent) + sellValueOf(packet.requestItem2, agent);
+        boolean accepted = offered >= requested * ModConfig.BARTER_FAIRNESS_TOLERANCE.get();
 
-        // Flexible, personality-driven prompt
-        String systemPrompt = "You are " + agent.getName() + ", a " + profession + " villager in Minecraft. " +
-                "Your personality: " + agent.getPersonality() + ".\n\n" +
-                "A player wants to trade with you.\n\n" +
-                "YOUR CURRENT INVENTORY (items you own and can trade away):\n" + inventoryDesc + "\n\n" +
-                "TRADE VALUE GUIDE:\n" +
-                "- Emeralds, gold ingots, and diamonds are valuable currencies.\n" +
-                "- Rare items (diamonds, enchanted gear, netherite) are very precious.\n" +
-                "- Common blocks (dirt, cobblestone, grass, sand) have little value.\n" +
-                "- Food and tools have moderate value depending on quality.\n" +
-                "- You can only give away items you actually HAVE (including equipped armor).\n\n" +
-                "Let your personality guide your decision. Think freely about:\n" +
-                "- Is this trade fair in terms of value?\n" +
-                "- Do you want or need what they're giving you?\n" +
-                "- Does this feel like a good deal for YOU?\n\n" +
-                "Respond with EXACTLY: ACCEPT or REJECT followed by a short in-character reason (1 sentence).";
-
-        String userPrompt = "TRADE PROPOSAL:\n" + tradeDescription +
-                "\n\nDo you accept this trade? Respond in character, starting with ACCEPT or REJECT.";
-
-        LLMService.queryLLM(systemPrompt, userPrompt).thenAccept(response -> {
-            boolean accepted = response.toUpperCase().startsWith("ACCEPT");
-            String reason = response.length() > 7 ? response.substring(7).trim() : response;
-
-            // Clean up the reason - remove leading punctuation
-            if (reason.startsWith(":") || reason.startsWith("-") || reason.startsWith(".")) {
-                reason = reason.substring(1).trim();
-            }
-            if (reason.startsWith("!")) {
-                reason = reason.substring(1).trim();
-            }
-
-            LOGGER.info("Trade " + (accepted ? "ACCEPTED" : "REJECTED") + ": " + reason);
-
-            // Execute trade if accepted, otherwise return items to player
-            if (accepted) {
-                boolean success = executeTrade(player, agent, packet, villager);
-                if (!success) {
-                    // Trade failed (items not available) - return items to player
-                    reason = "Wait, I don't actually have those items. Sorry!";
-                    accepted = false;
-                    returnItemsToPlayer(player, packet);
-                }
-            } else {
-                // Trade rejected - return the offered items to player
+        String reason;
+        if (accepted) {
+            reason = "That's a fair trade.";
+            boolean success = executeTrade(player, agent, packet, villager);
+            if (!success) {
+                reason = "Wait, I don't actually have those items. Sorry!";
+                accepted = false;
                 returnItemsToPlayer(player, packet);
             }
+        } else {
+            reason = "That's not worth it for me.";
+            returnItemsToPlayer(player, packet);
+        }
 
-            // Send result to client, including the post-trade inventory/armor snapshot
-            // so the client can refresh its cached display immediately.
-            List<ItemStack> updatedInventory = collectInventorySnapshot(agent);
-            List<ItemStack> updatedArmor = collectArmorSnapshot(villager);
-            TradeResultPacket resultPacket = new TradeResultPacket(
-                    packet.villagerId,
-                    accepted,
-                    reason,
-                    updatedInventory,
-                    updatedArmor
-            );
-            ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), resultPacket);
-        });
+        LOGGER.info("Trade " + (accepted ? "ACCEPTED" : "REJECTED")
+                + " (offered " + offered + " >= requested " + requested + "): " + reason);
+
+        // Send result to client, including the post-trade inventory/armor snapshot for immediate refresh.
+        List<ItemStack> updatedInventory = collectInventorySnapshot(agent);
+        List<ItemStack> updatedArmor = collectArmorSnapshot(villager);
+        TradeResultPacket resultPacket = new TradeResultPacket(
+                packet.villagerId, accepted, reason, updatedInventory, updatedArmor);
+        ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), resultPacket);
+    }
+
+    /** What this villager would pay for the stack, per its personal value table (0.01/unit if it doesn't trade in it). */
+    private static double buyValueOf(ItemStack stack, VillagerAgentData agent) {
+        if (stack.isEmpty()) return 0.0;
+        return VillagerEconomySystem.buyValue(agent,
+                stack.getItem().getRegistryName().toString()) * stack.getCount();
+    }
+
+    /** What this villager would charge for the stack, per its personal value table (0.01/unit if it doesn't trade in it). */
+    private static double sellValueOf(ItemStack stack, VillagerAgentData agent) {
+        if (stack.isEmpty()) return 0.0;
+        return VillagerEconomySystem.sellValue(agent,
+                stack.getItem().getRegistryName().toString()) * stack.getCount();
     }
 
     /**

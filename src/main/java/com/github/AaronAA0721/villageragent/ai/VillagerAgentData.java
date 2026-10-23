@@ -10,6 +10,8 @@ import com.github.AaronAA0721.villageragent.ai.vision.ChunkContentSampler;
 import com.github.AaronAA0721.villageragent.ai.world.BuildingRecord;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
 import com.github.AaronAA0721.villageragent.ai.behavior.FarmReclaimState;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityPool;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
@@ -62,12 +64,29 @@ public class VillagerAgentData {
     private List<String> memories;
     private Map<String, Integer> relationships; // villager UUID -> relationship score
     private List<AgentGoal> goals;
+    /** The goal currently being driven (in-memory only — goals are re-derived each session). */
+    private AgentGoal runningGoal;
+    /** Consecutive BLOCKED returns from the running goal's skill (in-memory; used to give up). */
+    private int blockedStreak = 0;
     private List<LongTermAgenda> agendas;
     /** Player UUID -> reputation with this villager (-100..100). Drives debt/duty accountability. */
     private final Map<UUID, Integer> playerReputation = new HashMap<>();
     private AgentInventory inventory;
     private Map<String, Object> preferences; // trading preferences, item values, etc.
+    /**
+     * This villager's <b>personal</b> value table — a deep copy of its profession template, made on
+     * first economic interaction and then individually editable. Null until first use, so a villager
+     * that never trades costs nothing. Trades read ONLY this table (never the shared template), so
+     * two villagers of the same profession can hold different prices.
+     */
+    private Map<String, VillagerEconomySystem.Price> personalValueTable = null;
     private long lastThinkTime;
+    /** Game tick when the goal skill executor last dispatched (throttles skill execution). */
+    private long lastExecutorTick = 0;
+    /** Game tick of the last DECIDE trace emitted by GoalScheduler (throttles decision logging). */
+    private long lastDecisionLogTick = 0;
+    /** Consecutive skill-dispatch RUNNING results for the current running goal (stuck-skill detection). */
+    private int runningStreak = 0;
     private String currentActivity;
     private VillagerAction currentAction;  // Current action being executed
     private long actionStartTime;  // When the current action started
@@ -75,20 +94,12 @@ public class VillagerAgentData {
     private volatile boolean llmGenerationFailed = false;
     private volatile String llmErrorMessage = null;
     private long lastRestockTime = 0;  // Track when villager last restocked at job block
-    private boolean inFarmingState = false;       // true while the villager is actively farming an area
-    private int farmingCooldownTicks = 0;          // >0 means the villager is resting after a farming session
     private int attackCooldownTicks = 0;           // >0 means the villager can't attack yet
 
     /** Latest environment snapshot, built by VillagerVisionSystem before each chat response. */
     private String lastEnvironmentSummary = null;
 
-    // ── Daily schedule / autonomous lifecycle ──
-    /** The villager's plan for today, generated once per dawn by VillagerSchedulePlanner. */
-    private DailySchedule dailySchedule = null;
-    /** The Minecraft day number (gameTime / 24000) when the plan was last generated. */
-    private long lastDayPlanned = -1L;
-    /** The Minecraft day number when an evening reflection was last generated. */
-    private long lastDayReflected = -1L;
+    // ── Autonomous lifecycle ──
     /** True while this villager is mid-way through an LLM-generated social conversation. */
     private volatile boolean socializing = false;
     /** Game tick of the last social interaction (used for cooldown). */
@@ -97,12 +108,48 @@ public class VillagerAgentData {
     private BlockPos homeBedPos = null;
     /** The activity the daily schedule intends this villager to do right now. */
     private String scheduledActivity = null;
-    /** In-progress farmland-reclaim plan (flood-filled patch). Null when not reclaiming. */
+    /**
+     * @deprecated Legacy {@code FarmReclaimState} flood-fill plan. The redesigned FarmSkill picks
+     *             one reclaim block per dispatch and keeps no plan, so nothing writes this anymore;
+     *             the NBT round-trip is kept only so existing saves still load. Safe to delete.
+     */
+    @Deprecated
     private FarmReclaimState reclaimState = null;
+
+    // ── Farm skill state ──
+    /**
+     * Work steps completed in the current farm session. Used by the redesigned FarmSkill to cap a
+     * session ({@code MAX_STEPS_PER_SESSION}); the old round-robin machine used it as a tick
+     * counter, hence the slightly misleading name. Session-local, reset when the goal ends.
+     */
+    private int farmTicks = 0;
+    /**
+     * @deprecated Legacy round-robin cursor (0=harvest, 1=plant, 2=maintain, 3=reclaim). The
+     *             redesigned FarmSkill re-plans from the world every dispatch and no round-robin
+     *             exists anymore. Kept only so nothing else breaks; delete together with its use.
+     */
+    @Deprecated
+    private int farmRRIndex = 0;
+    /**
+     * @deprecated Legacy focused-category index (-1 = none). Superseded by the per-step pin that
+     *             lives in the root task execution frame.
+     */
+    @Deprecated
+    private int farmFocus = -1;
+
+    /** Per-villager capability table (what they know and how strong). Grows, decays, gates skills. */
+    private CapabilityPool capabilityPool = new CapabilityPool();
+
+    /** Craftable items derived from capability levels (empty until first refresh). */
+    private UnlockedRecipes unlockedRecipes = new UnlockedRecipes();
 
     // ── Goals lifecycle ──
     /** The Minecraft day (gameTime / 24000) when goals were last pruned / fallback-generated. */
     private long lastGoalPruneDay = -1L;
+
+    // ── Capability decay ──
+    /** The Minecraft day when capability XP was last decayed (once per day, persists to avoid double-decay). */
+    private long lastCapabilityDecayDay = -1L;
 
     // ── Needs system ──
     /** Current hunger level (0 = starving, 100 = full). Starts full. */
@@ -147,6 +194,13 @@ public class VillagerAgentData {
     /** The chunk the villager was in last tick — used to detect chunk transitions. */
     private long lastChunkKey = Long.MIN_VALUE;
 
+    // ── World event bus cursor ──
+    /** Index of the last {@link com.github.AaronAA0721.villageragent.ai.world.WorldEventBus} event this villager consumed. */
+    private long eventCursor = 0L;
+
+    public long getEventCursor() { return eventCursor; }
+    public void setEventCursor(long c) { this.eventCursor = c; }
+
     // ── Memory summarization ──
     /** True while an async LLM memory-compression call is in flight. */
     private volatile boolean summarizingMemories = false;
@@ -174,12 +228,16 @@ public class VillagerAgentData {
         this.conversationHistory = new ArrayList<>();
         this.memories = new ArrayList<>();
         this.relationships = new HashMap<>();
-        this.goals = new ArrayList<>();
+        this.goals = new GoalQueue();
         this.agendas = new ArrayList<>();
         this.inventory = new AgentInventory();
         this.preferences = new HashMap<>();
         this.lastThinkTime = 0;
         this.currentActivity = "idle";
+
+        // Born with all capabilities at 0 and one random "hobby" at level 1 (deterministic per
+        // villager). The profession claim in updateProfession() bumps the main capability +3.
+        seedInitialCapabilities();
 
         // Brand-new villager: kick off async identity generation (never blocks).
         // Loading from saved data: skip — deserializeNBT restores the real identity.
@@ -199,24 +257,76 @@ public class VillagerAgentData {
     public void updateProfession(String newProfession) {
         if (newProfession != null && !newProfession.isEmpty()) {
             String oldProfession = this.profession;
-            boolean hadNoJob = oldProfession == null || oldProfession.isEmpty() ||
-                               oldProfession.equalsIgnoreCase("none") ||
-                               oldProfession.equalsIgnoreCase("villager");
-            boolean gettingJob = !newProfession.equalsIgnoreCase("none") &&
-                                 !newProfession.equalsIgnoreCase("villager");
+            // "No job" covers all the ways vanilla / this mod spell unemployment — notably the
+            // humanised "Unemployed Villager" string from VillagerEventHandler, which previously
+            // fell through and skipped starter items on the first profession claim.
+            boolean hadNoJob = isNoJob(oldProfession);
+            boolean gettingJob = isEmployed(newProfession);
 
+            if (!newProfession.equals(this.profession)) {
+                // Profession changed → the old personal price table no longer applies.
+                this.personalValueTable = null;
+            }
             this.profession = newProfession;
 
-            // Generate profession-specific goals
-            this.goals = ProfessionGoalGenerator.generateGoalsForProfession(newProfession);
-            LOGGER.info("Generated " + this.goals.size() + " goals for profession: " + newProfession);
+            // Routine goals are now generated deterministically at dawn (DeterministicPlanGenerator)
+            // and by the LLM/harness; the old static per-profession if-else (ProfessionGoalGenerator)
+            // is retired.
 
-            // Only give starter items when getting a job from not having one
-            if (hadNoJob && gettingJob) {
-                JobStarterItems.giveStarterItems(this);
-                LOGGER.info("Gave starter items to " + name + " for new profession: " + newProfession);
-                addMemory("Received starter items for new profession: " + newProfession);
+            if (gettingJob) {
+                // Starter items only on the actual no-job -> job transition.
+                if (hadNoJob) {
+                    JobStarterItems.giveStarterItems(this);
+                    LOGGER.info("Gave starter items to " + name + " for new profession: " + newProfession);
+                    addMemory("Received starter items for new profession: " + newProfession);
+                }
+                // A fresh profession must be able to restock immediately — a restock done under the
+                // previous profession (e.g. an Unemployed one that produces nothing) must not lock
+                // out the new job's tools for a whole 24k-tick cooldown. Reset to allow it.
+                this.lastRestockTime = 0;
+                // Capability claim / self-heal: ensure the profession's main capability is at least
+                // at baseline. Idempotent (only raises), so it covers fresh claims AND old saves
+                // loaded with a missing / level-0 main capability (mod-version-upgrade migration).
+                healProfessionCapability();
+            } else if (newProfession.equalsIgnoreCase("nitwit")) {
+                // Nitwits never claim a workstation and have no hobby — they know nothing.
+                capabilityPool = new CapabilityPool();
             }
+        }
+    }
+
+    /** True if the given (possibly humanised) profession string means "has a job". */
+    private static boolean isEmployed(String profession) {
+        return !isNoJob(profession);
+    }
+
+    /** True if the given profession string means "no job" (unemployed / villager / nitwit). */
+    private static boolean isNoJob(String profession) {
+        if (profession == null || profession.isEmpty()) return true;
+        String p = profession.toLowerCase(Locale.ROOT);
+        return p.equals("none") || p.equals("villager") || p.equals("unemployed")
+                || p.equals("unemployed villager") || p.equals("nitwit");
+    }
+
+    /**
+     * 职业主能力基线：旧存档（mod 版本更新前）可能缺能力数据或为 0，低于此值的村民会在
+     * {@link #healProfessionCapability()} 里被补到基线。与原 claim 的 +3 一致。
+     */
+    private static final int PROFESSION_BASELINE_LEVEL = 3;
+
+    /**
+     * 能力自愈：若当前职业对应的主能力低于 {@link #PROFESSION_BASELINE_LEVEL}（旧存档缺失/为 0，
+     * 或职业刚领但能力停在 0），补到基线。幂等、只升不降，避免旧村民被所有带能力门控的技能挡掉。
+     */
+    public void healProfessionCapability() {
+        CapabilityId main = CapabilityId.mainForProfession(profession);
+        if (main == null) return;
+        int current = capabilityPool.levelOf(main);
+        if (current < PROFESSION_BASELINE_LEVEL) {
+            capabilityPool.setLevel(main, PROFESSION_BASELINE_LEVEL);
+            LOGGER.info(name + " healed profession capability — " + main + " " + current
+                    + " -> " + PROFESSION_BASELINE_LEVEL + " (profession=" + profession + ")");
+            refreshUnlockedRecipes();
         }
     }
 
@@ -368,18 +478,65 @@ public class VillagerAgentData {
     public List<String> getMemories() { return memories; }
     public Map<String, Integer> getRelationships() { return relationships; }
     public List<AgentGoal> getGoals() { return goals; }
+    private final BrainRuntime brainRuntime = new BrainRuntime();
+    private com.github.AaronAA0721.villageragent.ai.work.ResourceProfession resourceProfession =
+            com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE;
+    private boolean resourceStarterGiven;
+    public BrainRuntime brain() { return brainRuntime; }
+    public com.github.AaronAA0721.villageragent.ai.work.ResourceProfession getResourceProfession() { return resourceProfession; }
+    public void setResourceProfession(com.github.AaronAA0721.villageragent.ai.work.ResourceProfession role) { resourceProfession = role; }
+    public boolean hasResourceStarter() { return resourceStarterGiven; }
+    public void markResourceStarterGiven() { resourceStarterGiven = true; }
+    public AgentGoal getRunningGoal() { return runningGoal; }
+    public void setRunningGoal(AgentGoal goal) { this.runningGoal = goal; }
+    public int getBlockedStreak() { return blockedStreak; }
+    public void setBlockedStreak(int n) { this.blockedStreak = n; }
+
+    /**
+     * Suspend the goal currently being driven. Used by the reactive combat/panic override
+     * (Settlements-style): a threat takes over the villager, so the plan pauses instead of being
+     * dropped. Its FSM state (reclaim plan, target, …) stays on the agent and resumes later.
+     */
+    public void suspendRunningGoal() {
+        if (runningGoal != null && !runningGoal.isCompleted()) {
+            runningGoal.setSuspended(true);
+            BrainLog.goalState(this, runningGoal, "suspended", "combat_override");
+        }
+    }
+
+    /** Resume every suspended goal (called when the reactive override — combat/panic — ends). */
+    public void resumeSuspendedGoals() {
+        for (AgentGoal g : goals) {
+            if (g.isSuspended()) {
+                g.setSuspended(false);
+                BrainLog.goalState(this, g, "resumed", "combat_ended");
+            }
+        }
+    }
     public List<LongTermAgenda> getAgendas() { return agendas; }
     public Map<UUID, Integer> getPlayerReputation() { return playerReputation; }
     public AgentInventory getInventory() { return inventory; }
     public Map<String, Object> getPreferences() { return preferences; }
+
+    /** This villager's personal value table, or null until first economic use. */
+    public Map<String, VillagerEconomySystem.Price> getPersonalValueTable() { return personalValueTable; }
+    public void setPersonalValueTable(Map<String, VillagerEconomySystem.Price> table) { this.personalValueTable = table; }
+    public boolean hasPersonalValueTable() { return personalValueTable != null; }
     public long getLastThinkTime() { return lastThinkTime; }
     public void setLastThinkTime(long time) { this.lastThinkTime = time; }
+    public long getLastExecutorTick() { return lastExecutorTick; }
+    public void setLastExecutorTick(long tick) { this.lastExecutorTick = tick; }
+    public long getLastDecisionLogTick() { return lastDecisionLogTick; }
+    public void setLastDecisionLogTick(long tick) { this.lastDecisionLogTick = tick; }
+    public int getRunningStreak() { return runningStreak; }
+    public void setRunningStreak(int n) { this.runningStreak = n; }
     public String getCurrentActivity() { return currentActivity; }
     public void setCurrentActivity(String activity) { this.currentActivity = activity; }
     public VillagerAction getCurrentAction() { return currentAction; }
     public void setCurrentAction(VillagerAction action) {
         this.currentAction = action;
         this.actionStartTime = System.currentTimeMillis();
+        BrainLog.actionChange(this, action);
     }
     public long getActionStartTime() { return actionStartTime; }
     public BuildJob getBuildJob() { return currentBuildJob; }
@@ -391,13 +548,6 @@ public class VillagerAgentData {
     public String getLLMErrorMessage() { return llmErrorMessage; }
     public long getLastRestockTime() { return lastRestockTime; }
     public void setLastRestockTime(long time) { this.lastRestockTime = time; }
-    public boolean isInFarmingState() { return inFarmingState; }
-    public void setInFarmingState(boolean farming) { this.inFarmingState = farming; }
-    public int getFarmingCooldownTicks() { return farmingCooldownTicks; }
-    public void setFarmingCooldownTicks(int ticks) { this.farmingCooldownTicks = ticks; }
-    public boolean isOnFarmingCooldown() { return farmingCooldownTicks > 0; }
-    public void tickFarmingCooldown() { if (farmingCooldownTicks > 0) farmingCooldownTicks--; }
-    public void tickFarmingCooldown(int ticks) { farmingCooldownTicks = Math.max(0, farmingCooldownTicks - ticks); }
 
     public int getAttackCooldownTicks() { return attackCooldownTicks; }
     public void setAttackCooldownTicks(int ticks) { this.attackCooldownTicks = ticks; }
@@ -408,13 +558,7 @@ public class VillagerAgentData {
     public void setEnvironmentSummary(String summary) { this.lastEnvironmentSummary = summary; }
     public String getEnvironmentSummary() { return lastEnvironmentSummary; }
 
-    // ── Daily schedule accessors ──
-    public DailySchedule getDailySchedule() { return dailySchedule; }
-    public void setDailySchedule(DailySchedule schedule) { this.dailySchedule = schedule; }
-    public long getLastDayPlanned() { return lastDayPlanned; }
-    public void setLastDayPlanned(long day) { this.lastDayPlanned = day; }
-    public long getLastDayReflected() { return lastDayReflected; }
-    public void setLastDayReflected(long day) { this.lastDayReflected = day; }
+    // ── Autonomous lifecycle accessors ──
     public boolean isSocializing() { return socializing; }
     public void setSocializing(boolean socializing) { this.socializing = socializing; }
     public long getLastSocialTick() { return lastSocialTick; }
@@ -425,8 +569,72 @@ public class VillagerAgentData {
     public FarmReclaimState getReclaimState() { return reclaimState; }
     public void setReclaimState(FarmReclaimState state) { this.reclaimState = state; }
 
+    public int getFarmRRIndex() { return farmRRIndex; }
+    public void setFarmRRIndex(int i) { this.farmRRIndex = i; }
+    public int getFarmFocus() { return farmFocus; }
+    public void setFarmFocus(int f) { this.farmFocus = f; }
+    public int getFarmTicks() { return farmTicks; }
+    public void setFarmTicks(int t) { this.farmTicks = t; }
+
+    public CapabilityPool getCapabilityPool() { return capabilityPool; }
+    public void setCapabilityPool(CapabilityPool pool) { this.capabilityPool = pool; }
+
+    public UnlockedRecipes getUnlockedRecipes() { return unlockedRecipes; }
+    public void setUnlockedRecipes(UnlockedRecipes recipes) { this.unlockedRecipes = recipes; }
+
+    /** Re-derive the craftable set from the current capability levels (call on any level change). */
+    public void refreshUnlockedRecipes() {
+        unlockedRecipes.refresh(capabilityPool, profession);
+    }
+
+    /**
+     * Seed a brand-new villager's capabilities: all 0, plus one random "hobby" at level 1.
+     * Deterministic (seeded from the villager UUID) so the hobby is stable across restarts and
+     * never re-rolls on every world load. Nitwits are cleared to all-0 later, in updateProfession.
+     */
+    private void seedInitialCapabilities() {
+        Random r = new Random(villagerId.getMostSignificantBits() ^ villagerId.getLeastSignificantBits());
+        CapabilityId[] all = CapabilityId.values();
+        CapabilityId hobby = all[r.nextInt(all.length)];
+        capabilityPool.setLevel(hobby, 1);
+    }
+
     public long getLastGoalPruneDay() { return lastGoalPruneDay; }
     public void setLastGoalPruneDay(long day) { this.lastGoalPruneDay = day; }
+
+    public long getLastCapabilityDecayDay() { return lastCapabilityDecayDay; }
+    public void setLastCapabilityDecayDay(long day) { this.lastCapabilityDecayDay = day; }
+
+    /**
+     * Mirror the villager's vanilla trade level onto the main capability's level
+     * ({@code vanillaLevel = (capLevel - 1) / 2}), push-up only so vanilla trading progress is
+     * never lost. Gated by {@code PROFICIENCY_SYNC_TO_VANILLA}.
+     */
+    public void syncVanillaTradeLevel(VillagerEntity villager) {
+        if (!ModConfig.PROFICIENCY_SYNC_TO_VANILLA.get()) return;
+        CapabilityId main = CapabilityId.mainForProfession(profession);
+        if (main == null) return;
+        int vanilla = capabilityPool.vanillaLevelFor(main);
+        if (vanilla > villager.getVillagerData().getLevel()) {
+            villager.setVillagerData(villager.getVillagerData().setLevel(vanilla));
+        }
+    }
+
+    /**
+     * One-stop "practice/chat" entry: add capability XP and immediately re-sync the vanilla
+     * trade level. Used by every action completion point so growth lives in one place.
+     */
+    public void gainCapabilityXp(CapabilityId cap, int amount, VillagerEntity villager, long gameTick) {
+        if (cap == null || amount <= 0) return;
+        int before = capabilityPool.levelOf(cap);
+        capabilityPool.addXp(cap, amount, gameTick / 24_000L);
+        int after = capabilityPool.levelOf(cap);
+        syncVanillaTradeLevel(villager);
+        // Only rebuild the unlocked-recipe cache when the level actually changed (cheap check;
+        // avoid a full catalog scan on every harvest / kill / trade / pickup).
+        if (after != before) refreshUnlockedRecipes();
+        BrainLog.levelUp(this, cap, before, after, amount);
+    }
 
     // ── Needs system accessors ──
     public float getHunger() { return hunger; }
@@ -445,6 +653,22 @@ public class VillagerAgentData {
         return chunkMemories.get(ChunkPos.asLong(cx, cz));
     }
 
+    /**
+     * Get an existing chunk memory or create an empty placeholder for {@code (cx, cz)}.
+     * Used by {@code GossipChannel} to plant a second-hand fact without triggering a full
+     * {@link ChunkContentSampler} scan (the listener has not actually visited the chunk).
+     */
+    public ChunkMemory getOrCreateChunkMemory(int cx, int cz) {
+        long key = ChunkPos.asLong(cx, cz);
+        ChunkMemory cm = chunkMemories.get(key);
+        if (cm == null) {
+            if (chunkMemories.size() >= MAX_KNOWN_CHUNKS) evictLowestSaliency();
+            cm = new ChunkMemory(key);
+            chunkMemories.put(key, cm);
+        }
+        return cm;
+    }
+
     public java.util.Collection<ChunkMemory> getAllChunkMemories() { return chunkMemories.values(); }
 
     /**
@@ -459,10 +683,12 @@ public class VillagerAgentData {
         lastChunkKey = key;
 
         // Sample the entered chunk the first time we encounter it
-        if (!chunkMemories.containsKey(key)) {
+        if (!chunkMemories.containsKey(key) || chunkMemories.get(key).lastVisitedTick == 0) {
             if (chunkMemories.size() >= MAX_KNOWN_CHUNKS) evictLowestSaliency();
             chunkMemories.put(key, ChunkContentSampler.sample(villager, world, chunkX, chunkZ));
         }
+
+        chunkMemories.get(key).lastVisitedTick = world.getGameTime();
 
         // Mark the 8 neighbours as known (no sampling — just remember we've seen them)
         for (int dx = -1; dx <= 1; dx++) {
@@ -687,8 +913,8 @@ public class VillagerAgentData {
         // Set memories
         request.setMemories(new java.util.ArrayList<>(memories));
 
-        // Set craftable items for this profession (goal-driven catalogue)
-        request.setAvailableRecipes(new java.util.ArrayList<>(ProfessionCraftCatalog.getAllIds(profession)));
+        // Set craftable items for this profession (capability-unlocked only — what they can make NOW)
+        request.setAvailableRecipes(new java.util.ArrayList<>(SkillCraftCatalog.getUnlockedIds(getCapabilityPool(), profession)));
 
         // Set available actions
         java.util.List<String> actions = new java.util.ArrayList<>();
@@ -748,7 +974,9 @@ public class VillagerAgentData {
 
         // Inject the craftable catalog + the TODO directive protocol so the villager can turn
         // conversation into executable goals (craft / move / gather / socialize / trade).
-        java.util.List<String> craftable = ProfessionCraftCatalog.getAllIds(profession);
+        // Only capability-unlocked items are listed, so the villager never claims to make
+        // something it is not yet skilled enough for.
+        java.util.List<String> craftable = SkillCraftCatalog.getUnlockedIds(getCapabilityPool(), profession);
         if (!craftable.isEmpty()) {
             systemPromptBuilder.append(" As a ").append(profession)
                     .append(", you are ABLE TO CRAFT the following (this is a CRAFTING CAPABILITY only, ")
@@ -756,7 +984,7 @@ public class VillagerAgentData {
             systemPromptBuilder.append("If you decide to act — now, or as a task to remember — append one or more "
                     + "lines starting with TODO: (each on its own line): ")
                     .append("TODO: craft minecraft:<item_id> x<qty>  |  TODO: move <x> <y> <z>  |  "
-                            + "TODO: gather minecraft:<item> x<n>  |  TODO: goto house  |  TODO: goto cave_house  |  "
+                            + "TODO: harvest <x> <y> <z>  |  TODO: plant <x> <y> <z>  |  TODO: till <x> <y> <z>  |  TODO: collect_crops <x> <y> <z>  |  TODO: pickup_item minecraft:<item> x<n>  |  TODO: drop_item minecraft:<item> x<n>  |  TODO: goto house  |  TODO: goto cave_house  |  "
                             + "TODO: socialize  |  TODO: trade villager <profession-or-any>  |  "
                             + "TODO: converse player <uuid>  |  TODO: converse villager <profession-or-any> . ")
                     .append("Use the exact minecraft:<id> form for items you can make. ")
@@ -931,11 +1159,9 @@ public class VillagerAgentData {
             }
         }
 
-        // Today's plan
+        // Scheduled activity (derived context — informational only)
         if (scheduledActivity != null && !scheduledActivity.isEmpty()) {
             sb.append("Your scheduled activity right now: ").append(scheduledActivity).append(". ");
-        } else if (dailySchedule != null) {
-            sb.append("You have a daily schedule planned. ");
         }
 
         // Active build job
@@ -1007,12 +1233,14 @@ public class VillagerAgentData {
         nbt.putUUID("VillagerId", villagerId);
         nbt.putString("Name", name);
         nbt.putString("Profession", profession);
+        nbt.putString("ResourceProfession", resourceProfession.name());
+        nbt.putBoolean("ResourceStarterGiven", resourceStarterGiven);
         nbt.putString("Personality", personality);
         nbt.putString("CurrentActivity", currentActivity);
         nbt.putLong("LastThinkTime", lastThinkTime);
         nbt.putLong("LastRestockTime", lastRestockTime);  // Save restock time
-        nbt.putLong("LastDayPlanned", lastDayPlanned);
-        nbt.putLong("LastDayReflected", lastDayReflected);
+        nbt.putLong("LastCapabilityDecayDay", lastCapabilityDecayDay);
+        nbt.putLong("EventCursor", eventCursor);
         nbt.putFloat("Hunger", hunger);
         nbt.putFloat("Fatigue", fatigue);
 
@@ -1111,6 +1339,26 @@ public class VillagerAgentData {
         // ── In-progress farmland reclaim plan (survives restarts) ──
         if (reclaimState != null) nbt.put("ReclaimState", reclaimState.writeNBT());
 
+        // ── Capability pool (what the villager knows and how strong) ──
+        nbt.put("Capabilities", capabilityPool.serializeNBT());
+
+        // ── Unlocked recipes (derived craftable set) ──
+        if (!unlockedRecipes.isEmpty()) nbt.put("UnlockedRecipes", unlockedRecipes.writeNBT());
+
+        // ── Personal value table (profession-template copy + any per-villager price edits) ──
+        // Only saved once the villager has actually used it, so un-initialised villagers stay cheap.
+        if (personalValueTable != null && !personalValueTable.isEmpty()) {
+            ListNBT pvList = new ListNBT();
+            for (Map.Entry<String, VillagerEconomySystem.Price> e : personalValueTable.entrySet()) {
+                CompoundNBT pNBT = new CompoundNBT();
+                pNBT.putString("Item", e.getKey());
+                pNBT.putDouble("Buy", e.getValue().buy);
+                pNBT.putDouble("Sell", e.getValue().sell);
+                pvList.add(pNBT);
+            }
+            nbt.put("PersonalValueTable", pvList);
+        }
+
         // ── Current mood (derived from needs; cheap to restore, avoids a NEUTRAL flicker) ──
         nbt.putInt("Mood", mood.ordinal());
 
@@ -1121,12 +1369,14 @@ public class VillagerAgentData {
         this.villagerId = nbt.getUUID("VillagerId");
         this.name = nbt.getString("Name");
         this.profession = nbt.contains("Profession") ? nbt.getString("Profession") : "Villager";
+        resourceProfession = com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.parse(nbt.getString("ResourceProfession"));
+        resourceStarterGiven = nbt.getBoolean("ResourceStarterGiven");
         this.personality = nbt.getString("Personality");
         this.currentActivity = nbt.getString("CurrentActivity");
         this.lastThinkTime = nbt.getLong("LastThinkTime");
         this.lastRestockTime = nbt.contains("LastRestockTime") ? nbt.getLong("LastRestockTime") : 0;  // Load restock time
-        this.lastDayPlanned = nbt.contains("LastDayPlanned") ? nbt.getLong("LastDayPlanned") : -1L;
-        this.lastDayReflected = nbt.contains("LastDayReflected") ? nbt.getLong("LastDayReflected") : -1L;
+        this.lastCapabilityDecayDay = nbt.contains("LastCapabilityDecayDay") ? nbt.getLong("LastCapabilityDecayDay") : -1L;
+        this.eventCursor = nbt.contains("EventCursor") ? nbt.getLong("EventCursor") : 0L;
         this.hunger  = nbt.contains("Hunger")  ? nbt.getFloat("Hunger")  : 100f;
         this.fatigue = nbt.contains("Fatigue") ? nbt.getFloat("Fatigue") : 0f;
 
@@ -1237,6 +1487,15 @@ public class VillagerAgentData {
         reclaimState = nbt.contains("ReclaimState")
                 ? FarmReclaimState.readNBT(nbt.getCompound("ReclaimState")) : null;
 
+        // ── Capability pool (falls back to the constructor-seeded hobby if absent) ──
+        if (nbt.contains("Capabilities")) {
+            capabilityPool.deserializeNBT(nbt.getCompound("Capabilities"));
+        }
+
+        // ── Unlocked recipes (re-derived on next refresh if absent) ──
+        unlockedRecipes = nbt.contains("UnlockedRecipes")
+                ? UnlockedRecipes.readNBT(nbt.getCompound("UnlockedRecipes")) : new UnlockedRecipes();
+
         // ── Player reputation ──
         playerReputation.clear();
         if (nbt.contains("PlayerReputation")) {
@@ -1246,6 +1505,23 @@ public class VillagerAgentData {
                 playerReputation.put(repNBT.getUUID("Player"), repNBT.getInt("Score"));
             }
         }
+
+        // ── Personal value table (null until the villager uses it again) ──
+        personalValueTable = null;
+        if (nbt.contains("PersonalValueTable")) {
+            Map<String, VillagerEconomySystem.Price> pv = new HashMap<>();
+            ListNBT pvList = nbt.getList("PersonalValueTable", 10);
+            for (int i = 0; i < pvList.size(); i++) {
+                CompoundNBT pNBT = pvList.getCompound(i);
+                VillagerEconomySystem.Price p = new VillagerEconomySystem.Price();
+                p.buy = pNBT.getDouble("Buy");
+                p.sell = pNBT.getDouble("Sell");
+                pv.put(pNBT.getString("Item"), p);
+            }
+            personalValueTable = pv;
+        }
+
+        // 能力自愈：旧存档（mod 版本更新前）可能缺主能力数据，补到职业基线，避免能力门控挡掉所有技能。
+        healProfessionCapability();
     }
 }
-

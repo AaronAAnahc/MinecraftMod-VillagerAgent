@@ -195,3 +195,32 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
     options.compilerArgs << '-Xlint:deprecation'
 }
+
+// Core order invariants can be verified without starting Minecraft or contacting an LLM.
+tasks.register('workOrderChecks', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.github.AaronAA0721.villageragent.ai.work.WorkOrderBookChecks'
+}
+tasks.named('check').configure { dependsOn tasks.named('workOrderChecks') }
+
+tasks.register('goalExitChecks', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.github.AaronAA0721.villageragent.ai.GoalExitPolicyChecks'
+}
+tasks.named('check').configure { dependsOn tasks.named('goalExitChecks') }
+
+tasks.register('goalSchedulerChecks', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.github.AaronAA0721.villageragent.ai.GoalSchedulerChecks'
+}
+tasks.named('check').configure { dependsOn tasks.named('goalSchedulerChecks') }
+
+ tasks.register('taskExecutionChecks', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.github.AaronAA0721.villageragent.ai.TaskExecutionChecks'
+}
+tasks.named('check').configure { dependsOn tasks.named('taskExecutionChecks') }

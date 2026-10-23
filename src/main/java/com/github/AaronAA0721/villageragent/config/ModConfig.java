@@ -70,6 +70,52 @@ public class ModConfig {
     /** Cadence (ticks) of the autonomous behavior executor that runs goals via skills. */
     public static final ForgeConfigSpec.IntValue BEHAVIOR_EXECUTOR_INTERVAL_TICKS;
 
+    // ── Combat (aggro thresholds) ──
+    /** Require a real weapon to attack on one's own; bare hands only pin/distract. */
+    public static final ForgeConfigSpec.BooleanValue COMBAT_REQUIRE_WEAPON;
+    /** Solo-attack TTK gate: villager kills threat at most this × as slowly as it is killed. */
+    public static final ForgeConfigSpec.DoubleValue COMBAT_SOLO_WIN_FACTOR;
+    /** Group-charge gate: summed responder combat power must reach this to charge. */
+    public static final ForgeConfigSpec.DoubleValue COMBAT_CHARGE_TOTAL_POWER;
+    /** Per-villager attack gate: must have at least this much health to swing. */
+    public static final ForgeConfigSpec.DoubleValue COMBAT_CHARGE_MIN_HEALTH;
+
+    // ── Economy (LLM-free village supply/demand) ──
+    /** Master switch for the autonomous village economy (trade messages + item exchange). */
+    public static final ForgeConfigSpec.BooleanValue ENABLE_ECONOMY;
+    /** Cadence (ticks) of the economy scan (post wants/haves, match, navigate, exchange). */
+    public static final ForgeConfigSpec.IntValue ECONOMY_TICK_INTERVAL;
+    /** Player barter fairness: accepted when offered value ≥ requested value × this. */
+    public static final ForgeConfigSpec.DoubleValue BARTER_FAIRNESS_TOLERANCE;
+    /** Distance (blocks) within which two matched traders count as "met" and exchange. */
+    public static final ForgeConfigSpec.DoubleValue TRADE_MEET_RADIUS;
+    /** Lifetime (ticks) of a trade/have/want message before it expires from the board. */
+    public static final ForgeConfigSpec.IntValue TRADE_MSG_TTL;
+
+    // ── Brain logging (decision-brain trace) ──
+    /** Trace every todo/goal lifecycle (add / end / switch / suspend-resume) to the VillagerBrain logger. */
+    public static final ForgeConfigSpec.BooleanValue BRAIN_LOG_ENABLED;
+
+    // ── Capability pool (what a villager knows, grows, and forgets) ──
+    /** Days (after a 2-day grace) over which an unpractised capability rusts away (square curve). */
+    public static final ForgeConfigSpec.IntValue CAPABILITY_RUST_DAYS;
+    /** Capability XP gained per "practice" event (harvest, craft, combat, …). */
+    public static final ForgeConfigSpec.IntValue CAPABILITY_PRACTICE_XP;
+    /** Capability XP gained per "chat with an expert" event (slower than doing). */
+    public static final ForgeConfigSpec.IntValue CAPABILITY_CHAT_XP;
+
+    // ── Perception / event bus / gossip / debug dump ──
+    /** Master switch: write a human-readable JSON snapshot per villager on world save. */
+    public static final ForgeConfigSpec.BooleanValue ENABLE_DEBUG_DUMP;
+    /** Manhattan chunk-distance radius within which a villager perceives environment events. */
+    public static final ForgeConfigSpec.IntValue PERCEPTION_RADIUS_CHUNKS;
+    /** Max events a villager consumes per slow think tick. */
+    public static final ForgeConfigSpec.IntValue EVENTS_PER_THINK;
+    /** Probability a social encounter transfers one resource fact (0..1). */
+    public static final ForgeConfigSpec.DoubleValue GOSSIP_CHANCE;
+    /** Ticks before a second-hand ore fact stops being re-told (3 MC days = 72000). */
+    public static final ForgeConfigSpec.IntValue GOSSIP_ORE_EXPIRY_TICKS;
+
     static {
         BUILDER.push("LLM Settings");
         
@@ -259,6 +305,75 @@ public class ModConfig {
 
         BUILDER.pop();
 
+        BUILDER.push("Combat");
+
+        COMBAT_REQUIRE_WEAPON = BUILDER
+                .comment("Require a villager to hold a real weapon (sword/axe/tool with damage above the "
+                        + "bare-hand base) before it will attack on its own. Bare-handed villagers never "
+                        + "solo-fight and contribute 0 to a group charge's total power — they only run to "
+                        + "the rally point to pin/distract. Set false to let fists count as 'armed' "
+                        + "(legacy behaviour).")
+                .define("combat_require_weapon", false);
+
+        COMBAT_SOLO_WIN_FACTOR = BUILDER
+                .comment("Solo-attack gate (armed villagers only): a villager engages a threat directly only "
+                        + "if its time-to-kill is at most this multiple of the threat's time-to-kill "
+                        + "(lower = pickier). 0.7 means it must kill ~43% faster than it gets killed.")
+                .defineInRange("combat_solo_win_factor", 0.7, 0.0, 5.0);
+
+        COMBAT_CHARGE_TOTAL_POWER = BUILDER
+                .comment("Group-charge gate: villagers may charge a threat together only once the summed "
+                        + "combat power of all responders reaches this value (replaces the old head-count + "
+                        + "DPS check). Iron sword ≈6-7 can charge alone; stone ≈5 or wood ≈4 need 2 responders.")
+                .defineInRange("combat_charge_total_power", 5.0, 0.0, 1000.0);
+
+        COMBAT_CHARGE_MIN_HEALTH = BUILDER
+                .comment("Per-villager attack gate: a villager only actively attacks (solo or in a group "
+                        + "charge) when its current health is at least this value. Below it, even in a "
+                        + "charged group, it only runs to the rally point to pin/distract.")
+                .defineInRange("combat_charge_min_health", 10.0, 0.0, 20.0);
+
+        BUILDER.pop();
+
+        BUILDER.push("Economy");
+
+        ENABLE_ECONOMY = BUILDER
+                .comment("Master switch for the LLM-free village economy: villagers broadcast supply/demand "
+                        + "messages and walk to each other to trade. Works with no API key.")
+                .define("economy_enabled", true);
+
+        ECONOMY_TICK_INTERVAL = BUILDER
+                .comment("Cadence (ticks) of the economy scan that posts wants/haves, matches traders, and "
+                        + "drives the walk-to-trade. 20 = once per second.")
+                .defineInRange("economy_tick_interval", 20, 1, 200);
+
+        BARTER_FAIRNESS_TOLERANCE = BUILDER
+                .comment("Player barter acceptance: a villager accepts when the value of what the player gives "
+                        + "is at least this multiple of the value it must give back. 0.95 = must be ~fair.")
+                .defineInRange("barter_fairness_tolerance", 0.95, 0.0, 5.0);
+
+        TRADE_MEET_RADIUS = BUILDER
+                .comment("Distance (blocks) within which two matched traders count as 'met' and actually "
+                        + "exchange items.")
+                .defineInRange("trade_meet_radius", 2.5, 1.0, 16.0);
+
+        TRADE_MSG_TTL = BUILDER
+                .comment("Lifetime (ticks) of a trade/want message on the board before it expires.")
+                .defineInRange("trade_msg_ttl", 1200, 20, 24000);
+
+        BUILDER.pop();
+
+        BUILDER.push("Brain Logging");
+
+        BRAIN_LOG_ENABLED = BUILDER
+                .comment("Trace every todo/goal lifecycle event (added, ended, switched, suspended/resumed) "
+                        + "to the dedicated 'VillagerBrain' logger. Useful to watch a villager's decision brain "
+                        + "in the log: why a todo appeared, when/why it finished, and how the running goal changes. "
+                        + "Goal transitions are infrequent, so this is low-volume even with many villagers.")
+                .define("brain_log_enabled", true);
+
+        BUILDER.pop();
+
         BUILDER.push("Proficiency");
 
         PROFICIENCY_SYNC_TO_VANILLA = BUILDER
@@ -275,6 +390,49 @@ public class ModConfig {
                 .comment("How often (in ticks) the autonomous behavior executor re-scans the goal list and dispatches "
                         + "to a skill. It is cheap, so 20 (=1s) is a sane default; lower = more responsive.")
                 .defineInRange("behavior_executor_interval_ticks", 20, 1, 1200);
+
+        CAPABILITY_RUST_DAYS = BUILDER
+                .comment("Days (after a 2-day grace period) over which an unpractised capability rusts away, on a "
+                        + "slow-start / fast-finish square curve. 14 = a skill left alone for ~2 weeks decays to 0.")
+                .defineInRange("capability_rust_days", 14, 1, 365);
+
+        CAPABILITY_PRACTICE_XP = BUILDER
+                .comment("Capability XP gained per 'practice' event (harvest a crop, smelt/forge, craft an item, "
+                        + "win a fight, close a trade, absorb a drop). Doing is the main way to level.")
+                .defineInRange("capability_practice_xp", 10, 1, 1000);
+
+        CAPABILITY_CHAT_XP = BUILDER
+                .comment("Capability XP gained per 'chat with an expert' event (talking to a villager of the matching "
+                        + "profession). Much slower than doing, by design — practice first, mentorship second.")
+                .defineInRange("capability_chat_xp", 1, 0, 100);
+
+        BUILDER.pop();
+
+        BUILDER.push("Perception / Event Bus / Gossip");
+
+        ENABLE_DEBUG_DUMP = BUILDER
+                .comment("When true, every world save also writes a human-readable JSON snapshot of each villager "
+                        + "(chunk memory, value table, inventory, goals, capabilities) to <world>/villageragent/debug/<uuid>.json. "
+                        + "Debug-only mirror; never read back by the mod.")
+                .define("debug_dump_enabled", true);
+
+        PERCEPTION_RADIUS_CHUNKS = BUILDER
+                .comment("Manhattan chunk-distance radius within which a villager perceives environment events "
+                        + "(anti-telepathy). 4 chunks = 64 blocks.")
+                .defineInRange("perception_radius_chunks", 4, 1, 16);
+
+        EVENTS_PER_THINK = BUILDER
+                .comment("Max environment events a villager consumes per slow think tick (budget throttle).")
+                .defineInRange("events_per_think", 8, 1, 64);
+
+        GOSSIP_CHANCE = BUILDER
+                .comment("Probability (0..1) that a social encounter transfers one resource fact between villagers.")
+                .defineInRange("gossip_chance", 0.30, 0.0, 1.0);
+
+        GOSSIP_ORE_EXPIRY_TICKS = BUILDER
+                .comment("Ticks before a second-hand ore fact stops being re-told (depletable resource). "
+                        + "3 Minecraft days = 72000 ticks.")
+                .defineInRange("gossip_ore_expiry_ticks", 72000, 24000, 480000);
 
         BUILDER.pop();
 

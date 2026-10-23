@@ -41,6 +41,17 @@ public class ChunkMemory {
     private int tagFlags;
     private int featureFlags;
 
+    /**
+     * Tick until which a <em>second-hand</em> ore fact is still re-tellable. 0 = either no ore
+     * knowledge, or first-hand observation (the villager saw the ore itself). Set by
+     * {@code GossipChannel} when a depletable-resource fact is borrowed; the owner may still
+     * falsify it on arrival regardless of this value.
+     */
+    private long oreExpiryTick = 0L;
+
+    public long getOreExpiryTick() { return oreExpiryTick; }
+    public void setOreExpiryTick(long t) { this.oreExpiryTick = t; }
+
     /** Coarse block counts per BlockCategory ordinal (clamped). Lazily allocated. */
     private short[] counts;
     /** One packed representative position per ChunkFeature ordinal. Lazily allocated. */
@@ -78,6 +89,10 @@ public class ChunkMemory {
     // ── Features (one anchor position each) ───────────────────────────────
 
     public boolean has(ChunkFeature f) { return (featureFlags & f.bit()) != 0; }
+    public void forgetFeature(ChunkFeature feature) {
+        featureFlags &= ~feature.bit();
+        if (anchors != null) anchors[feature.ordinal()] = (short) NO_ANCHOR;
+    }
     public int getFeatureFlags()       { return featureFlags; }
     public boolean hasAnyOre()         { return (featureFlags & ORE_MASK) != 0; }
 
@@ -169,6 +184,7 @@ public class ChunkMemory {
         n.putLong("tick", lastVisitedTick);
         n.putFloat("sal", saliency);
         n.putInt("tag", tagFlags);
+        if (oreExpiryTick != 0) n.putLong("oreexp", oreExpiryTick);
         if (featureFlags != 0) {
             n.putInt("feat", featureFlags);
             // dense int array: (featureOrdinal << 16) | packedPos — one int per present feature
@@ -201,6 +217,7 @@ public class ChunkMemory {
         cm.saliency = n.getFloat("sal");
         cm.tagFlags = n.getInt("tag");
         cm.featureFlags = n.getInt("feat");
+        cm.oreExpiryTick = n.getLong("oreexp");
 
         if (n.contains("anc")) {
             int[] arr = n.getIntArray("anc");

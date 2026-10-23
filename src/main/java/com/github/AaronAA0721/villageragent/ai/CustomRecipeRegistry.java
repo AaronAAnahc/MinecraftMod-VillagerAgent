@@ -20,7 +20,7 @@ import java.util.Map;
 /**
  * Loads custom (non-vanilla) crafting recipes from {@code config/villageragent/custom_recipes.json}
  * (extracted to the game config folder on first run; editable without recompiling). These cover
- * items a villager may craft per {@link ProfessionCraftCatalog} but which have no vanilla
+ * items a villager may craft per {@link SkillCraftCatalog} but which have no vanilla
  * crafting/smelting recipe (e.g. chainmail_*, saddle, ender_pearl).
  *
  * <p>Edit the JSON to add or retune custom recipes; a missing or malformed file is logged and

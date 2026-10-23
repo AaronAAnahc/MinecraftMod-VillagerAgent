@@ -1,8 +1,11 @@
 package com.github.AaronAA0721.villageragent.commands;
 
+import com.github.AaronAA0721.villageragent.ai.AgentGoal;
+import com.github.AaronAA0721.villageragent.ai.LLMSetupReminder;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
+import net.minecraft.util.text.ITextComponent;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -19,6 +22,8 @@ import net.minecraft.util.text.StringTextComponent;
 import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.server.ServerWorld;
+
+import java.util.Collection;
 
 /**
  * Command handler for VillagerAgent mod
@@ -63,7 +68,9 @@ public class VillagerAgentCommand {
                         .executes(VillagerAgentCommand::setApiKey)))
                 .then(Commands.literal("apiurl")
                     .then(Commands.argument("url", StringArgumentType.greedyString())
-                        .executes(VillagerAgentCommand::setApiUrl))))
+                        .executes(VillagerAgentCommand::setApiUrl)))
+                .then(Commands.literal("status")
+                    .executes(VillagerAgentCommand::llmStatus)))
             .then(Commands.literal("info")
                 .executes(VillagerAgentCommand::showInfo))
             .then(Commands.literal("reload")
@@ -82,7 +89,69 @@ public class VillagerAgentCommand {
                                 .executes(VillagerAgentCommand::cmdBreak)))))
                 .then(Commands.literal("structure")
                     .then(Commands.argument("goal", StringArgumentType.greedyString())
-                        .executes(VillagerAgentCommand::cmdBuild))));
+                        .executes(VillagerAgentCommand::cmdBuild))))
+            .then(Commands.literal("goals")
+                .then(Commands.literal("clear")
+                    .executes(VillagerAgentCommand::clearGoals)))
+            .then(Commands.literal("occupation")
+                .then(Commands.argument("role", StringArgumentType.word())
+                    .suggests((ctx, builder) -> net.minecraft.command.ISuggestionProvider.suggest(
+                        java.util.Arrays.asList("lumberjack", "miner", "none"), builder))
+                    .executes(VillagerAgentCommand::setOccupation)))
+            .then(Commands.literal("request")
+                .then(Commands.argument("item", StringArgumentType.word())
+                    .then(Commands.argument("quantity", IntegerArgumentType.integer(1, 256))
+                        .executes(VillagerAgentCommand::requestMaterial))))
+            .then(Commands.literal("orders").executes(VillagerAgentCommand::showOrders));
+    }
+
+    private static int setOccupation(CommandContext<CommandSource> context) {
+        VillagerAgentData agent = resolveAgent(context);
+        if (agent == null) return 0;
+        String role = StringArgumentType.getString(context, "role");
+        if (!java.util.Arrays.asList("lumberjack", "miner", "none").contains(role)) {
+            context.getSource().sendFailure(new StringTextComponent("Use lumberjack, miner or none")); return 0;
+        }
+        ServerWorld world = (ServerWorld) context.getSource().getLevel();
+        VillagerEntity villager = resolveVillager(agent, context);
+        if (villager == null) return 0;
+        com.github.AaronAA0721.villageragent.ai.ActionLifecycle.cancel(agent, villager, world);
+        agent.setRunningGoal(null);
+        agent.getGoals().removeIf(g -> "fulfill_order".equals(g.getGoalType()));
+        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.assign(agent,
+                com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.parse(role));
+        context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " occupation: " + role), false);
+        return 1;
+    }
+
+    private static int requestMaterial(CommandContext<CommandSource> context) {
+        VillagerAgentData agent = resolveAgent(context);
+        if (agent == null) return 0;
+        String item = StringArgumentType.getString(context, "item");
+        int quantity = IntegerArgumentType.getInteger(context, "quantity");
+        ServerWorld world = (ServerWorld) context.getSource().getLevel();
+        com.github.AaronAA0721.villageragent.ai.work.WorkOrderBook.Order order =
+                com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, item,
+                    com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, item) + quantity);
+        if (order == null) {
+            context.getSource().sendFailure(new StringTextComponent("Unsupported extraction item or economy disabled: " + item)); return 0;
+        }
+        context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " requests " + order.remaining
+                + " " + item + " | order " + order.id), false);
+        return 1;
+    }
+
+    private static int showOrders(CommandContext<CommandSource> context) {
+        ServerWorld world = (ServerWorld) context.getSource().getLevel();
+        int count = 0;
+        for (com.github.AaronAA0721.villageragent.ai.work.WorkOrderBook.Order order :
+                com.github.AaronAA0721.villageragent.ai.work.WorkOrderSavedData.get(world).book.all()) {
+            context.getSource().sendSuccess(new StringTextComponent(order.id + " " + order.status + " " + order.item
+                    + " remaining=" + order.remaining + " requester=" + order.requester + " worker=" + order.worker), false);
+            count++;
+        }
+        context.getSource().sendSuccess(new StringTextComponent(count + " orders in this dimension"), false);
+        return count;
     }
     
     private static int setConfig(CommandContext<CommandSource> context) {
@@ -224,6 +293,9 @@ public class VillagerAgentCommand {
         String keyStatus = (apiKey == null || apiKey.isEmpty()) ? TextFormatting.RED + "NOT SET" : TextFormatting.GREEN + "SET (hidden)";
         source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "API Key: " + keyStatus), false);
         source.sendSuccess(new StringTextComponent(TextFormatting.GOLD + "========================"), false);
+        if (!LLMSetupReminder.isConfigured()) {
+            source.sendSuccess(new StringTextComponent(TextFormatting.RED + "⚠ LLM 未完整配置！村民将无法对话。运行 /va llm status 查看需执行的指令。"), true);
+        }
         return 1;
     }
 
@@ -262,9 +334,9 @@ public class VillagerAgentCommand {
         String type = StringArgumentType.getString(context, "type");
         CommandSource source = context.getSource();
 
-        if (!type.equals("openai") && !type.equals("anthropic") && !type.equals("ollama")) {
+        if (!type.equals("openai") && !type.equals("anthropic") && !type.equals("ollama") && !type.equals("gemini")) {
             source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Invalid API type: " + type), false);
-            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Valid types: openai, anthropic, ollama"), false);
+            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Valid types: openai, anthropic, ollama, gemini"), false);
             return 0;
         }
 
@@ -301,6 +373,36 @@ public class VillagerAgentCommand {
         ModConfig.LLM_API_URL.set(url);
         ModConfig.SPEC.save();
         source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "✓ API URL set to: " + url), true);
+        return 1;
+    }
+
+    /**
+     * /va llm status — print the current LLM configuration and, if anything is
+     * missing, list exactly which commands the player needs to run.
+     */
+    private static int llmStatus(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        source.sendSuccess(new StringTextComponent(TextFormatting.GOLD + "=== LLM 配置状态 ==="), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "API 类型: " + ModConfig.LLM_API_TYPE.get()), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "模型: " + ModConfig.LLM_MODEL.get()), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "API URL: " + ModConfig.LLM_API_URL.get()), false);
+        String apiKey = ModConfig.LLM_API_KEY.get();
+        String keyStatus = (apiKey == null || apiKey.isEmpty()) ? TextFormatting.RED + "未设置" : TextFormatting.GREEN + "已设置 (已隐藏)";
+        source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "API Key: " + keyStatus), false);
+
+        if (LLMSetupReminder.isConfigured()) {
+            source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "✓ LLM 已正确配置，村民可以正常对话。"), true);
+            return 1;
+        }
+
+        source.sendSuccess(new StringTextComponent(TextFormatting.RED + "✗ LLM 尚未配置完整，缺失:"), true);
+        for (String item : LLMSetupReminder.getMissingItems()) {
+            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "  - " + item), false);
+        }
+        source.sendSuccess(new StringTextComponent(TextFormatting.GOLD + "请运行以下指令完成配置:"), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "  /va llm apitype openai"), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "  /va llm apikey <你的Key>"), false);
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "  /va llm model deepseek-chat"), false);
         return 1;
     }
 
@@ -400,5 +502,36 @@ public class VillagerAgentCommand {
                 + " is asking the LLM to design & build: \"" + goal + "\""), true);
         return 1;
     }
-}
 
+    /**
+     * /villageragent goals clear — wipe every NON-routine goal (ONE_SHOT / EXPIRING) across all
+     * villagers. Routine goals (farm/rest/restock from the day window) are kept, so the villagers
+     * immediately return to their normal daily cycle. Use this to flush stale fallback_random
+     * todos (e.g. "Craft armor" on a farmer) that no skill can claim.
+     */
+    private static int clearGoals(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        Collection<VillagerAgentData> all = VillagerAgentManager.getAllAgents();
+        if (all.isEmpty()) {
+            source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "No AI villagers loaded."), false);
+            return 0;
+        }
+        int removed = 0;
+        int cleared = 0;
+        for (VillagerAgentData agent : all) {
+            int before = agent.getGoals().size();
+            agent.getGoals().removeIf(g -> g.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE);
+            int after = agent.getGoals().size();
+            if (before != after) {
+                cleared++;
+                removed += (before - after);
+                source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "✓ " + agent.getName()
+                        + ": removed " + (before - after) + " non-routine goal(s)"), true);
+            }
+        }
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "Cleared " + removed
+                + " non-routine goal(s) across " + cleared + " villager(s). "
+                + "Routine goals (farm/rest/restock) kept."), true);
+        return removed > 0 ? 1 : 0;
+    }
+}

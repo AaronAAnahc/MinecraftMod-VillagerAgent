@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Per-villager, NBT-serialisable state for the {@link FarmReclaimSkill} state machine.
+ * Per-villager, NBT-serialisable state for the {@link FarmSkill} reclaim step.
  *
  * <p>Why it lives here and not on the (singleton) skill: skills are shared across every villager,
  * so any FSM progress must be stored on the {@code VillagerAgentData} (which is per-villager and

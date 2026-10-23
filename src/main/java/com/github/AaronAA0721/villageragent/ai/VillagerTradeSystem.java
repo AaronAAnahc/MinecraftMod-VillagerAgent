@@ -2,6 +2,8 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
 import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -26,7 +28,7 @@ import java.util.List;
  *       to actually hold what they're giving, then the stacks are moved.</li>
  * </ol>
  *
- * <p>Entered from {@code VillagerAgentManager.executeTradeGoal} once the initiator has walked to
+ * <p>Entered from {@code TradeSkill} once the initiator has walked to
  * the target villager. A trade is a "social" activity: both villagers are marked socializing so
  * {@code VillagerSocialSystem} won't interrupt them mid-negotiation.
  */
@@ -41,7 +43,7 @@ public final class VillagerTradeSystem {
 
     private VillagerTradeSystem() {}
 
-    /** Called by {@code executeTradeGoal} after the initiator reaches the target villager. */
+    /** Called by {@code TradeSkill} after the initiator reaches the target villager. */
     public static void initiate(ServerWorld world, VillagerEntity a, VillagerAgentData agentA,
                                 VillagerEntity b, VillagerAgentData agentB) {
         agentA.setSocializing(true);
@@ -152,6 +154,7 @@ public final class VillagerTradeSystem {
         addById(agentB.getInventory(), offer.give, offer.giveQty);
         addById(agentA.getInventory(), offer.want, offer.wantQty);
         applyRelation(agentA, agentB, relDelta);
+        grantSocial(a, agentA, b, agentB);
         agentA.addMemory("Traded with " + agentB.getName() + ": gave " + offer.giveQty + "x "
                 + offer.give + " for " + offer.wantQty + "x " + offer.want);
         agentB.addMemory("Traded with " + agentA.getName() + ": gave " + offer.wantQty + "x "
@@ -175,6 +178,7 @@ public final class VillagerTradeSystem {
         addById(agentA.getInventory(), counter.give, counter.giveQty);
         addById(agentB.getInventory(), counter.want, counter.wantQty);
         applyRelation(agentA, agentB, relDelta);
+        grantSocial(a, agentA, b, agentB);
         agentA.addMemory("Bargained with " + agentB.getName() + ": settled on " + counter.wantQty + "x "
                 + counter.want + " for " + counter.giveQty + "x " + counter.give);
         agentB.addMemory("Bargained with " + agentA.getName() + ": got " + counter.wantQty + "x "
@@ -187,6 +191,14 @@ public final class VillagerTradeSystem {
     private static void applyRelation(VillagerAgentData agentA, VillagerAgentData agentB, int delta) {
         agentA.updateRelationship(agentB.getVillagerId().toString(), delta);
         agentB.updateRelationship(agentA.getVillagerId().toString(), delta);
+    }
+
+    /** A closed trade trains SOCIAL — haggling is social practice. */
+    private static void grantSocial(VillagerEntity a, VillagerAgentData agentA,
+                                    VillagerEntity b, VillagerAgentData agentB) {
+        long tick = a.level.getGameTime();
+        agentA.gainCapabilityXp(CapabilityId.SOCIAL, ModConfig.CAPABILITY_PRACTICE_XP.get(), a, tick);
+        agentB.gainCapabilityXp(CapabilityId.SOCIAL, ModConfig.CAPABILITY_PRACTICE_XP.get(), b, tick);
     }
 
     private static void release(VillagerAgentData agentA, VillagerAgentData agentB) {

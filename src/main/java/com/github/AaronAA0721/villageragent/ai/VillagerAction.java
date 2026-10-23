@@ -44,6 +44,17 @@ public class VillagerAction {
     private long createdTime;
     private BlockPos targetBlockPos; // The block the villager is walking toward
     private UUID targetEntityId;    // The entity the villager is targeting (for ATTACK)
+    private net.minecraft.util.math.vector.Vector3d lastProgressPosition;
+    /** A moving villager is not stuck merely because a long route takes over ten seconds. */
+    public void observeMovement(net.minecraft.util.math.vector.Vector3d position) {
+        if (lastProgressPosition == null || Math.pow(lastProgressPosition.x - position.x, 2) + Math.pow(lastProgressPosition.z - position.z, 2) >= 0.25) {
+            stuckTicks = 0;
+            lastProgressPosition = position;
+        }
+    }
+    private boolean navigationFailed;
+    public boolean hasNavigationFailed() { return navigationFailed; }
+    public void setNavigationFailed(boolean failed) { navigationFailed = failed; }
     private int stuckTicks;         // How many ticks the villager has been unable to reach target
     /** True when this action was started by the goal dispatcher (as opposed to the daily schedule). */
     private boolean goalDriven = false;
@@ -61,6 +72,12 @@ public class VillagerAction {
     private int breakProgress;
     /** Total ticks required to break the target with the currently equipped tool (for BREAK). */
     private int breakTargetTicks;
+    private net.minecraft.block.BlockState breakingState;
+    private net.minecraft.item.ItemStack breakTool = net.minecraft.item.ItemStack.EMPTY;
+    public net.minecraft.block.BlockState getBreakingState() { return breakingState; }
+    public void setBreakingState(net.minecraft.block.BlockState state) { breakingState = state; }
+    public net.minecraft.item.ItemStack getBreakTool() { return breakTool; }
+    public void setBreakTool(net.minecraft.item.ItemStack tool) { breakTool = tool; }
     /** Index of this step within the owning BuildJob (-1 if not part of a job). */
     private int jobCursor = -1;
 
@@ -135,4 +152,3 @@ public class VillagerAction {
         return String.format("[%s/%s] %s", actionType, phase, description);
     }
 }
-

@@ -2,6 +2,8 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
 import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
@@ -40,33 +42,7 @@ public class VillagerSocialSystem {
     // ── Main tick entry point ─────────────────────────────────────────────────
 
     public static void tickSocial(ServerWorld world) {
-        long currentTick = world.getGameTime();
-        if (currentTick % SCAN_INTERVAL != 0) return;
-
-        // No socialising at night (dayTime 13000-23000)
-        long dayTime = world.getDayTime() % 24_000L;
-        if (dayTime > 13_000 && dayTime < 23_000) return;
-
-        Collection<VillagerAgentData> allAgents = VillagerAgentManager.getAllAgents();
-        Set<UUID> paired = new HashSet<>();
-
-        for (VillagerAgentData agentA : allAgents) {
-            if (paired.contains(agentA.getVillagerId())) continue;
-            if (!canSocialize(agentA, currentTick)) continue;
-
-            VillagerEntity villagerA = findVillager(world, agentA.getVillagerId());
-            if (villagerA == null) continue;
-
-            VillagerAgentData agentB = findPartner(world, villagerA, agentA, paired, currentTick);
-            if (agentB == null) continue;
-
-            VillagerEntity villagerB = findVillager(world, agentB.getVillagerId());
-            if (villagerB == null) continue;
-
-            paired.add(agentA.getVillagerId());
-            paired.add(agentB.getVillagerId());
-            startConversation(world, villagerA, agentA, villagerB, agentB, currentTick);
-        }
+        // Encounters are candidates in the utility brain; no competing autonomous loop.
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -99,7 +75,7 @@ public class VillagerSocialSystem {
 
     // ── Conversation logic ───────────────────────────────────────────────────
 
-    private static void startConversation(ServerWorld world,
+    public static void startConversation(ServerWorld world,
                                            VillagerEntity villagerA, VillagerAgentData agentA,
                                            VillagerEntity villagerB, VillagerAgentData agentB,
                                            long currentTick) {
@@ -107,6 +83,13 @@ public class VillagerSocialSystem {
         agentB.setSocializing(true);
         agentA.setLastSocialTick(currentTick);
         agentB.setLastSocialTick(currentTick);
+        villagerA.getNavigation().stop(); villagerB.getNavigation().stop();
+        agentA.brain().socialUntilTick = currentTick + 80;
+        agentB.brain().socialUntilTick = currentTick + 80;
+        if (!LLMSetupReminder.isConfigured()) {
+            broadcastDialogue(world, villagerA, agentA, villagerB, agentB, localDialogue(agentA, agentB));
+            return;
+        }
 
         String env  = agentA.getEnvironmentSummary();
         String memA = recentMemories(agentA, 2);
@@ -147,19 +130,24 @@ public class VillagerSocialSystem {
                 + agentB.getName() + "'s recent thoughts: " + memB + "\n"
                 + "Let their mood and relationship colour the conversation. Generate a 4-line conversation:";
 
-        LLMGuard.query(agentA.getVillagerId(), world.getGameTime(), sysPrompt, userPrompt).thenAccept(response -> {
-            DecisionJournal.record(agentA.getVillagerId(), DecisionJournal.Kind.SOCIAL,
-                    world.getGameTime(), userPrompt, response, DecisionJournal.outcome(response));
-            if (response == null || response.trim().isEmpty() || LLMService.isFailure(response)) {
-                agentA.setSocializing(false); agentB.setSocializing(false); return;
-            }
-            world.getServer().execute(() ->
-                    broadcastDialogue(world, villagerA, agentA, villagerB, agentB, response));
-        }).exceptionally(e -> {
-            LOGGER.debug("Social conversation failed: " + e.getMessage());
-            agentA.setSocializing(false); agentB.setSocializing(false);
-            return null;
-        });
+        LLMGuard.query(agentA.getVillagerId(), currentTick, sysPrompt, userPrompt)
+                .handle((response, error) -> {
+                    world.getServer().execute(() -> {
+                        if (!villagerA.isAlive() || !villagerB.isAlive() || villagerA.distanceToSqr(villagerB) > 36) {
+                            agentA.setSocializing(false); agentB.setSocializing(false); return;
+                        }
+                        String text = error != null || response == null || response.trim().isEmpty() || LLMService.isFailure(response)
+                                ? localDialogue(agentA, agentB) : response;
+                        broadcastDialogue(world, villagerA, agentA, villagerB, agentB, text);
+                    });
+                    return null;
+                });
+    }
+
+    private static String localDialogue(VillagerAgentData a, VillagerAgentData b) {
+        String line = DefaultChatLines.random();
+        if (line == null) line = "Good to see you. How is your work going?";
+        return a.getName() + ": " + line + "\n" + b.getName() + ": Good to see you too. Let's talk again soon.";
     }
 
     private static void broadcastDialogue(ServerWorld world,
@@ -199,6 +187,10 @@ public class VillagerSocialSystem {
             agentA.updateRelationship(agentB.getVillagerId().toString(), relGain);
             agentB.updateRelationship(agentA.getVillagerId().toString(), relGain);
             LOGGER.info("{} and {} had a conversation (rel delta +{})", agentA.getName(), agentB.getName(), relGain);
+
+            // ── Mentorship XP: each slowly gains the other's main capability ──
+            grantMentorshipXp(villagerA, agentA, agentB, world);
+            grantMentorshipXp(villagerB, agentB, agentA, world);
 
             // ── Gossip propagation (30% chance) ───────────────────────────────
             // One of the two speakers mentions a third villager they both know,
@@ -260,6 +252,14 @@ public class VillagerSocialSystem {
         StringJoiner sj = new StringJoiner("; ");
         for (int i = start; i < memories.size(); i++) sj.add(memories.get(i));
         return sj.toString();
+    }
+
+    /** Mentorship: {@code learner} slowly gains XP in {@code teacher}'s main capability. */
+    private static void grantMentorshipXp(VillagerEntity learner, VillagerAgentData learnerData,
+                                          VillagerAgentData teacher, ServerWorld world) {
+        CapabilityId cap = CapabilityId.mainForProfession(teacher.getProfession());
+        if (cap == null) return;
+        learnerData.gainCapabilityXp(cap, ModConfig.CAPABILITY_CHAT_XP.get(), learner, world.getGameTime());
     }
 }
 

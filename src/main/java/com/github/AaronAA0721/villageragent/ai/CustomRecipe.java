@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * Read-only data describing a custom (non-vanilla) crafting recipe, loaded from
  * {@code /villageragent/custom_recipes.json}. Used for items a villager may craft per
- * {@link ProfessionCraftCatalog} but which have no vanilla crafting/smelting recipe
+ * {@link SkillCraftCatalog} but which have no vanilla crafting/smelting recipe
  * (e.g. chainmail_*, saddle, ender_pearl).
  */
 public class CustomRecipe {

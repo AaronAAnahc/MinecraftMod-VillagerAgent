@@ -1,5 +1,6 @@
 {
   "max_level": 5,
   "thresholds": [0, 10, 70, 150, 250],
+  "capability_thresholds": [10, 25, 50, 90, 145, 215, 300, 400, 515, 645, 790],
   "unlocks": {}
 }

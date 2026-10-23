@@ -53,6 +53,11 @@
         { "item": "minecraft:blaze_powder", "count": 1 },
         { "item": "minecraft:slime_ball", "count": 1 }
       ]
+    },
+    {
+      "output": "minecraft:wheat_seeds",
+      "count": 2,
+      "inputs": [ { "item": "minecraft:wheat", "count": 1 } ]
     }
   ]
 }

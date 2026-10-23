@@ -1,13 +1,18 @@
 package com.github.AaronAA0721.villageragent.events;
 
 import com.github.AaronAA0721.villageragent.ai.*;
+import com.github.AaronAA0721.villageragent.ai.behavior.RestockSkill;
+import com.github.AaronAA0721.villageragent.ai.debug.AgentDebugExporter;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
+import com.github.AaronAA0721.villageragent.ai.world.WorldEventBus;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import com.github.AaronAA0721.villageragent.debug.DebugSync;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
 import com.github.AaronAA0721.villageragent.network.SyncVillagerDataPacket;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.ai.brain.memory.MemoryModuleType;
 import net.minecraft.entity.item.ItemEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -19,9 +24,13 @@ import net.minecraft.util.Direction;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.text.StringTextComponent;
+import net.minecraft.util.text.ITextComponent;
+import net.minecraft.util.Util;
 import net.minecraft.world.server.ServerWorld;
 import net.minecraftforge.event.CommandEvent;
+import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
@@ -39,6 +48,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Handles all Minecraft events related to villager AI agents
@@ -56,6 +66,9 @@ public class VillagerEventHandler {
         if (event.getEntity() instanceof VillagerEntity) {
             VillagerEntity villager = (VillagerEntity) event.getEntity();
             if (!event.getWorld().isClientSide) {
+                // "New" = not already known from a world-save restore: the saved-data loader
+                // registers agents before their entities join, so getAgent is non-null on reload.
+                boolean isNew = VillagerAgentManager.getAgent(villager.getUUID()) == null;
                 VillagerAgentData agent = VillagerAgentManager.getOrCreateAgent(villager);
                 // Update profession from the actual villager entity
                 updateVillagerProfession(villager, agent);
@@ -67,9 +80,22 @@ public class VillagerEventHandler {
                 // Mirror best armor from inventory → vanilla equipment slots (for rendering & damage reduction)
                 VillagerEquipmentHelper.refreshEquipment(villager, agent);
 
+                // World event: a new villager joined (skip restore-from-save so we don't re-greet on load)
+                if (isNew) {
+                    WorldEventBus.instance((ServerWorld) event.getWorld())
+                            .publish(WorldEventBus.Type.NEW_VILLAGER, villager.blockPosition(),
+                                    villager.level.getGameTime());
+                }
+
                 LOGGER.info("AI Agent created for villager: " + villager.getUUID()
                         + " (" + agent.getName() + ", " + agent.getProfession() + ")");
             }
+        } else if (event.getEntity() instanceof ItemEntity && !event.getWorld().isClientSide) {
+            // World event: an item dropped into the world (perception-gated consumption, not pickup itself)
+            ItemEntity item = (ItemEntity) event.getEntity();
+            WorldEventBus.instance((ServerWorld) event.getWorld())
+                    .publish(WorldEventBus.Type.ITEM_DROPPED, item.blockPosition(),
+                            item.level.getGameTime());
         }
     }
 
@@ -98,7 +124,44 @@ public class VillagerEventHandler {
      */
     private void updateVillagerProfession(VillagerEntity villager, VillagerAgentData agent) {
         String profession = getVillagerProfessionName(villager);
+        String old = agent.getProfession();
         agent.updateProfession(profession);
+
+        // Transition no-job -> job: drop any stale restock goal (whose outcome was the old, empty
+        // profession) so RoutineScheduler re-seeds a fresh REPEATABLE restock for the new job next
+        // tick. Job-site acquisition is now goal-driven (FindJobSiteSkill via the POI manager), not
+        // a hand-rolled block scan here.
+        if (isEmployed(profession) && !isEmployed(old)) {
+            agent.getGoals().removeIf(g -> "restock".equals(g.getGoalType()));
+            LOGGER.info("{} took up {} — routine restock will be seeded by RoutineScheduler",
+                    agent.getName(), profession);
+        }
+    }
+
+    /** True if the given (possibly humanised) profession string means "has a job". */
+    private static boolean isEmployed(String profession) {
+        if (profession == null || profession.isEmpty()) return false;
+        String p = profession.toLowerCase(Locale.ROOT);
+        return !("none".equals(p) || "villager".equals(p) || "unemployed".equals(p)
+                || "unemployed villager".equals(p) || "nitwit".equals(p));
+    }
+
+    /**
+     * On player login, if the LLM is not yet configured, nudge the player in the
+     * chat bar with the exact commands needed to set it up. Gated on AI agents
+     * being enabled so we stay quiet when the mod does nothing anyway.
+     */
+    @SubscribeEvent
+    public void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
+        if (event.getPlayer() == null || event.getPlayer().level.isClientSide) return;
+        if (!(event.getPlayer() instanceof ServerPlayerEntity)) return;
+        if (LLMSetupReminder.isConfigured()) return;
+
+        ServerPlayerEntity player = (ServerPlayerEntity) event.getPlayer();
+        for (ITextComponent line : LLMSetupReminder.buildReminder()) {
+            player.sendMessage(line, Util.NIL_UUID);
+        }
     }
     
     /**
@@ -139,9 +202,6 @@ public class VillagerEventHandler {
             // Slow tick — goals, restocking, AI decisions (gated by AGENT_THINK_INTERVAL)
             VillagerAgentManager.tickAgents(event.world);
 
-            // Fast tick — farming state machine runs every tick for responsive walking/acting
-            VillagerAgentManager.tickFarming(event.world);
-
             // Fast tick — combat state machine: scan for threats, chase, attack
             VillagerAgentManager.tickCombat(event.world);
 
@@ -150,6 +210,9 @@ public class VillagerEventHandler {
 
             // Social tick — villager-to-villager conversations (internally gated to ~10 s)
             VillagerAgentManager.tickSocial(event.world);
+
+            // Economy tick — LLM-free village supply/demand: post wants/haves, match, walk-to-trade.
+            VillagerEconomySystem.tickEconomy((ServerWorld) event.world);
 
             // Thought bubbles — LLM inner thoughts broadcast near players (gated per villager)
             VillagerAgentManager.tickThoughts(event.world);
@@ -293,6 +356,10 @@ public class VillagerEventHandler {
         ServerWorld serverWorld = (ServerWorld) event.getWorld();
         VillagerAgentSavedData savedData = VillagerAgentSavedData.get(serverWorld);
         savedData.setDirty(true);
+
+        // Human-readable debug mirror: one JSON per villager under <world>/villageragent/debug/
+        AgentDebugExporter.exportAll(serverWorld);
+
         LOGGER.info("Saved villager agent data to world save");
     }
 
@@ -327,6 +394,8 @@ public class VillagerEventHandler {
             index.offerBed(pos);
         } else {
             index.onBlockChanged(pos);
+            WorldEventBus.instance((ServerWorld) event.getWorld())
+                    .publish(WorldEventBus.Type.BLOCK_CHANGED, pos, ((ServerWorld) event.getWorld()).getGameTime());
         }
     }
 
@@ -345,6 +414,8 @@ public class VillagerEventHandler {
             index.onBedRemoved(pos);
         } else {
             index.onBlockChanged(pos);
+            WorldEventBus.instance((ServerWorld) event.getWorld())
+                    .publish(WorldEventBus.Type.BLOCK_CHANGED, pos, ((ServerWorld) event.getWorld()).getGameTime());
         }
     }
 

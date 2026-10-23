@@ -1,0 +1,47 @@
+{
+  "_comment": "Per-skill, per-level recipe unlocks. Schema: { \"skills\": { \"<capability_id_lower>\": { \"<level>\": [\"item_id\", ...] } } }. A villager may craft the union of every (skill, level) whose capability level it has reached. Gate is the UNLOCK SET, not a generic CRAFTING level — e.g. a Farmer with FARMING=3 unlocks farming levels 1..3 (bread, hoe, seeds, pumpkin pie, cookies) even with CRAFTING=0. Level 1 always includes starter essentials (seeds + hoe for farmers). Levels follow the vanilla trade tiers where one exists (1=novice ... 5=master). Items with no vanilla recipe (e.g. minecraft:wheat_seeds) must also be added to custom_recipes.json.",
+  "skills": {
+    "farming": {
+      "1": [
+        "minecraft:wheat_seeds",
+        "minecraft:iron_hoe",
+        "minecraft:bread"
+      ],
+      "2": [
+        "minecraft:pumpkin_pie"
+      ],
+      "3": [
+        "minecraft:cookies"
+      ],
+      "4": [
+        "minecraft:cake"
+      ],
+      "5": [
+        "minecraft:golden_carrot"
+      ]
+    },
+    "fishing": {
+      "1": [
+        "minecraft:fishing_rod"
+      ]
+    },
+    "crafting": {
+      "1": [
+        "minecraft:stick",
+        "minecraft:oak_planks",
+        "minecraft:crafting_table",
+        "minecraft:wooden_sword",
+        "minecraft:wooden_pickaxe",
+        "minecraft:wooden_axe",
+        "minecraft:wooden_shovel",
+        "minecraft:wooden_hoe"
+      ],
+      "2": [
+        "minecraft:chest",
+        "minecraft:furnace",
+        "minecraft:torch",
+        "minecraft:bread"
+      ]
+    }
+  }
+}

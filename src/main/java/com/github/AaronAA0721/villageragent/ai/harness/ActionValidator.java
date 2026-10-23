@@ -1,7 +1,7 @@
 package com.github.AaronAA0721.villageragent.ai.harness;
 
 import com.github.AaronAA0721.villageragent.ai.NativeRecipeResolver;
-import com.github.AaronAA0721.villageragent.ai.ProfessionCraftCatalog;
+import com.github.AaronAA0721.villageragent.ai.SkillCraftCatalog;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -111,7 +111,7 @@ public final class ActionValidator {
         String item = normalizeItemId(schema.target);
         if (item == null) return ValidationResult.reject("craft:missing-item", schema);
         int level = (villager != null) ? villager.getVillagerData().getLevel() : 1;
-        if (!ProfessionCraftCatalog.isCraftable(agent.getProfession(), level, item)) {
+        if (!SkillCraftCatalog.isCraftable(agent.getProfession(), level, item)) {
             return ValidationResult.reject("craft:not-in-catalog:" + item, schema);
         }
         if (world != null && NativeRecipeResolver.resolveRecipe(world, item) == null) {
@@ -131,7 +131,7 @@ public final class ActionValidator {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static BlockPos parseCoords(String s) {
+    static BlockPos parseCoords(String s) {
         if (s == null) return null;
         String[] parts = s.trim().split("\\s+");
         if (parts.length < 3) return null;

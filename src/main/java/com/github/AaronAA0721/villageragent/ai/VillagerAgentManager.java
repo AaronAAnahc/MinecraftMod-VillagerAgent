@@ -4,9 +4,13 @@ import com.github.AaronAA0721.villageragent.ai.harness.DecisionJournal;
 import com.github.AaronAA0721.villageragent.ai.harness.LLMGuard;
 import com.github.AaronAA0721.villageragent.ai.world.BuildingRecord;
 import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
+import com.github.AaronAA0721.villageragent.ai.world.WorldEventBus;
 import com.github.AaronAA0721.villageragent.ai.behavior.BehaviorExecutor;
+import com.github.AaronAA0721.villageragent.ai.behavior.FailureReason;
+import com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill;
 import com.github.AaronAA0721.villageragent.ai.behavior.SkillResult;
 import com.github.AaronAA0721.villageragent.ai.behavior.VillagerSkill;
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.entity.Entity;
@@ -17,11 +21,9 @@ import net.minecraft.entity.merchant.villager.VillagerData;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.inventory.EquipmentSlotType;
-import net.minecraft.item.HoeItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.pathfinding.Path;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.Util;
 import net.minecraft.util.math.BlockPos;
@@ -43,27 +45,6 @@ import java.util.function.Consumer;
  */
 public class VillagerAgentManager {
     private static final Random RANDOM = new Random();
-
-    /**
-     * Chance per tick that an idle farmer glances around for farming work.
-     * Farming ticks run every tick (not gated by AGENT_THINK_INTERVAL),
-     * so 1/200 ≈ once every 10 seconds on average.
-     */
-    private static final double FARMING_SCAN_CHANCE = 0.005;
-
-    /**
-     * How often (in ticks) the farming state machine runs for active farmers.
-     * Walking/acting checks run on this interval for responsiveness.
-     * Idle scanning uses its own random chance per tick.
-     */
-    private static final int FARMING_TICK_INTERVAL = 3;
-
-    /**
-     * Cooldown (in ticks) after the villager finishes a farming session before
-     * it starts scanning for new work again.  200-400 ticks ≈ 10-20 seconds.
-     */
-    private static final int FARMING_COOLDOWN_MIN_TICKS = 200;
-    private static final int FARMING_COOLDOWN_MAX_TICKS = 400;
 
     /**
      * How often (in ticks) the combat state machine runs.
@@ -106,7 +87,13 @@ public class VillagerAgentManager {
      */
     public static void addAgent(UUID villagerId, VillagerAgentData agent) {
         agents.put(villagerId, agent);
-        LOGGER.info("Added AI agent: " + villagerId);
+        StringBuilder caps = new StringBuilder();
+        for (CapabilityId id : CapabilityId.values()) {
+            caps.append(id).append("=").append(agent.getCapabilityPool().levelOf(id)).append(" ");
+        }
+        LOGGER.info("[CAP-DIAG] Added AI agent " + villagerId
+                + " profession=" + agent.getProfession()
+                + " caps[" + caps + "]");
     }
 
     /**
@@ -143,11 +130,16 @@ public class VillagerAgentManager {
         for (Map.Entry<UUID, VillagerAgentData> entry : agents.entrySet()) {
             VillagerAgentData agent = entry.getValue();
 
-            // Only update periodically to avoid performance issues
+            VillagerEntity loaded = findVillagerEntity(world, agent.getVillagerId());
+            if (loaded == null || !loaded.isAlive() || loaded.isBaby()) continue;
+            VillagerNavigationSupport.tick(loaded, (ServerWorld) world, agent);
+            // Check this dimension before updating shared timestamps.
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
                 agent.setLastThinkTime(currentTime);
                 updateAgent(world, agent);
+                BrainLog.snapshot(agent, loaded, (ServerWorld) world, "after-think");
             }
+            processGoals(loaded, agent);
         }
     }
 
@@ -160,48 +152,9 @@ public class VillagerAgentManager {
             VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
             if (villager == null) continue;
             VillagerActivitySystem.applySleepHealing(world, villager);
+            // Rest ends when fatigue is relieved, independent of daylight.
         }
     }
-
-    /**
-     * Fast tick for farming — runs every tick so walking/acting is responsive.
-     * Separated from the slow AI think loop to avoid 100-tick delays between
-     * walk checks and action execution.
-     */
-    public static void tickFarming(World world) {
-        if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
-        if (!ModConfig.ENABLE_WORLD_INTERACTION.get()) return;
-        if (!(world instanceof ServerWorld)) return;
-
-        long currentTime = world.getGameTime();
-        ServerWorld serverWorld = (ServerWorld) world;
-
-        for (VillagerAgentData agent : agents.values()) {
-            String profession = agent.getProfession();
-            if (profession == null || !profession.equalsIgnoreCase("farmer")) continue;
-
-            // Active farming (walking/acting) runs every FARMING_TICK_INTERVAL ticks
-            // Idle scanning runs every tick but with a low random chance
-            boolean hasActiveAction = agent.getCurrentAction() != null && isFarmingAction(agent.getCurrentAction());
-            boolean inFarmingState = agent.isInFarmingState();
-            boolean onCooldown = agent.isOnFarmingCooldown();
-
-            if (hasActiveAction || inFarmingState || onCooldown) {
-                // Active farming — run every few ticks for responsiveness
-                if (currentTime % FARMING_TICK_INTERVAL != 0) continue;
-            }
-            // else: idle — runs every tick, gated by FARMING_SCAN_CHANCE inside performFarmerActions
-
-            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
-            if (villager == null) continue;
-
-            performFarmerActions(villager, serverWorld, agent);
-        }
-    }
-
-    // ===================================================================
-    //  Combat tick — all villagers scan for and fight hostile mobs
-    // ===================================================================
 
     /**
      * Fast tick for combat — runs every tick so chasing/attacking is responsive.
@@ -269,10 +222,11 @@ public class VillagerAgentManager {
         if (current != null) return;
 
         // ── 3. Idle — scan for threats ──
-        LivingEntity threat = CombatAction.findNearestThreat(villager, world);
+            LivingEntity threat = CombatAction.findNearestThreat(villager, world);
         if (threat != null) {
-            // Fight if we can win the exchange; otherwise flee and shout for help.
-            if (CombatAction.wouldWinSolo(villager, agent, threat)) {
+            // Fight if we can win the exchange AND are allowed to attack; otherwise flee and shout for help.
+            if (CombatAction.wouldWinSolo(villager, agent, threat)
+                    && CombatAction.mayAttack(villager, agent)) {
                 startCombatAction(villager, agent, threat);
             } else {
                 rallyOrFlee(villager, world, agent, threat);
@@ -288,10 +242,12 @@ public class VillagerAgentManager {
             if (rallyThreat instanceof LivingEntity && rallyThreat.isAlive()) {
                 LivingEntity target = (LivingEntity) rallyThreat;
                 board.respond(villager, agent, target);
-                if (board.shouldCharge(target)) {
+                if (board.shouldCharge(target) && CombatAction.mayAttack(villager, agent)) {
                     startCombatAction(villager, agent, target);
                 } else {
-                    // Answer the call: run toward the rally point.
+                    // Answer the call: armed & healthy enough → charge (handled above); otherwise run
+                    // to the rally point to pin/distract and keep the alarm alive.
+                    if (villager.isSleeping()) villager.stopSleeping();
                     villager.getNavigation().moveTo(
                             rally.lastPos.getX() + 0.5, rally.lastPos.getY(), rally.lastPos.getZ() + 0.5, 0.4);
                 }
@@ -305,6 +261,11 @@ public class VillagerAgentManager {
     private static void startCombatAction(VillagerEntity villager, VillagerAgentData agent, LivingEntity target) {
         // A sleeping villager can't navigate — wake it before engaging.
         if (villager.isSleeping()) villager.stopSleeping();
+
+        // Combat is a reactive override (Settlements-style PANIC): pause the plan so the running
+        // goal waits instead of fighting the threat for the villager. It resumes on disengage.
+        ActionLifecycle.cancel(agent, villager, (ServerWorld) villager.level);
+        agent.suspendRunningGoal();
 
         VillagerAction action = new VillagerAction(VillagerAction.ActionType.ATTACK,
                 "Attacking " + target.getType().getRegistryName());
@@ -332,7 +293,7 @@ public class VillagerAgentManager {
                                     VillagerAgentData agent, LivingEntity threat) {
         VillageSignalBoard board = VillageSignalBoard.get();
         board.respond(villager, agent, threat);
-        if (board.shouldCharge(threat)) {
+        if (board.shouldCharge(threat) && CombatAction.mayAttack(villager, agent)) {
             startCombatAction(villager, agent, threat);
         } else {
             startFleeAction(villager, agent, threat);
@@ -341,6 +302,11 @@ public class VillagerAgentManager {
 
     /** Begin fleeing from a threat while raising the alarm (see {@link VillageSignalBoard}). */
     private static void startFleeAction(VillagerEntity villager, VillagerAgentData agent, LivingEntity threat) {
+        // A sleeping villager can't navigate — wake it before fleeing (mirrors startCombatAction).
+        if (villager.isSleeping()) villager.stopSleeping();
+
+        ActionLifecycle.cancel(agent, villager, (ServerWorld) villager.level);
+        agent.suspendRunningGoal(); // panic override pauses the plan
         VillagerAction action = new VillagerAction(VillagerAction.ActionType.FLEE,
                 "Fleeing from " + threat.getType().getRegistryName() + " and calling for help");
         action.setTargetEntityId(threat.getUUID());
@@ -359,12 +325,13 @@ public class VillagerAgentManager {
     private static void continueFleeAction(VillagerEntity villager, ServerWorld world,
                                            VillagerAgentData agent, VillagerAction action) {
         UUID threatId = action.getTargetEntityId();
-        if (threatId == null) { agent.setCurrentAction(null); return; }
+        if (threatId == null) { agent.setCurrentAction(null); agent.resumeSuspendedGoals(); return; }
 
         Entity raw = world.getEntity(threatId);
         if (!(raw instanceof LivingEntity) || !raw.isAlive()) {
             agent.setCurrentAction(null);
             agent.setCurrentActivity("idle");
+            agent.resumeSuspendedGoals();
             LOGGER.debug("{} stopped fleeing (threat gone)", agent.getName());
             return;
         }
@@ -373,18 +340,21 @@ public class VillagerAgentManager {
         VillageSignalBoard board = VillageSignalBoard.get();
         board.respond(villager, agent, threat); // keep the alarm alive while we kite
 
-        if (board.shouldCharge(threat)) {
-            // Enough villagers answered — turn and mob the threat together.
+        if (board.shouldCharge(threat) && CombatAction.mayAttack(villager, agent)) {
+            // Enough firepower AND this villager can fight — turn and mob the threat together.
             agent.setCurrentAction(null);
             startCombatAction(villager, agent, threat);
             return;
         }
+        // else: not enough power yet, or this villager can't attack (bare hand / low health) →
+        // keep kiting at a safe distance while the alarm stays alive (pin, not charge).
 
         action.incrementStuckTicks(); // +1 per scan (~0.5 s)
         if (action.getStuckTicks() > FLEE_GIVE_UP_SCANS) {
             agent.setCurrentAction(null);
             agent.setCurrentActivity("idle");
             villager.getNavigation().stop();
+            agent.resumeSuspendedGoals();
             LOGGER.debug("{} gave up rallying against {}", agent.getName(), threat.getType().getRegistryName());
             return;
         }
@@ -411,8 +381,16 @@ public class VillagerAgentManager {
 
         // Find the target entity
         Entity rawTarget = world.getEntity(targetId);
-        if (!(rawTarget instanceof LivingEntity) || !rawTarget.isAlive()) {
-            // Target dead or gone — disengage
+        if (rawTarget instanceof LivingEntity && !rawTarget.isAlive()) {
+            // Killed it — combat practice.
+            agent.gainCapabilityXp(CapabilityId.COMBAT, ModConfig.CAPABILITY_PRACTICE_XP.get(),
+                    villager, world.getGameTime());
+            disengageCombat(villager, agent);
+            LOGGER.debug("{} eliminated a threat", agent.getName());
+            return;
+        }
+        if (!(rawTarget instanceof LivingEntity)) {
+            // Target despawned or gone — disengage
             disengageCombat(villager, agent);
             LOGGER.debug("{} target eliminated or lost", agent.getName());
             return;
@@ -461,6 +439,7 @@ public class VillagerAgentManager {
     private static void disengageCombat(VillagerEntity villager, VillagerAgentData agent) {
         agent.setCurrentAction(null);
         agent.setCurrentActivity("idle");
+        agent.resumeSuspendedGoals(); // threat gone — resume the paused plan
     }
 
     // ===================================================================
@@ -485,6 +464,7 @@ public class VillagerAgentManager {
         for (VillagerAgentData agent : agents.values()) {
             VillagerAction cur = agent.getCurrentAction();
 
+            if (cur != null && cur.isGoalDriven()) continue;
             boolean ourAction = cur != null && (cur.getActionType() == VillagerAction.ActionType.PLACE
                     || cur.getActionType() == VillagerAction.ActionType.BREAK
                     || cur.getActionType() == VillagerAction.ActionType.BUILD);
@@ -571,6 +551,8 @@ public class VillagerAgentManager {
     /** Queue a single-block PLACE for the villager (walks to a legal standing cell first). */
     public static void requestPlace(VillagerAgentData agent, VillagerEntity villager,
                                      ServerWorld world, BlockPos target, Block block) {
+        ActionLifecycle.cancel(agent, villager, world);
+        agent.setRunningGoal(null);
         BlockPos stand = BlockInteractionAction.findStandable(world, target);
         VillagerAction act = new VillagerAction(VillagerAction.ActionType.PLACE,
                 "Placing " + block.getRegistryName() + " at " + target);
@@ -586,6 +568,8 @@ public class VillagerAgentManager {
     /** Queue a single-block BREAK for the villager (walks to a legal standing cell first). */
     public static void requestBreak(VillagerAgentData agent, VillagerEntity villager,
                                      ServerWorld world, BlockPos target) {
+        ActionLifecycle.cancel(agent, villager, world);
+        agent.setRunningGoal(null);
         BlockPos stand = BlockInteractionAction.findStandable(world, target);
         VillagerAction act = new VillagerAction(VillagerAction.ActionType.BREAK,
                 "Breaking block at " + target);
@@ -609,7 +593,7 @@ public class VillagerAgentManager {
 
     /**
      * Update a single agent's AI (slow tick — goals, restocking, etc.)
-     * Farming and combat are handled separately by tickFarming()/tickCombat().
+     * Combat is handled separately by tickCombat().
      */
     private static void updateAgent(World world, VillagerAgentData agent) {
         // Find the actual villager entity
@@ -618,13 +602,9 @@ public class VillagerAgentManager {
             return; // Villager not loaded or doesn't exist
         }
 
-        // Daily schedule planner — generates plan at dawn, applies current task, evening reflection
+        // Daily schedule planner removed (行为生成器统一重构方案): no more fixed time-slot plan.
         if (world instanceof ServerWorld) {
             ServerWorld sw = (ServerWorld) world;
-
-            if (ModConfig.ENABLE_DAILY_SCHEDULE.get()) {
-                VillagerSchedulePlanner.tick(sw, villager, agent);
-            }
 
             // Autonomous environment refresh (keeps snapshot current for planning and chat)
             long gameTime = world.getGameTime();
@@ -632,24 +612,84 @@ public class VillagerAgentManager {
             BlockPos vPos = villager.blockPosition();
             agent.updateChunkMemory(villager, world, vPos.getX() >> 4, vPos.getZ() >> 4);
 
+            // Consume world events since this villager's cursor (perception-gated) → reactive goals
+            processWorldEvents(sw, villager, agent, gameTime);
+
             if (gameTime - agent.getLastEnvRefreshTick() >= ENV_REFRESH_INTERVAL) {
                 agent.setLastEnvRefreshTick(gameTime);
                 String envSummary = VillagerVisionSystem.buildEnvironmentSummary(villager, sw, agent);
                 agent.setEnvironmentSummary(envSummary);
             }
 
-            // Activity system — translates scheduledActivity into actual movement
-            VillagerActivitySystem.tick(sw, villager, agent);
+            // Activity system's scheduledActivity translator removed (was fed by the daily
+            // schedule planner, now gone); sleep healing + wake-at-dawn remain in tickSleepHealing.
 
             // Needs system — hunger decay, eating, fatigue
             VillagerNeedsSystem.tick(sw, agent);
+
+            // Capability decay + vanilla trade-level sync — once per in-game day (persisted, so it
+            // never double-decays across a world reload).
+            long today = gameTime / 24_000L;
+            if (today != agent.getLastCapabilityDecayDay()) {
+                agent.setLastCapabilityDecayDay(today);
+                agent.getCapabilityPool().decayTo(today);
+                agent.syncVanillaTradeLevel(villager);
+                agent.refreshUnlockedRecipes(); // decay may drop levels → re-lock recipes
+            }
         }
 
-        // Check if villager is at their job block for restocking
-        checkJobBlockRestock(villager, agent);
+        // Process current goals (execution + daily prune + fallback generation if needed).
+        // Restocking is now goal-driven (RestockSkill) rather than a passive proximity check —
+        // all villager behaviour flows through the unified goal queue.
+        OpportunitySensor.refresh(agent, villager, (ServerWorld) world);
+        RoutineScheduler.ensureRepeatableGoals(agent, (ServerWorld) world);
+        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.offerWork((ServerWorld) world, villager, agent);
+    }
 
-        // Process current goals (execution + daily prune + fallback generation if needed)
-        processGoals(villager, agent);
+    // ── World event consumption (per-villager cursor + perception gate) ─────────
+
+    /**
+     * Drain the {@link WorldEventBus} for this villager up to a small budget, feed admitted events
+     * through the perception gate, and turn them into reactive goals. The cursor is persisted in
+     * NBT so an offline villager catches up on resume without re-reading evicted events.
+     */
+    private static void processWorldEvents(ServerWorld world, VillagerEntity villager,
+                                           VillagerAgentData agent, long gameTick) {
+        int radius = ModConfig.PERCEPTION_RADIUS_CHUNKS.get();
+        int budget = ModConfig.EVENTS_PER_THINK.get();
+        int vcx = villager.blockPosition().getX() >> 4;
+        int vcz = villager.blockPosition().getZ() >> 4;
+
+        WorldEventBus bus = WorldEventBus.instance(world);
+        long cursor = agent.getEventCursor();
+        long next = bus.consume(cursor, budget, vcx, vcz, radius, e -> onWorldEvent(agent, e));
+        agent.setEventCursor(next);
+    }
+
+    /** Translate a single admitted environment event into behaviour (via the unified goal funnel). */
+    private static void onWorldEvent(VillagerAgentData agent, WorldEventBus.Event e) {
+        switch (e.type) {
+            case NEW_VILLAGER: {
+                // A new neighbour arrived — go socialise, unless one is already queued.
+                for (AgentGoal g : agent.getGoals()) {
+                    if (!g.isCompleted() && "socialize".equals(g.getGoalType())) return;
+                }
+                if (agent.getGoals().size() < MAX_GOALS) {
+                    AgentGoal g = new AgentGoal("socialize", "Meet the new villager", 3);
+                    g.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
+                    agent.getGoals().add(g);
+                    BrainLog.goalAdded(agent, g, "event:new_villager");
+                }
+                break;
+            }
+            case BLOCK_CHANGED:
+            case ITEM_DROPPED:
+            default:
+                // v1 framework only: block changes are already handled by WorldStructureIndex
+                // invalidation, item drops by ItemAttractionSystem pickup. Consumed for
+                // observability; goal injection for these types follows the skill that owns them.
+                break;
+        }
     }
 
     /**
@@ -728,6 +768,9 @@ public class VillagerAgentManager {
                                 agent.getGoals().add(g);
                                 agent.addMemory("New goal from thought: " + g.getDescription()
                                         + " (importance " + g.getImportance() + ")");
+                                BrainLog.goalAdded(agent, g, "thought_goal_directive");
+                            } else {
+                                BrainLog.goalSkipped(agent, g, "thought_goal_directive");
                             }
                         }
                     }
@@ -927,196 +970,6 @@ public class VillagerAgentManager {
     }
 
     /**
-     * Farmer-specific automatic actions — state machine that runs every few ticks.
-     *
-     * States:
-     * 1. **Walking** — an action is in progress (walking to a block). Continue it.
-     * 2. **Cooldown** — the villager just finished a farming session and is resting.
-     *    Tick down the cooldown; do nothing else.
-     * 3. **Farming** — the villager is actively working an area. Scan 360° for the
-     *    next block to harvest/plant. If nothing left → exit + start cooldown.
-     * 4. **Idle** — the villager is wandering. Every ~10 s on average (random roll)
-     *    it glances at its forward cone. If it spots work → enter farming state.
-     */
-    private static void performFarmerActions(VillagerEntity villager, ServerWorld world, VillagerAgentData agent) {
-        // ── 1. Walking to a target block — continue the action ──
-        VillagerAction current = agent.getCurrentAction();
-        if (current != null) {
-            if (current.isFarmMove()) return;   // a farm skill owns this tick — don't fight it
-            if (isFarmingAction(current)) {
-                continueFarmingAction(villager, world, agent, current);
-                return;
-            }
-        }
-
-        // ── 2. Cooldown after a farming session ──
-        if (agent.isOnFarmingCooldown()) {
-            agent.tickFarmingCooldown(FARMING_TICK_INTERVAL);
-            return; // resting — do nothing
-        }
-
-        // ── 2b. Routine farm goal (tilling) — single unified funnel ──
-        ensureFarmRoutineGoal(villager, world, agent);
-
-        // ── 3. In farming state — scan 360° for the next reachable block ──
-        if (agent.isInFarmingState()) {
-            BlockPos villagerPos = villager.blockPosition();
-
-            // Priority 1: harvest mature crops (try nearest reachable)
-            BlockPos cropTarget = findFirstReachable(villager,
-                    FarmingAction.findMatureCropsSorted(world, villagerPos));
-            if (cropTarget != null) {
-                startFarmingAction(villager, agent, VillagerAction.ActionType.HARVEST,
-                        "Harvesting area", cropTarget);
-                return;
-            }
-
-            // Priority 2: plant seeds on empty farmland
-            if (FarmingAction.hasSeeds(agent)) {
-                BlockPos farmlandTarget = findFirstReachable(villager,
-                        FarmingAction.findEmptyFarmlandSorted(world, villagerPos));
-                if (farmlandTarget != null) {
-                    startFarmingAction(villager, agent, VillagerAction.ActionType.GROW,
-                            "Planting area", farmlandTarget);
-                    return;
-                }
-            }
-
-            // Nothing reachable — exit farming state, start cooldown
-            exitFarmingState(agent);
-            return;
-        }
-
-        // ── 4. Idle — random chance to glance at forward cone ──
-        if (RANDOM.nextDouble() > FARMING_SCAN_CHANCE) {
-            return; // not looking this tick
-        }
-
-        BlockPos villagerPos = villager.blockPosition();
-        float headYaw = villager.yHeadRot;
-
-        // Check forward cone for anything to do
-        BlockPos cropTarget = FarmingAction.findNearestMatureCrop(world, villagerPos, headYaw);
-        if (cropTarget != null) {
-            enterFarmingState(agent);
-            startFarmingAction(villager, agent, VillagerAction.ActionType.HARVEST,
-                    "Noticed crops — starting harvest", cropTarget);
-            return;
-        }
-
-        if (FarmingAction.hasSeeds(agent)) {
-            BlockPos farmlandTarget = FarmingAction.findNearestEmptyFarmland(world, villagerPos, headYaw);
-            if (farmlandTarget != null) {
-                enterFarmingState(agent);
-                startFarmingAction(villager, agent, VillagerAction.ActionType.GROW,
-                        "Noticed farmland — starting planting", farmlandTarget);
-                return;
-            }
-        }
-    }
-
-    /**
-     * While the daily schedule says "farming", keep a single routine {@code farm} goal alive so
-     * the BehaviourExecutor routes tilling through the farm skills (maintain / reclaim). This is
-     * the concrete embodiment of "mode generates routine goals": the mode never drives behaviour
-     * directly, it only seeds the unified goal list. The goal is chosen by context — maintain when
-     * there is reverted farmland to fix, otherwise reclaim new land.
-     */
-    private static void ensureFarmRoutineGoal(VillagerEntity villager, ServerWorld world, VillagerAgentData agent) {
-        if (agent.getScheduledActivity() == null || !"farming".equals(agent.getScheduledActivity())) return;
-        for (AgentGoal g : agent.getGoals()) {
-            if ("farm".equals(g.getGoalType())) return; // already have one
-        }
-        VillagerAction ca = agent.getCurrentAction();
-        if (ca != null && ca.isFarmMove()) return;       // let an in-progress till finish first
-
-        String mode = FarmingAction.hasRevertedFarmlandNearby(world, villager.blockPosition(), FarmingAction.SCAN_RADIUS)
-                ? "maintain" : "reclaim";
-        AgentGoal g = new AgentGoal("farm",
-                mode.equals("maintain") ? "Maintain reverted farmland" : "Reclaim new farmland", 5);
-        g.setFarmMode(mode);
-        g.setImportance(6);
-        agent.getGoals().add(g);
-    }
-
-    /** Enter farming state — the villager commits to working the area. */
-    private static void enterFarmingState(VillagerAgentData agent) {
-        agent.setInFarmingState(true);
-        agent.setCurrentActivity("farming");
-        LOGGER.debug(agent.getName() + " entered farming state");
-    }
-
-    /** Exit farming state and start a cooldown before the next scan cycle. */
-    private static void exitFarmingState(VillagerAgentData agent) {
-        agent.setInFarmingState(false);
-        int cooldown = FARMING_COOLDOWN_MIN_TICKS
-                + RANDOM.nextInt(FARMING_COOLDOWN_MAX_TICKS - FARMING_COOLDOWN_MIN_TICKS + 1);
-        agent.setFarmingCooldownTicks(cooldown);
-        agent.setCurrentActivity("idle");
-        LOGGER.debug(agent.getName() + " finished farming — cooldown " + cooldown + " ticks");
-    }
-
-    /**
-     * Given a list of candidate BlockPos (sorted nearest-first), return the nearest
-     * one the villager can path to, or null if even the nearest is unreachable.
-     *
-     * Crops / farmland are assumed to sit close together and be mutually reachable,
-     * so a SINGLE path check against the nearest candidate is sufficient. Previously
-     * this ran a full A* search for every candidate, which (with many villagers and
-     * large fields) caused a per-tick CPU cliff.
-     */
-    private static BlockPos findFirstReachable(VillagerEntity villager, List<BlockPos> candidates) {
-        if (candidates.isEmpty()) return null;
-        Path path = villager.getNavigation().createPath(candidates.get(0), 1);
-        return path != null ? candidates.get(0) : null;
-    }
-
-    private static boolean isFarmingAction(VillagerAction action) {
-        return action.getActionType() == VillagerAction.ActionType.HARVEST
-            || action.getActionType() == VillagerAction.ActionType.GROW;
-    }
-
-    /**
-     * Create a new farming action, set the target block, and start walking.
-     * Also equips a hoe from inventory if available.
-     */
-    private static void startFarmingAction(VillagerEntity villager, VillagerAgentData agent,
-                                            VillagerAction.ActionType type, String desc, BlockPos target) {
-        VillagerAction action = new VillagerAction(type, desc);
-        action.setTargetBlockPos(target);
-        action.setPhase(VillagerAction.ActionPhase.WALKING);
-        agent.setCurrentAction(action);
-
-        // Keep "farming" as the activity while in farming state
-        if (!agent.isInFarmingState()) {
-            agent.setCurrentActivity(type == VillagerAction.ActionType.HARVEST ? "harvesting" : "planting");
-        }
-
-        // Equip a hoe from inventory for visual display
-        equipHoe(villager, agent);
-
-        // Tell the villager to walk toward the target block
-        villager.getNavigation().moveTo(
-                target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.6);
-
-        LOGGER.debug(agent.getName() + " [" + desc + "] — walking to " + target);
-    }
-
-    /**
-     * Find a hoe in the agent's inventory and equip it in the villager's main hand.
-     */
-    private static void equipHoe(VillagerEntity villager, VillagerAgentData agent) {
-        AgentInventory inv = agent.getInventory();
-        for (int i = 0; i < inv.getItems().size(); i++) {
-            ItemStack stack = inv.getStackInSlot(i);
-            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
-                villager.setItemSlot(EquipmentSlotType.MAINHAND, stack.copy());
-                return;
-            }
-        }
-    }
-
-    /**
      * Clear the villager's main hand (e.g. when talking to a player).
      */
     public static void equipEmptyHand(VillagerEntity villager) {
@@ -1124,187 +977,9 @@ public class VillagerAgentManager {
     }
 
     /**
-     * Continue an in-progress farming action: check distance, act or keep walking.
-     *
-     * Vanilla villager brain activities (WORK, IDLE, MEET, etc.) continuously
-     * issue their own navigation commands that override ours.  To prevent the
-     * villager from wandering away mid-farm we:
-     *   1. Stop the current vanilla navigation path every call.
-     *   2. Re-issue our own moveTo every call (every FARMING_TICK_INTERVAL ticks).
-     */
-    private static void continueFarmingAction(VillagerEntity villager, ServerWorld world,
-                                               VillagerAgentData agent, VillagerAction action) {
-        // ── Handle WAITING phase (post-harvest, waiting for seeds) ──
-        if (action.getPhase() == VillagerAction.ActionPhase.WAITING) {
-            handlePendingReplant(villager, world, agent, action);
-            return;
-        }
-
-        BlockPos target = action.getTargetBlockPos();
-        if (target == null) {
-            agent.setCurrentAction(null);
-            return;
-        }
-
-        BlockPos villagerPos = villager.blockPosition();
-        double distSq = villagerPos.distSqr(target);
-
-        // Check if we've arrived (within 1 block)
-        if (distSq <= FarmingAction.INTERACT_RANGE_SQ) {
-            action.setPhase(VillagerAction.ActionPhase.ACTING);
-            performFarmingActionAtBlock(villager, world, agent, action, target);
-            // If the action transitioned to WAITING (harvest → pending replant),
-            // don't clear it — let the waiting handler run on subsequent ticks.
-            if (action.getPhase() != VillagerAction.ActionPhase.WAITING) {
-                agent.setCurrentAction(null);
-            }
-            return;
-        }
-
-        // Still walking — check if stuck
-        action.incrementStuckTicks();
-        if (action.getStuckTicks() > FarmingAction.STUCK_TIMEOUT_TICKS) {
-            LOGGER.debug(agent.getName() + " gave up reaching " + target + " (stuck)");
-            agent.setCurrentAction(null);
-            if (!agent.isInFarmingState()) {
-                agent.setCurrentActivity("idle");
-            }
-            return;
-        }
-
-        // Re-issue navigation command periodically in case path was interrupted.
-        // Vanilla brain is suppressed by VillagerEntityMixin while the agent is active,
-        // so we only need to re-issue occasionally for normal pathfinding recovery.
-        if (action.getStuckTicks() % 20 == 0) {
-            villager.getNavigation().moveTo(
-                    target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.6);
-        }
-    }
-
-    /**
-     * The villager has arrived at the target block — perform the actual action.
-     */
-    private static void performFarmingActionAtBlock(VillagerEntity villager, ServerWorld world,
-                                                     VillagerAgentData agent, VillagerAction action,
-                                                     BlockPos target) {
-        switch (action.getActionType()) {
-            case HARVEST:
-                // Verify the crop is still there and mature
-                if (FarmingAction.isMatureCrop(world, target)) {
-                    // Remember which crop was here before harvesting
-                    net.minecraft.block.Block harvestedCrop = FarmingAction.harvestBlockAt(villager, world, agent, target);
-                    if (harvestedCrop != null) {
-                        BlockPos farmlandPos = target.below();
-                        // Try to replant immediately if we already have the seed
-                        if (FarmingAction.plantSpecificCropAt(villager, world, agent, farmlandPos, harvestedCrop)) {
-                            // Replanted same crop right away — done
-                        } else if (FarmingAction.isEmptyFarmland(world, farmlandPos)) {
-                            // Don't have the seed yet — wait for item pickup
-                            action.setPendingReplant(harvestedCrop, farmlandPos);
-                            action.setPhase(VillagerAction.ActionPhase.WAITING);
-                            LOGGER.debug(agent.getName() + " harvested, waiting for seeds to replant "
-                                    + harvestedCrop.getRegistryName());
-                        }
-                    }
-                } else {
-                    LOGGER.debug(agent.getName() + " arrived but crop at " + target + " is gone");
-                }
-                break;
-            case GROW:
-                // Plant on empty farmland: prefer same crop as adjacent blocks, else random
-                if (FarmingAction.isEmptyFarmland(world, target)) {
-                    FarmingAction.plantSmartAt(villager, world, agent, target);
-                } else {
-                    LOGGER.debug(agent.getName() + " arrived but farmland at " + target + " is occupied");
-                }
-                break;
-            default:
-                break;
-        }
-    }
-
-    /**
-     * Maximum ticks to wait for seeds after harvesting before giving up.
-     * At FARMING_TICK_INTERVAL=3, 20 checks ≈ 60 ticks ≈ 3 seconds.
-     * Items should be attracted and picked up well within this time.
-     */
-    private static final int REPLANT_WAIT_MAX_TICKS = 20;
-
-    /**
-     * Handle the WAITING phase after a harvest: wait for the villager to pick up
-     * the dropped seeds, then replant the same crop. If seeds don't arrive in time,
-     * fall back to smart planting (match neighbors or random).
-     */
-    private static void handlePendingReplant(VillagerEntity villager, ServerWorld world,
-                                              VillagerAgentData agent, VillagerAction action) {
-        net.minecraft.block.Block crop = action.getPendingReplantCrop();
-        BlockPos farmlandPos = action.getPendingReplantPos();
-
-        if (crop == null || farmlandPos == null) {
-            // No pending replant — just finish
-            agent.setCurrentAction(null);
-            return;
-        }
-
-        // Check if the farmland is still empty (another villager might have planted)
-        if (!FarmingAction.isEmptyFarmland(world, farmlandPos)) {
-            agent.setCurrentAction(null);
-            return;
-        }
-
-        action.incrementPendingReplantWaitTicks();
-
-        // Try to replant the same crop
-        if (FarmingAction.plantSpecificCropAt(villager, world, agent, farmlandPos, crop)) {
-            // Successfully replanted the same crop — done
-            agent.setCurrentAction(null);
-            return;
-        }
-
-        // Seeds haven't arrived yet — check if we've waited long enough
-        if (action.getPendingReplantWaitTicks() >= REPLANT_WAIT_MAX_TICKS) {
-            // Timeout — fall back to smart planting (match neighbors or random)
-            LOGGER.debug(agent.getName() + " timed out waiting for " + crop.getRegistryName()
-                    + " seeds, falling back to smart plant");
-            FarmingAction.plantSmartAt(villager, world, agent, farmlandPos);
-            agent.setCurrentAction(null);
-        }
-        // else: keep waiting — will be called again next FARMING_TICK_INTERVAL
-    }
-
-    /**
      * Check if villager is at their job block and should restock
      * Mimics vanilla Minecraft behavior where villagers restock at their workstation
      */
-    private static void checkJobBlockRestock(VillagerEntity villager, VillagerAgentData agent) {
-        // Get the villager's job site from their brain memory
-        Optional<GlobalPos> jobSiteOptional = villager.getBrain()
-            .getMemory(MemoryModuleType.JOB_SITE);
-
-        if (!jobSiteOptional.isPresent()) {
-            return; // No job site assigned
-        }
-
-        GlobalPos jobSite = jobSiteOptional.get();
-        BlockPos jobBlockPos = jobSite.pos();
-        BlockPos villagerPos = villager.blockPosition();
-
-        // Check if villager is within 2 blocks of their job site
-        double distance = villagerPos.distSqr(jobBlockPos);
-        if (distance <= 4.0) { // 2 blocks squared
-            // Check if enough time has passed since last restock (once per Minecraft day = 24000 ticks)
-            long currentTime = villager.level.getGameTime();
-            long lastRestockTime = agent.getLastRestockTime();
-
-            // Restock once per Minecraft day (24000 ticks)
-            if (currentTime - lastRestockTime >= 24000) {
-                agent.restockAtJobBlock();
-                agent.setLastRestockTime(currentTime);
-                LOGGER.info("Villager " + agent.getName() + " restocked at job block");
-            }
-        }
-    }
-
     /**
      * Find a villager entity in the world by UUID
      */
@@ -1330,15 +1005,20 @@ public class VillagerAgentManager {
     /** Probability that a thought also boosts a random subset of goals' importance. */
     private static final double GOAL_BOOST_CHANCE = 0.5;
     private static final Set<String> VALID_GOAL_TYPES = new HashSet<>(Arrays.asList(
-            "gather", "craft", "trade", "socialize", "build", "move", "converse", "goto"));
+            "craft", "trade", "socialize", "build", "move", "converse", "goto"));
 
-    // ── Goal-execution tuning ──
+    // ── Goal-execution tuning (shared with the ai.behavior skills) ──
     /** Squared arrival threshold for goal-driven movement (within 4 blocks). */
-    private static final double GOAL_ARRIVE_SQ = 16.0;
+    public static final double GOAL_ARRIVE_SQ = 16.0;
     /** Ticks before a goal-driven walk gives up (~10 s). */
-    private static final int GOAL_STUCK_TIMEOUT = 200;
+    public static final int GOAL_STUCK_TIMEOUT = 200;
     /** Ticks a villager must remain at the workstation before a craft completes (~10 s). */
-    private static final int CRAFT_WORK_TICKS = 200;
+    public static final int CRAFT_WORK_TICKS = 200;
+    /** Consecutive BLOCKED returns before a goal is dropped so it stops hogging the running slot. */
+    private static final int BLOCKED_MAX_STREAK = 5;
+    /** Floor for the cooldown an abandoned REPEATABLE goal gets (~10 s). Without it, a goal whose
+     *  own cooldown is 0 (e.g. {@code rest}) would be re-picked instantly and loop here forever. */
+    private static final int MIN_ABANDON_COOLDOWN = 200;
 
     /**
      * Process the agent's current goals: daily maintenance, then execution.
@@ -1349,76 +1029,167 @@ public class VillagerAgentManager {
      * ({@code scheduledActivity}) yields for the duration.
      */
     private static void processGoals(VillagerEntity villager, VillagerAgentData agent) {
+        ServerWorld world = (ServerWorld) villager.level;
+        long now = world.getGameTime();
+        VillagerAction action = agent.getCurrentAction();
+        // Reactive combat and explicit construction own the body until they yield it.
+        if (action != null && !action.isGoalDriven()) return;
+        if (action != null && (action.getActionType() == VillagerAction.ActionType.MOVE
+                || action.getPhase() == VillagerAction.ActionPhase.WALKING)) action.observeMovement(villager.position());
         List<AgentGoal> goals = agent.getGoals();
-        if (goals.isEmpty()) return;
-
-        // Once per in-game day: prune low-importance goals and (if thought bubbles are
-        // disabled, so the AI can't generate goals itself) create one fallback goal.
-        long day = villager.level.getGameTime() / 24_000L;
-        if (day != agent.getLastGoalPruneDay()) {
-            agent.setLastGoalPruneDay(day);
-            pruneLowImportanceGoals(agent);
-            if (!ModConfig.ENABLE_VILLAGER_THOUGHTS.get() && agent.getGoals().size() < MAX_GOALS) {
-                generateNewGoals(villager, agent);
+        AgentGoal current = agent.getRunningGoal();
+        // Satisfied job searches must disappear even when their handler is no longer eligible.
+        if (villager.getBrain().getMemory(net.minecraft.entity.ai.brain.memory.MemoryModuleType.JOB_SITE).isPresent()
+                || agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) {
+            goals.removeIf(g -> "find_job_site".equals(g.getGoalType()));
+        }
+        agent.brain().nightRest = SleepSkill.isNightTime(world.getDayTime());
+        GoalScheduler.expireGoals(goals, now);
+        if (current != null && (!goals.contains(current) || current.isCompleted() || current.isExpired(now))) {
+            ActionLifecycle.cancel(agent, villager, world);
+            agent.setRunningGoal(null); current = null;
+        }
+        if (current == null) resumeAllGoals(agent, goals);
+        if (now < agent.brain().socialUntilTick) return;
+        if (agent.isSocializing() && (current == null || !"socialize".equals(current.getGoalType()))) return;
+        boolean reconsider = now - agent.brain().lastChoiceTick >= 20;
+        if (current == null || reconsider) {
+            agent.brain().lastChoiceTick = now;
+            // Choose only actually executable candidates. Missing prerequisites of an existing
+            // task are reported below, never confused with an unavailable handler.
+            List<AgentGoal> runnable = new ArrayList<>();
+            for (AgentGoal g : new ArrayList<>(goals)) {
+                if (BehaviorExecutor.findHandler(agent, g, villager, world) != null) {
+                    runnable.add(g);
+                } else if (g != current && !g.isOnCooldown(now)) {
+                    g.setLastFailure(BehaviorExecutor.diagnoseFailure(agent, g, villager, world));
+                    FailureRecoveryPlanner.handle(agent, g, villager, world);
+                    if (!GoalExitPolicy.retain(g, SkillResult.BLOCKED, now)) {
+                        goals.remove(g);
+                        if (g.getLifecycle() == AgentGoal.Lifecycle.REPEATABLE)
+                            agent.brain().retiredRoutines.put(g.getGoalType(), now + GoalExitPolicy.RETIRED_ROUTINE_DELAY);
+                    }
+                }
+            }
+            AgentGoal candidate = GoalScheduler.pickNextGoal(agent, runnable, now);
+            if (candidate == null && current == null && (agent.brain().lastNoCandidateTick == Long.MIN_VALUE
+                    || now - agent.brain().lastNoCandidateTick >= 100)) {
+                agent.brain().lastNoCandidateTick = now;
+                StringBuilder rejected = new StringBuilder();
+                for (AgentGoal g : goals) {
+                    if (GoalScheduler.utility(agent, g, now) <= 0
+                            || BehaviorExecutor.findHandler(agent, g, villager, world) != null) continue;
+                    if (rejected.length() > 0) rejected.append("; ");
+                    rejected.append(g.getGoalType()).append(':')
+                            .append(BehaviorExecutor.explainNoHandler(agent, g, villager, world));
+                }
+                BrainLog.diagnostic(agent, "no-candidate", "goals=" + goals.size()
+                        + " runnable=" + runnable.size() + " action=" + agent.getCurrentAction()
+                        + " farmOpportunities=" + agent.brain().farmOpportunities
+                        + " socialPartner=" + agent.brain().socialPartner
+                        + " positiveButUnrunnable=" + rejected);
+            }
+            boolean boundary = GoalScheduler.canYieldBetweenActions(current)
+                    && agent.getCurrentAction() == null && !villager.isSleeping()
+                    && now - agent.brain().goalStartedTick >= 200;
+            if (candidate != null && candidate != current
+                    && (current == null || GoalScheduler.shouldPreempt(agent, current, candidate) || boundary)) {
+                AgentGoal previous = current;
+                if (previous != null) {
+                    ActionLifecycle.cancel(agent, villager, world);
+                    previous.setCooldownUntilTick(now + 100);
+                }
+                current = candidate;
+                current.setSuspended(false);
+                agent.setRunningGoal(current);
+                agent.setCurrentActivity(current.getGoalType());
+                agent.brain().goalStartedTick = now;
+                if ("wander".equals(current.getGoalType())) {
+                    StringBuilder reasons = new StringBuilder();
+                    for (AgentGoal g : goals) reasons.append(g.getGoalType()).append("{score=")
+                            .append(GoalScheduler.utility(agent, g, now)).append(",cooldown=")
+                            .append(Math.max(0, g.getCooldownUntilTick() - now)).append(",handler=")
+                            .append(BehaviorExecutor.findHandler(agent, g, villager, world) != null).append("} ");
+                    BrainLog.diagnostic(agent, "wander-fallback", reasons + "farmAnchor=" + agent.brain().rememberedFarm
+                            + " profession=" + agent.getProfession() + " role=" + agent.getResourceProfession());
+                }
+                BrainLog.decide(agent, "selected " + current.getGoalType()
+                        + " score=" + GoalScheduler.utility(agent, current, now));
+                BrainLog.goalSwitch(agent, previous, current, "utility");
             }
         }
-
-        // Don't let goals interrupt combat / farming / building — those systems own the villager.
-        VillagerAction ca = agent.getCurrentAction();
-        if (ca != null && !ca.isGoalDriven()) {
-            VillagerAction.ActionType t = ca.getActionType();
-            if (t == VillagerAction.ActionType.ATTACK || t == VillagerAction.ActionType.HARVEST
-                    || t == VillagerAction.ActionType.GROW || t == VillagerAction.ActionType.PLACE
-                    || t == VillagerAction.ActionType.BREAK || t == VillagerAction.ActionType.FLEE
-                    || t == VillagerAction.ActionType.BUILD) {
-                return;
+        if (current == null) return;
+        current.setSuspended(false);
+        agent.setLastExecutorTick(now);
+        VillagerSkill handler = BehaviorExecutor.findHandler(agent, current, villager, world);
+        SkillResult result;
+        if (handler == null) {
+            current.setLastFailure(BehaviorExecutor.diagnoseFailure(agent, current, villager, world));
+            BrainLog.noHandler(agent, current, BehaviorExecutor.explainNoHandler(agent, current, villager, world));
+            result = SkillResult.BLOCKED;
+        } else {
+            current.setLastFailure(null);
+            result = BehaviorExecutor.executeRoot(agent, current, villager, world);
+            if (result == SkillResult.RUNNING && !current.isCompleted()) {
+                VillagerAction moving = agent.getCurrentAction();
+                if (moving != agent.brain().observedWalk) {
+                    agent.brain().observedWalk = moving;
+                    agent.brain().walkStartedTick = now;
+                }
+                if (!villager.isSleeping() && now - agent.brain().goalStartedTick >= 2400) {
+                    current.setLastFailure(FailureReason.UNKNOWN.with("execution timeout"));
+                    result = SkillResult.FAIL;
+                }
             }
         }
-
-        // Sort by priority (highest first)
-        goals.sort((a, b) -> Integer.compare(b.getPriority(), a.getPriority()));
-        AgentGoal currentGoal = goals.get(0);
-
-        // ── Autonomous skill dispatch (no LLM) ──
-        // The LLM only authors/adjusts goals; this executor runs them by priority on a fixed cadence.
-        // A skill that claims the top goal takes over and (on SUCCESS/FAIL) closes the goal. Goals no
-        // skill claims fall through to the legacy per-type handlers below.
-        long gt = villager.level.getGameTime();
-        if (gt % ModConfig.BEHAVIOR_EXECUTOR_INTERVAL_TICKS.get() == 0) {
-            VillagerSkill handler = BehaviorExecutor.findHandler(agent, currentGoal,
-                    villager, (ServerWorld) villager.level);
-            if (handler != null) {
-                SkillResult r = handler.execute(agent, currentGoal, villager, (ServerWorld) villager.level);
-                if (r == SkillResult.SUCCESS || r == SkillResult.FAIL) currentGoal.setCompleted(true);
-                goals.removeIf(AgentGoal::isCompleted);
-                return;
+        // Legacy skills that set completed must obey the same terminal protocol.
+        if (result == SkillResult.RUNNING && current.isCompleted()) result = SkillResult.SUCCESS;
+        if (result == SkillResult.RUNNING) return;
+        BrainLog.diagnostic(agent, "skill-exit", "goal=" + current.getGoalType() + " result=" + result
+                + " handler=" + (handler == null ? "none" : handler.id())
+                + " failure=" + current.getLastFailure() + " action=" + agent.getCurrentAction()
+                + " position=" + villager.blockPosition());
+        if (result == SkillResult.FAIL && "find_job_site".equals(current.getGoalType())) {
+            VillagerAction failedMove = agent.getCurrentAction();
+            if (failedMove != null && failedMove.getTargetBlockPos() != null)
+                agent.brain().rejectedJobSites.put(failedMove.getTargetBlockPos().immutable(), now + 1200);
+        }
+        if (result == SkillResult.BLOCKED || result == SkillResult.FAIL) {
+            FailureRecoveryPlanner.handle(agent, current, villager, world);
+        }
+        ActionLifecycle.cancel(agent, villager, world);
+        agent.setRunningGoal(null);
+        BrainLog.goalState(agent, current, result.name(), "execution_result");
+        if (!GoalExitPolicy.retain(current, result, now)) {
+            goals.remove(current);
+            if (current.getLifecycle() == AgentGoal.Lifecycle.REPEATABLE && result != SkillResult.SUCCESS) {
+                agent.brain().retiredRoutines.put(current.getGoalType(), now + GoalExitPolicy.RETIRED_ROUTINE_DELAY);
             }
         }
-
-        // Hand movement control to the goal system so the daily-schedule activity system
-        // (explore / rest / craft via scheduledActivity) doesn't fight it. Farm goals are the
-        // exception: their routine is re-seeded by the farming-mode scan, so clearing the mode
-        // here would kill the tilling loop.
-        if (!"farm".equals(currentGoal.getGoalType())) {
-            agent.setScheduledActivity(null);
+        if (result == SkillResult.SUCCESS) {
+            agent.brain().lastFinishedType = current.getGoalType();
+            agent.brain().lastFinishedTick = now;
         }
+        resumeAllGoals(agent, goals);
+    }
 
-        switch (currentGoal.getGoalType()) {
-            case "gather":    executeGatherGoal(villager, agent, currentGoal);   break;
-            case "craft":     executeCraftGoal(villager, agent, currentGoal);    break;
-            case "trade":     executeTradeGoal(villager, agent, currentGoal);    break;
-            case "socialize": executeSocializeGoal(villager, agent, currentGoal); break;
-            case "converse":  executeConverseGoal(villager, agent, currentGoal); break;
-            case "move":      executeMoveGoal(villager, agent, currentGoal);     break;
-            case "goto":      executeGotoBuildingGoal(villager, agent, currentGoal); break;
-            default:
-                LOGGER.debug("No handler for goal type '{}' — leaving it for the skill system / next tick",
-                        currentGoal.getGoalType());
-                return;
+    /** Unsuspend every suspended goal, logging each transition. Called when a running goal finishes. */
+    private static void resumeAllGoals(VillagerAgentData agent, List<AgentGoal> goals) {
+        for (AgentGoal g : goals) {
+            if (g.isSuspended()) {
+                g.setSuspended(false);
+                BrainLog.goalState(agent, g, "resumed", "running_goal_finished");
+            }
         }
+    }
 
-        // Remove completed goals
-        goals.removeIf(AgentGoal::isCompleted);
+    /** Find a runnable rest/sleep goal, or null. Used to keep sleep in control through the night. */
+    private static AgentGoal findSleepGoal(List<AgentGoal> goals) {
+        for (AgentGoal g : goals) {
+            if (g.isCompleted() || g.isSuspended()) continue;
+            if (SleepSkill.isSleepGoal(g)) return g;
+        }
+        return null;
     }
 
     /**
@@ -1426,46 +1197,67 @@ public class VillagerAgentManager {
      * Clears any non-goal action, walks to {@code target}, and completes the goal on arrival
      * (or after a stuck timeout).
      */
-    private static void driveMoveGoal(VillagerEntity villager, VillagerAgentData agent,
+    public static SkillResult driveMoveGoal(VillagerEntity villager, VillagerAgentData agent,
                                      AgentGoal goal, BlockPos target, String arriveMemory) {
         if (target == null) {
             agent.addMemory(arriveMemory + " (no target)");
-            goal.setCompleted(true);
-            return;
+            goal.setLastFailure(FailureReason.UNREACHABLE.with((String) null));
+            return SkillResult.FAIL;
         }
 
         VillagerAction cur = agent.getCurrentAction();
         if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
 
         if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE && cur.isGoalDriven()) {
-            if (villager.blockPosition().distSqr(target) <= GOAL_ARRIVE_SQ) {
+            if (villager.blockPosition().distSqr(target) <= goal.getArrivalDistanceSq()) {
                 agent.addMemory(arriveMemory);
                 goal.setCompleted(true);
                 agent.setCurrentAction(null);
                 villager.getNavigation().stop();
-                return;
+                return SkillResult.SUCCESS;
             }
             cur.incrementStuckTicks();
             if (cur.getStuckTicks() > GOAL_STUCK_TIMEOUT) {
+                BrainLog.diagnostic(agent, "move-stuck", "goal=" + goal.getGoalType()
+                        + " from=" + villager.blockPosition() + " target=" + target
+                        + " navDone=" + villager.getNavigation().isDone());
                 agent.addMemory("Couldn't reach " + target.getX() + "," + target.getZ());
-                goal.setCompleted(true);
+                goal.setLastFailure(FailureReason.UNREACHABLE.with(target.toString()));
                 agent.setCurrentAction(null);
-                return;
+                villager.getNavigation().stop();
+                return SkillResult.FAIL;
             }
-            if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
+            if (villager.getNavigation().isDone() || cur.getStuckTicks() == 80) {
+                boolean started = villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
+                if (!started) {
+                    BrainLog.diagnostic(agent, "move-no-path", "goal=" + goal.getGoalType()
+                            + " from=" + villager.blockPosition() + " target=" + target);
+                    goal.setLastFailure(FailureReason.UNREACHABLE.with(target.toString()));
+                    agent.setCurrentAction(null);
+                    return SkillResult.FAIL;
+                }
             }
-            return;
+            return SkillResult.RUNNING;
         }
 
-        if (cur != null) return; // some unrelated action in progress
+        if (cur != null) return SkillResult.RUNNING; // some unrelated action in progress
 
-        VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, arriveMemory);
+        VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE,
+                "Walking for " + goal.getGoalType() + " toward " + target.getX() + "," + target.getZ());
         move.setTargetBlockPos(target);
         move.setPhase(VillagerAction.ActionPhase.WALKING);
         move.setGoalDriven(true);
+        move.setRestMove(goal.getArrivalDistanceSq() <= 4);
         agent.setCurrentAction(move);
-        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
+        boolean started = villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
+        BrainLog.diagnostic(agent, "move-start", "goal=" + goal.getGoalType() + " from="
+                + villager.blockPosition() + " target=" + target + " pathStarted=" + started);
+        if (!started) {
+            goal.setLastFailure(FailureReason.UNREACHABLE.with(target.toString()));
+            agent.setCurrentAction(null);
+            return SkillResult.FAIL;
+        }
+        return SkillResult.RUNNING;
     }
 
     /**
@@ -1475,9 +1267,18 @@ public class VillagerAgentManager {
     private static void pruneLowImportanceGoals(VillagerAgentData agent) {
         List<AgentGoal> goals = agent.getGoals();
         int before = goals.size();
-        goals.removeIf(g -> g.getImportance() <= LOW_IMPORTANCE_THRESHOLD
-                && RANDOM.nextDouble() < LOW_GOAL_DROP_CHANCE);
-        if (goals.size() != before) {
+        // REPEATABLE goals are the villager's job — never randomly pruned; the routine generator owns them.
+        List<AgentGoal> pruned = new ArrayList<>();
+        for (AgentGoal g : goals) {
+            if (g.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE
+                    && g.getImportance() <= LOW_IMPORTANCE_THRESHOLD
+                    && RANDOM.nextDouble() < LOW_GOAL_DROP_CHANCE) {
+                pruned.add(g);
+            }
+        }
+        goals.removeAll(pruned);
+        for (AgentGoal g : pruned) BrainLog.goalEnded(agent, g, "pruned(low_importance)");
+        if (!pruned.isEmpty()) {
             LOGGER.debug("{} pruned {} low-importance goals (kept {})",
                     agent.getName(), before - goals.size(), goals.size());
         }
@@ -1524,7 +1325,7 @@ public class VillagerAgentManager {
             }
             AgentGoal g = new AgentGoal(type, desc, 5);
             g.setImportance(importance);
-            if ((type.equals("gather") || type.equals("craft")) && parts.length >= 4) {
+            if (type.equals("craft") && parts.length >= 4) {
                 g.setTargetItem(parts[3].trim());
             } else if (type.equals("goto") && parts.length >= 4) {
                 g.setTargetBuildingType(parts[3].trim());
@@ -1545,135 +1346,8 @@ public class VillagerAgentManager {
         return sb.toString().trim();
     }
 
-    private static void executeGatherGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        BlockPos t = goal.getTargetLocation();
-        if (t == null) {
-            // No specific drop location — just note intent; ground-item pickup is handled
-            // by the ItemAttractionSystem when the villager walks near.
-            agent.addMemory("Gathering " + goal.getTargetItem());
-            goal.setCompleted(true);
-            return;
-        }
-        driveMoveGoal(villager, agent, goal, t, "Gathered items near " + t.getX() + "," + t.getZ());
-    }
-
-    /**
-     * Craft a catalog item at the villager's own workstation (JOB_SITE), "上班式" production.
-     * Validation, material lookup, and output all go through {@link ProfessionCraftCatalog} and
-     * {@link NativeRecipeResolver}; materials are only consumed at the moment of production, so a
-     * goal whose materials are lost beforehand fails honestly.
-     */
-    private static void executeCraftGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        String itemId = goal.getTargetItem();
-        if (itemId == null || itemId.isEmpty()) { goal.setCompleted(true); return; }
-
-        ServerWorld world = (ServerWorld) villager.level;
-        int level = villager.getVillagerData().getLevel();
-
-        // 1) Catalog + level gate (code-judged, never trust the LLM)
-        if (!ProfessionCraftCatalog.isCraftable(agent.getProfession(), level, itemId)) {
-            agent.addMemory("I don't know how to make " + itemId + " as a " + agent.getProfession());
-            goal.setCompleted(true);
-            return;
-        }
-        Item target = ForgeRegistries.ITEMS.getValue(new ResourceLocation(itemId));
-        if (target == null || target == Items.AIR) {
-            agent.addMemory("Unknown item: " + itemId);
-            goal.setCompleted(true);
-            return;
-        }
-        ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, target);
-        if (recipe == null) {
-            agent.addMemory("No known recipe for " + itemId);
-            goal.setCompleted(true);
-            return;
-        }
-
-        VillagerAction cur = agent.getCurrentAction();
-        if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
-
-        // Phase A: walking to the job site
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE && cur.isGoalDriven()) {
-            BlockPos t = cur.getTargetBlockPos();
-            if (t == null) { agent.setCurrentAction(null); return; }
-            if (villager.blockPosition().distSqr(t) <= GOAL_ARRIVE_SQ) {
-                VillagerAction work = new VillagerAction(VillagerAction.ActionType.CRAFT,
-                        "Working at " + agent.getProfession() + " station making " + itemId);
-                work.setTargetBlockPos(t);
-                work.setPhase(VillagerAction.ActionPhase.ACTING);
-                work.setGoalDriven(true);
-                work.setTargetItem(itemId);
-                agent.setCurrentAction(work);
-                villager.getNavigation().stop();
-                return;
-            }
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() > GOAL_STUCK_TIMEOUT) {
-                agent.addMemory("Couldn't reach my workstation to craft " + itemId);
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                return;
-            }
-            if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(t.getX() + 0.5, t.getY(), t.getZ() + 0.5, 0.4);
-            }
-            return;
-        }
-
-        // Phase B: working at the bench
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.CRAFT && cur.isGoalDriven()) {
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() >= CRAFT_WORK_TICKS) {
-                int qty = Math.max(1, goal.getTargetQuantity());
-                // Execute-time re-check: materials may have been lost since the goal was set.
-                boolean ok = recipe.consumeAndProduce(agent.getInventory(), qty);
-                if (ok && ProfessionCraftCatalog.canEnchant(agent.getProfession(), level, itemId)) {
-                    enchantFirstStack(agent, target, villager);
-                }
-                if (ok) {
-                    agent.addMemory("Crafted " + qty + "x " + itemId + " at my workstation");
-                    LOGGER.info("{} crafted '{}' x{}", agent.getName(), itemId, qty);
-                } else {
-                    agent.addMemory("Tried to craft " + itemId + " but ran out of materials");
-                }
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-            }
-            return;
-        }
-
-        // Phase C: start — navigate to the job site
-        if (cur != null) return;
-        Optional<GlobalPos> job = villager.getBrain().getMemory(MemoryModuleType.JOB_SITE);
-        if (!job.isPresent()) {
-            agent.addMemory("Wanted to craft but have no workstation");
-            goal.setCompleted(true);
-            return;
-        }
-        BlockPos jobPos = job.get().pos();
-        if (villager.blockPosition().distSqr(jobPos) <= GOAL_ARRIVE_SQ) {
-            VillagerAction work = new VillagerAction(VillagerAction.ActionType.CRAFT,
-                    "Working at " + agent.getProfession() + " station making " + itemId);
-            work.setTargetBlockPos(jobPos);
-            work.setPhase(VillagerAction.ActionPhase.ACTING);
-            work.setGoalDriven(true);
-            work.setTargetItem(itemId);
-            agent.setCurrentAction(work);
-            villager.getNavigation().stop();
-        } else {
-            VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE,
-                    "Walking to workstation to craft " + itemId);
-            move.setTargetBlockPos(jobPos);
-            move.setPhase(VillagerAction.ActionPhase.WALKING);
-            move.setGoalDriven(true);
-            move.setTargetItem(itemId);
-            agent.setCurrentAction(move);
-            villager.getNavigation().moveTo(jobPos.getX() + 0.5, jobPos.getY(), jobPos.getZ() + 0.5, 0.4);
-        }
-    }
-
     /** Apply a random enchantment to the first matching stack in the inventory (Master-level craft). */
-    private static void enchantFirstStack(VillagerAgentData agent, Item target, VillagerEntity villager) {
+    public static void enchantFirstStack(VillagerAgentData agent, Item target, VillagerEntity villager) {
         AgentInventory inv = agent.getInventory();
         for (int i = 0; i < inv.getItems().size(); i++) {
             ItemStack s = inv.getItems().get(i);
@@ -1687,65 +1361,8 @@ public class VillagerAgentManager {
         }
     }
 
-    private static void executeTradeGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        ServerWorld sw = (ServerWorld) villager.level;
-        VillagerAction cur = agent.getCurrentAction();
-        if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
-
-        // Walking toward the partner (target resolved once at start — don't re-resolve every tick).
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE && cur.isGoalDriven()) {
-            BlockPos target = cur.getTargetBlockPos();
-            if (target == null) { agent.setCurrentAction(null); return; }
-            if (villager.blockPosition().distSqr(target) <= GOAL_ARRIVE_SQ) {
-                VillagerAgentData partner = resolveVillagerPartner(sw, villager, agent, goal);
-                if (partner != null) {
-                    Entity e = sw.getEntity(partner.getVillagerId());
-                    if (e instanceof VillagerEntity) {
-                        VillagerTradeSystem.initiate(sw, villager, agent, (VillagerEntity) e, partner);
-                    }
-                } else {
-                    agent.addMemory("Wanted to trade but no other villager is around");
-                }
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                villager.getNavigation().stop();
-                return;
-            }
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() > GOAL_STUCK_TIMEOUT) {
-                agent.addMemory("Couldn't reach the villager to trade");
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                return;
-            }
-            if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
-            }
-            return;
-        }
-
-        if (cur != null) return;
-
-        VillagerAgentData partner = resolveVillagerPartner(sw, villager, agent, goal);
-        if (partner == null) {
-            agent.addMemory("Wanted to trade but couldn't find another villager");
-            goal.setCompleted(true);
-            return;
-        }
-        Entity e = sw.getEntity(partner.getVillagerId());
-        if (!(e instanceof VillagerEntity)) { goal.setCompleted(true); return; }
-        BlockPos target = ((VillagerEntity) e).blockPosition();
-        VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE,
-                "Walking to trade with " + partner.getName());
-        move.setTargetBlockPos(target);
-        move.setPhase(VillagerAction.ActionPhase.WALKING);
-        move.setGoalDriven(true);
-        agent.setCurrentAction(move);
-        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
-    }
-
     /** Pick the nearest idle villager to interact with (optionally filtered by profession/entityId). */
-    private static VillagerAgentData resolveVillagerPartner(ServerWorld sw, VillagerEntity villager,
+    public static VillagerAgentData resolveVillagerPartner(ServerWorld sw, VillagerEntity villager,
                                                          VillagerAgentData agent, AgentGoal goal) {
         UUID entityId = goal.getTargetEntityId();
         if (entityId != null) {
@@ -1770,70 +1387,7 @@ public class VillagerAgentManager {
         return best;
     }
 
-    private static void executeSocializeGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        ServerWorld sw = (ServerWorld) villager.level;
-        VillagerAgentData partner = resolveVillagerPartner(sw, villager, agent, goal);
-        if (partner == null) {
-            agent.addMemory("Wanted to socialize but no other villager is around");
-            goal.setCompleted(true);
-            return;
-        }
-        Entity e = sw.getEntity(partner.getVillagerId());
-        if (!(e instanceof VillagerEntity)) { goal.setCompleted(true); return; }
-        // Walk over; VillagerSocialSystem.tickSocial pairs nearby idle villagers for the actual chat.
-        driveMoveGoal(villager, agent, goal, ((VillagerEntity) e).blockPosition(),
-                "Socialized with " + partner.getName());
-    }
-
-    /**
-     * Converse goal: walk to a specific player/villager (or the nearest one matching a
-     * profession) and "talk". On arrival we also reconcile any debt the target player owes us —
-     * bumping the collection attempt count and lowering reputation if they keep dodging.
-     */
-    private static void executeConverseGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        ServerWorld sw = (ServerWorld) villager.level;
-        BlockPos target = resolveConverseTarget(sw, villager, agent, goal);
-        if (target == null) {
-            agent.addMemory("Wanted to talk to someone but couldn't find them");
-            goal.setCompleted(true);
-            return;
-        }
-
-        VillagerAction cur = agent.getCurrentAction();
-        if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
-
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE && cur.isGoalDriven()) {
-            if (villager.blockPosition().distSqr(target) <= GOAL_ARRIVE_SQ) {
-                onConverseArrive(villager, agent, goal);
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                villager.getNavigation().stop();
-                return;
-            }
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() > GOAL_STUCK_TIMEOUT) {
-                agent.addMemory("Couldn't reach the person I wanted to talk to");
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                return;
-            }
-            if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
-            }
-            return;
-        }
-
-        if (cur != null) return;
-
-        VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to talk to someone");
-        move.setTargetBlockPos(target);
-        move.setPhase(VillagerAction.ActionPhase.WALKING);
-        move.setGoalDriven(true);
-        agent.setCurrentAction(move);
-        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
-    }
-
-    private static BlockPos resolveConverseTarget(ServerWorld sw, VillagerEntity villager,
+    public static BlockPos resolveConverseTarget(ServerWorld sw, VillagerEntity villager,
                                                   VillagerAgentData agent, AgentGoal goal) {
         String kind = goal.getTargetKind();
         UUID entityId = goal.getTargetEntityId();
@@ -1874,7 +1428,7 @@ public class VillagerAgentManager {
         return null;
     }
 
-    private static void onConverseArrive(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
+    public static void onConverseArrive(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
         ServerWorld sw = (ServerWorld) villager.level;
         if ("player".equals(goal.getTargetKind())) {
             UUID playerId = goal.getTargetEntityId();
@@ -1913,109 +1467,16 @@ public class VillagerAgentManager {
         }
     }
 
-    private static void executeMoveGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        BlockPos t = goal.getTargetLocation();
-        driveMoveGoal(villager, agent, goal, t,
-                "Arrived at " + (t != null ? t.getX() + "," + t.getZ() : "destination"));
-    }
-
-    /**
-     * Navigate to the nearest building matching the goal's type filter. The LLM only says "go to
-     * a house / cave_house / any building"; we resolve it to a concrete position by querying the
-     * shared {@link WorldStructureIndex} (no world scan) and walking to its seed bed. This closes
-     * the gap where queryNear/getAt existed but no goal type consumed them into a move action.
-     */
-    private static void executeGotoBuildingGoal(VillagerEntity villager, VillagerAgentData agent, AgentGoal goal) {
-        ServerWorld sw = (ServerWorld) villager.level;
-        String want = goal.getTargetBuildingType();
-        BlockPos here = villager.blockPosition();
-
-        BuildingRecord best = null;
-        double bestDist = Double.MAX_VALUE;
-        // 8-chunk radius is generous but cheap: byChunk lookup only touches the covered chunks.
-        for (BuildingRecord r : WorldStructureIndex.instance(sw).queryNear(here, 8)) {
-            if (!matchesBuildingType(r.coarseType, want)) continue;
-            double d = here.distSqr(r.seedBed);
-            if (d < bestDist) { bestDist = d; best = r; }
-        }
-
-        if (best == null) {
-            agent.addMemory("Wanted to go to " + (want == null ? "a building" : "a " + want)
-                    + " but couldn't find one nearby");
-            goal.setCompleted(true);
-            return;
-        }
-
-        driveMoveGoal(villager, agent, goal, best.seedBed,
-                "Arrived at the " + best.coarseType + " building near "
-                        + best.seedBed.getX() + "," + best.seedBed.getZ());
-    }
-
     /**
      * True if a building of type {@code actual} satisfies the requested type {@code want}.
      * "any"/"building"/null match everything; "home" is treated as "house".
      */
-    private static boolean matchesBuildingType(String actual, String want) {
+    public static boolean matchesBuildingType(String actual, String want) {
         if (want == null || want.isEmpty()) return true;
         String w = want.toLowerCase();
         if (w.equals("any") || w.equals("building")) return true;
         if (w.equals("home")) w = "house";
         return w.equals(actual == null ? "" : actual.toLowerCase());
-    }
-
-    /**
-     * Fallback goal generator — used only when thought bubbles are disabled (so the AI
-     * can't generate goals itself). Picks a random goal with a random importance.
-     * Primary goal generation now happens during villager thinking (see {@link #tickThoughts}).
-     */
-    private static void generateNewGoals(VillagerEntity villager, VillagerAgentData agent) {
-        // For now, generate simple random goals
-        // Later this will use LLM to generate contextual, personality-driven goals
-
-        Random random = new Random();
-        String[] goalTypes = {"gather", "craft", "trade", "socialize"};
-        String[] gatherItems = {"wheat", "carrots", "potatoes", "wood", "stone"};
-        String[] craftItems = {"bread", "tools", "armor"};
-
-        String goalType = goalTypes[random.nextInt(goalTypes.length)];
-        AgentGoal newGoal;
-
-        switch (goalType) {
-            case "gather":
-                String item = gatherItems[random.nextInt(gatherItems.length)];
-                newGoal = new AgentGoal("gather", "Gather " + item, random.nextInt(5) + 3);
-                newGoal.setTargetItem(item);
-                newGoal.setTargetQuantity(random.nextInt(10) + 5);
-                break;
-            case "craft":
-                String craftItem;
-                List<String> craftable = ProfessionCraftCatalog.getCraftableIds(
-                        agent.getProfession(), villager.getVillagerData().getLevel());
-                if (!craftable.isEmpty()) {
-                    craftItem = craftable.get(random.nextInt(craftable.size()));
-                } else {
-                    craftItem = craftItems[random.nextInt(craftItems.length)];
-                }
-                newGoal = new AgentGoal("craft", "Craft " + craftItem, random.nextInt(5) + 3);
-                newGoal.setTargetItem(craftItem);
-                break;
-            case "trade":
-                newGoal = new AgentGoal("trade", "Look for trading opportunities", random.nextInt(5) + 3);
-                break;
-            case "socialize":
-                newGoal = new AgentGoal("socialize", "Talk with other villagers", random.nextInt(3) + 1);
-                break;
-            default:
-                return;
-        }
-
-        // Random importance (3-7) so the daily prune has something to differentiate.
-        newGoal.setImportance(random.nextInt(5) + 3);
-        if (agent.getGoals().size() < MAX_GOALS) {
-            agent.getGoals().add(newGoal);
-            agent.addMemory("New goal: " + newGoal.getDescription());
-            LOGGER.debug("Generated new goal for " + agent.getName() + ": " + newGoal.getDescription());
-        }
     }
 
     /**

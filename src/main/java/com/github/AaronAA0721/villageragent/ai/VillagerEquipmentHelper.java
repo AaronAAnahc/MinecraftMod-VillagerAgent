@@ -157,17 +157,18 @@ public class VillagerEquipmentHelper {
         for (int i = 0; i < inv.getItems().size(); i++) {
             ItemStack stack = inv.getStackInSlot(i);
             if (stack.isEmpty()) continue;
-            float speed = stack.getItem().getDestroySpeed(stack, state);
+            if (state.requiresCorrectToolForDrops() && !stack.isCorrectToolForDrops(state)) continue;
+            float speed = stack.getDestroySpeed(state);
             if (speed > bestSpeed) {
                 bestSpeed = speed;
                 best = stack;
             }
         }
 
-        if (!best.isEmpty() && villager != null) {
+        if (villager != null) {
             villager.setItemSlot(EquipmentSlotType.MAINHAND, best.copy());
         }
-        return best.copy();
+        return best; // inventory-owned stack; durability must affect the real tool
     }
 
     /**

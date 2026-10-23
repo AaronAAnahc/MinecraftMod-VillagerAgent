@@ -29,7 +29,7 @@ public class BlockInteractionAction {
     private static final Logger LOGGER = LogManager.getLogger();
 
     /** Walk/act speed for world interaction (same ballpark as farming). */
-    private static final double WALK_SPEED = 0.6;
+    private static final double WALK_SPEED = VillagerNavigationSupport.WALK_SPEED;
 
     public enum StepResult {
         /** Block was placed/broken (or found already done) — advance to the next step. */
@@ -59,7 +59,7 @@ public class BlockInteractionAction {
         BlockPos floor = a.below();
         BlockState floorState = world.getBlockState(floor);
         if (world.isEmptyBlock(floor)) return false;         // need a floor
-        if (floorState.getMaterial().isLiquid()) return false;
+        if (floorState.getMaterial().isLiquid() || !floorState.getMaterial().isSolid()) return false;
         // The cell itself (and the head cell) must be dry
         if (world.getFluidState(a).is(FluidTags.WATER)) return false;
         if (world.getFluidState(a).is(FluidTags.LAVA)) return false;
@@ -146,8 +146,27 @@ public class BlockInteractionAction {
             return StepResult.ABANDONED;
         }
 
-        world.setBlock(target, block.defaultBlockState(), 3);
-        agent.getInventory().removeItem(need, 1);
+        ItemStack material = ItemStack.EMPTY;
+        for (ItemStack stack : agent.getInventory().getItems()) {
+            if (!stack.isEmpty() && stack.getItem() == need.getItem()) { material = stack; break; }
+        }
+        if (material.isEmpty()) return StepResult.ABANDONED;
+        net.minecraftforge.common.util.FakePlayer actor = net.minecraftforge.common.util.FakePlayerFactory.get(
+                world, new com.mojang.authlib.GameProfile(villager.getUUID(), "[VillagerAgent]"));
+        actor.absMoveTo(villager.getX(), villager.getY(), villager.getZ(), villager.yRot, villager.xRot);
+        actor.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, material);
+        net.minecraft.util.Direction face = net.minecraft.util.Direction.UP;
+        BlockPos support = target.below();
+        for (net.minecraft.util.Direction direction : net.minecraft.util.Direction.values()) {
+            BlockPos adjacent = target.relative(direction);
+            if (!world.isEmptyBlock(adjacent)) { support = adjacent; face = direction.getOpposite(); break; }
+        }
+        net.minecraft.util.math.BlockRayTraceResult hit = new net.minecraft.util.math.BlockRayTraceResult(
+                net.minecraft.util.math.vector.Vector3d.atCenterOf(support), face, support, false);
+        net.minecraft.util.ActionResultType result = net.minecraftforge.common.ForgeHooks.onPlaceItemIntoWorld(
+                new net.minecraft.item.ItemUseContext(actor, net.minecraft.util.Hand.MAIN_HAND, hit));
+        if (!result.consumesAction() || world.getBlockState(target).getBlock() != block) return StepResult.ABANDONED;
+        villager.swing(net.minecraft.util.Hand.MAIN_HAND);
         agent.addMemory("Placed " + block.getRegistryName() + " at " + target);
         WorldStructureIndex.instance(world).onBlockChanged(target);
         LOGGER.debug(agent.getName() + " placed " + block.getRegistryName() + " at " + target);
@@ -190,6 +209,12 @@ public class BlockInteractionAction {
             }
         }
 
+        if (!withinReach(villager.blockPosition(), target)) {
+            world.destroyBlockProgress(villager.getId(), target, -1);
+            action.setBreakTargetTicks(0);
+            action.setPhase(VillagerAction.ActionPhase.WALKING);
+            return StepResult.IN_PROGRESS;
+        }
         // ── ACTING: break the block (tool-aware, player-accurate) ──
         BlockState state = world.getBlockState(target);
         if (world.isEmptyBlock(target)) return StepResult.DONE; // already gone
@@ -199,9 +224,16 @@ public class BlockInteractionAction {
             return StepResult.ABANDONED;
         }
 
+        if (action.getBreakingState() != null && !state.equals(action.getBreakingState())) {
+            world.destroyBlockProgress(villager.getId(), target, -1);
+            action.setBreakTargetTicks(0);
+        }
         // Initialise break timing on first ACTING tick
         if (action.getBreakTargetTicks() <= 0) {
             ItemStack tool = VillagerEquipmentHelper.equipBestToolForBlock(villager, agent, state);
+            if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return StepResult.ABANDONED;
+            action.setBreakingState(state);
+            action.setBreakTool(tool);
             int ticks = VillagerEquipmentHelper.computeBreakTicks(world, target, state, tool);
             if (ticks == Integer.MAX_VALUE) return StepResult.ABANDONED;
             action.setBreakTargetTicks(ticks);
@@ -210,11 +242,30 @@ public class BlockInteractionAction {
                     + " at " + target + " in ~" + ticks + " ticks");
         }
 
+        ItemStack tool = action.getBreakTool();
+        if (!tool.isEmpty() && !agent.getInventory().getItems().contains(tool)) return StepResult.ABANDONED;
+        if (state.requiresCorrectToolForDrops() && (tool.isEmpty() || !tool.isCorrectToolForDrops(state))) return StepResult.ABANDONED;
         action.incrementBreakProgress();
+        if (action.getBreakProgress() % 5 == 0) villager.swing(net.minecraft.util.Hand.MAIN_HAND);
+        int stage = Math.min(9, action.getBreakProgress() * 10 / Math.max(1, action.getBreakTargetTicks()));
+        world.destroyBlockProgress(villager.getId(), target, stage);
         villager.getLookControl().setLookAt(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
         if (action.getBreakProgress() >= action.getBreakTargetTicks()) {
-            world.destroyBlock(target, true); // drop items for ItemAttractionSystem to collect
+            net.minecraftforge.common.util.FakePlayer actor = net.minecraftforge.common.util.FakePlayerFactory.get(
+                    world, new com.mojang.authlib.GameProfile(villager.getUUID(), "[VillagerAgent]"));
+            actor.setPos(villager.getX(), villager.getY(), villager.getZ());
+            actor.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, tool);
+            int xp = net.minecraftforge.common.ForgeHooks.onBlockBreakEvent(world, net.minecraft.world.GameType.SURVIVAL, actor, target);
+            world.destroyBlockProgress(villager.getId(), target, -1);
+            if (xp < 0) return StepResult.ABANDONED;
+            java.util.List<ItemStack> drops = Block.getDrops(state, world, target, world.getBlockEntity(target), actor, tool);
+            if (!world.destroyBlock(target, false)) return StepResult.ABANDONED;
+            for (ItemStack drop : drops) Block.popResource(world, target, drop);
+            tool.mineBlock(world, state, target, actor);
+            villager.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, tool.copy());
+            if (xp > 0) world.addFreshEntity(new net.minecraft.entity.item.ExperienceOrbEntity(world,
+                    target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, xp));
             agent.addMemory("Broke " + state.getBlock().getRegistryName() + " at " + target);
             WorldStructureIndex.instance(world).onBlockChanged(target);
             LOGGER.debug(agent.getName() + " broke " + state.getBlock().getRegistryName() + " at " + target);

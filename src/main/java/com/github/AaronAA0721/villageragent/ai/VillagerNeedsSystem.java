@@ -24,8 +24,8 @@ import java.util.Map;
  *
  * <h3>Fatigue (0–100, starts at 0)</h3>
  * <ul>
- *   <li>Increases during nighttime (dayTime 13000–23000) at {@link #FATIGUE_GAIN_RATE}.</li>
- *   <li>Resets to 0 at dawn (dayTime 0–500).</li>
+ *   <li>Accumulates while awake: 4.5 points/1200 ticks at leisure, 6 while working.</li>
+ *   <li>Sleep restores fatigue; dawn does not reset it.</li>
  * </ul>
  *
  * <p>Both values are persisted via {@link VillagerAgentData}'s NBT methods.
@@ -46,13 +46,6 @@ public class VillagerNeedsSystem {
     /** Hunger gained per food nutrition point (vanilla nutrition * this factor). */
     private static final float NUTRITION_FACTOR = 8.0f;
 
-    /** Fatigue points gained per decay step during nighttime. */
-    private static final float FATIGUE_GAIN_RATE = 4.0f;
-
-    private static final long DAY_LENGTH = 24_000L;
-    private static final long NIGHT_START = 13_000L;
-    private static final long DAWN_END    =    500L;
-
     // ── Public entry point ────────────────────────────────────────────────────
 
     /**
@@ -61,27 +54,33 @@ public class VillagerNeedsSystem {
      */
     public static void tick(ServerWorld world, VillagerAgentData agent) {
         long gameTime  = world.getGameTime();
-        long dayTime   = world.getDayTime() % DAY_LENGTH;
+        long previous = agent.brain().lastFatigueTick;
+        agent.brain().lastFatigueTick = gameTime;
+        net.minecraft.entity.Entity self = world.getEntity(agent.getVillagerId());
+        boolean sleeping = self instanceof net.minecraft.entity.LivingEntity && ((net.minecraft.entity.LivingEntity) self).isSleeping();
+        if (previous >= 0 && !sleeping) {
+            AgentGoal goal = agent.getRunningGoal();
+            String type = goal == null ? "" : goal.getGoalType();
+            boolean working = goal != null && !"wander".equals(type) && !"socialize".equals(type)
+                    && !"converse".equals(type) && !"rest".equals(type) && !"sleep".equals(type);
+            // Integrate each needs sample, including pauses between work actions. Do not charge unloaded time.
+            float elapsedFatigue = Math.max(0, Math.min(Math.max(200, com.github.AaronAA0721.villageragent.config.ModConfig.AGENT_THINK_INTERVAL.get()), gameTime - previous));
+            agent.setFatigue(agent.getFatigue() + (working ? 6f : 4.5f) * elapsedFatigue / 1200f);
+        }
 
-        if (gameTime % DECAY_INTERVAL != 0) return;
+        if (agent.brain().lastNeedsTick < 0) { agent.brain().lastNeedsTick = gameTime; return; }
+        long elapsed = gameTime - agent.brain().lastNeedsTick;
+        if (elapsed < DECAY_INTERVAL) return;
+        agent.brain().lastNeedsTick = gameTime;
+        float scale = Math.min(4, elapsed / (float) DECAY_INTERVAL);
 
         // ── Hunger ──
         float hunger = agent.getHunger();
-        hunger = Math.max(0f, hunger - HUNGER_DECAY_RATE);
+        hunger = Math.max(0f, hunger - HUNGER_DECAY_RATE * scale);
         agent.setHunger(hunger);
 
         if (hunger < EAT_THRESHOLD) {
             tryEat(agent, gameTime);
-        }
-
-        // ── Fatigue ──
-        if (dayTime >= NIGHT_START || dayTime < DAWN_END) {
-            float fatigue = Math.min(100f, agent.getFatigue() + FATIGUE_GAIN_RATE);
-            agent.setFatigue(fatigue);
-        } else if (dayTime >= DAWN_END && dayTime < NIGHT_START) {
-            // Gradually recover during the day
-            float fatigue = Math.max(0f, agent.getFatigue() - FATIGUE_GAIN_RATE * 0.5f);
-            agent.setFatigue(fatigue);
         }
 
         // ── Mood (re-derived every needs tick) ──

@@ -1,0 +1,152 @@
+[
+  {
+    "source": "docs/bed_room_search_implementation.md",
+    "archive": "docs/archive/2026-10-23/bed_room_search_implementation.md",
+    "sha256": "e6cbc301862b8bcc8d3a69665a9dd8e92cc1c71e3556e000b9eb0ca813baf683"
+  },
+  {
+    "source": "docs/building_detection_implementation.md",
+    "archive": "docs/archive/2026-10-23/building_detection_implementation.md",
+    "sha256": "af26fda98d24cca503a005ef5cb840244b70e014bce77fb4b929b639d7cbaf35"
+  },
+  {
+    "source": "docs/building_perception_design.md",
+    "archive": "docs/archive/2026-10-23/building_perception_design.md",
+    "sha256": "6c6ca5feedaf8c33e40f00b481bd4220c1499159cd3e67ed0353461229f6ab0f"
+  },
+  {
+    "source": "docs/capability_pool_plan.md",
+    "archive": "docs/archive/2026-10-23/capability_pool_plan.md",
+    "sha256": "2ecec493fa4c90aa28dc1e1cc548838d8efcfa8c215f751e928c9ea8e0ce2174"
+  },
+  {
+    "source": "docs/CODE_INDEX.md",
+    "archive": "docs/archive/2026-10-23/CODE_INDEX.md",
+    "sha256": "05b7a773427521b5bbe75e54c8d79a498c1b343d2f392e081dd8431c0f8c237d"
+  },
+  {
+    "source": "docs/DEBUG_VERIFICATION.md",
+    "archive": "docs/archive/2026-10-23/DEBUG_VERIFICATION.md",
+    "sha256": "c69f51ecfde7ed6b794406b486e0eea5cfd8446770a459156491810c5724b0f1"
+  },
+  {
+    "source": "docs/goal_lifecycle_audit.md",
+    "archive": "docs/archive/2026-10-23/goal_lifecycle_audit.md",
+    "sha256": "82e27407a939b73a56a29db0df14de4a661f49f47467bf1f887990640f085d58"
+  },
+  {
+    "source": "docs/LLM Harness与Villager Agent架构.md",
+    "archive": "docs/archive/2026-10-23/LLM Harness与Villager Agent架构.md",
+    "sha256": "91523e25cde94c3f27ac880351ad497259746385dd2bc9bd895ec8bd53b647bb"
+  },
+  {
+    "source": "docs/minecraft_vanilla_mob_ai.md",
+    "archive": "docs/archive/2026-10-23/minecraft_vanilla_mob_ai.md",
+    "sha256": "527a345a8985bef5649e763f2342858e93aa0522d74a35fd31b5fb5d0c448051"
+  },
+  {
+    "source": "docs/profession_crafting_design.md",
+    "archive": "docs/archive/2026-10-23/profession_crafting_design.md",
+    "sha256": "36a112d712dcc3c1e095c316de98ec2489ae45fb638c569dcf69469c7e120745"
+  },
+  {
+    "source": "docs/retrieval_memory_design.md",
+    "archive": "docs/archive/2026-10-23/retrieval_memory_design.md",
+    "sha256": "18cb690d2ff9a1b499152a7a38b58a20cd77ce26c79ac2dc289b0f66569012ee"
+  },
+  {
+    "source": "docs/settlements_mod_villager_intelligence.md",
+    "archive": "docs/archive/2026-10-23/settlements_mod_villager_intelligence.md",
+    "sha256": "7624cdf1a78effe2148485995756e84c178ce3254847b6f1adfe26390605e099"
+  },
+  {
+    "source": "docs/villager_agent_intelligence_pipeline.md",
+    "archive": "docs/archive/2026-10-23/villager_agent_intelligence_pipeline.md",
+    "sha256": "6c370b245e26db12dc6538eb7b7e0484b07f8c8e75dfd395c75fe0598d385577"
+  },
+  {
+    "source": "docs/village_orchestration_design.md",
+    "archive": "docs/archive/2026-10-23/village_orchestration_design.md",
+    "sha256": "11fb7d8b8fb9d6d874a83bd70760677ab2f5b0aad84f8c0fe31c12b956a96aba"
+  },
+  {
+    "source": "docs/vision_module_design.md",
+    "archive": "docs/archive/2026-10-23/vision_module_design.md",
+    "sha256": "27a904c8caa2bb9f148726b7fcb4877a53871a6277e2087a511e24817baee69d"
+  },
+  {
+    "source": "docs/vision_module_implementation.md",
+    "archive": "docs/archive/2026-10-23/vision_module_implementation.md",
+    "sha256": "7cde052e0e6a5dc997566e45e7684bb3978fbe4d70024ea2671f75ba56fdd434"
+  },
+  {
+    "source": "docs/weighted_profession_behavior_pool.md",
+    "archive": "docs/archive/2026-10-23/weighted_profession_behavior_pool.md",
+    "sha256": "f12f12d268c301603ca376dd990f8f50807c5d011331f4468508d74ce1b7762b"
+  },
+  {
+    "source": "docs/world_event_bus_gossip_design.md",
+    "archive": "docs/archive/2026-10-23/world_event_bus_gossip_design.md",
+    "sha256": "5e4ad9ed1c6709d69a06c9ab015c4a31f4428b1310796f3ecd4e545a19059fa3"
+  },
+  {
+    "source": "docs/world_interaction_design.md",
+    "archive": "docs/archive/2026-10-23/world_interaction_design.md",
+    "sha256": "b3b3d3f7eae2783691fde696e36dd04d34e13b4ad0b6b0f79a75a5d0f1cec94c"
+  },
+  {
+    "source": "docs/事件驱动大脑与资源订单.md",
+    "archive": "docs/archive/2026-10-23/事件驱动大脑与资源订单.md",
+    "sha256": "41ed4c2be123b8763f01f7ebcf648b2f85431f35140917965a0b5d7f6b7b73f9"
+  },
+  {
+    "source": "docs/决策执行层架构审查.md",
+    "archive": "docs/archive/2026-10-23/决策执行层架构审查.md",
+    "sha256": "09ccf5a7fdad8c84291455d35bf94128cd65a7255f7745732aeb4afe7cf322fc"
+  },
+  {
+    "source": "docs/失败驱动重规划.md",
+    "archive": "docs/archive/2026-10-23/失败驱动重规划.md",
+    "sha256": "54c994ed4beca9708a60e1e9b2b3460d423a28af02fd52ab8eb791aa5dd3f02f"
+  },
+  {
+    "source": "docs/村民Agent系统面试讲述.md",
+    "archive": "docs/archive/2026-10-23/村民Agent系统面试讲述.md",
+    "sha256": "9b839921c9de439287a14f164e6bc03e17298299e6214a25faca4f7b9cfcf166"
+  },
+  {
+    "source": "docs/村民Idle排查.md",
+    "archive": "docs/archive/2026-10-23/村民Idle排查.md",
+    "sha256": "69e22fcd6ee936ed0760c9d2a4a778e0b994662f445f3796a8a896f73ae3d56f"
+  },
+  {
+    "source": "docs/村民大脑工作原理.md",
+    "archive": "docs/archive/2026-10-23/村民大脑工作原理.md",
+    "sha256": "b624b9236e79cbae2001d7af37a67cd4d4eb327f0d2e49f8b60eb46fac2f4363"
+  },
+  {
+    "source": "docs/架构反思与精简方案.md",
+    "archive": "docs/archive/2026-10-23/架构反思与精简方案.md",
+    "sha256": "e19c818c84002978dbc21c70cfb76c13f079897f5985173c1cb61a8761c2ca90"
+  },
+  {
+    "source": "docs/行为生成器统一重构方案.md",
+    "archive": "docs/archive/2026-10-23/行为生成器统一重构方案.md",
+    "sha256": "536f4fccc9ef484fce1cb23827e4813b93cda44269368c49aafb11bb6f769730"
+  },
+  {
+    "source": "docs/项目现状与待办清单.md",
+    "archive": "docs/archive/2026-10-23/项目现状与待办清单.md",
+    "sha256": "f715602d81b13b52889b2688a0183737e2c2a7703b60e22457021fc624c52320"
+  },
+  {
+    "source": "README.md",
+    "archive": "docs/archive/2026-10-23/root-README.md",
+    "sha256": "7ff25e23c045ebdd52b5b949e476f63618a515b06f0afcfc6942ecd3252e94db"
+  },
+  {
+    "source": "AI_AGENT_GUIDE.md",
+    "archive": "docs/archive/2026-10-23/root-AI_AGENT_GUIDE.md",
+    "sha256": "85c3273ff8ab7ba055881d0e1d2e2bb8f7477dfa87b76d4dc1c0120831bb4dfb"
+  }
+]

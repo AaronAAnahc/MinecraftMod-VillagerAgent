@@ -9,8 +9,18 @@ public enum SkillResult {
     SUCCESS,
     /** Skill is mid-progress (e.g. walking to a target) — call again next tick. */
     RUNNING,
+    /** Waiting for external state; release movement and retry after a cooldown. */
+    WAITING,
     /** Skill cannot proceed right now (e.g. no bed in range) — keep the goal, retry later. */
     BLOCKED,
     /** Skill can never satisfy this goal — the executor marks it completed (drops it). */
-    FAIL
+    FAIL,
+    /**
+     * Skill decides the goal is impossible / invalid and should be removed entirely (e.g. a
+     * craft goal for an item that has no recipe, or a malformed goal with no target item). The
+     * executor deletes it from the active list immediately — no success marking, no
+     * failure-recovery injection. This is the "delete a todo" signal: returning DELETE makes the
+     * goal simply stop existing so it never competes for the running slot again.
+     */
+    DELETE
 }

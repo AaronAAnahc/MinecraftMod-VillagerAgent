@@ -1,6 +1,9 @@
 package com.github.AaronAA0721.villageragent.ai;
 
+import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.block.*;
+import net.minecraft.entity.item.ItemEntity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.inventory.EquipmentSlotType;
 import net.minecraft.item.HoeItem;
@@ -8,6 +11,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.state.IntegerProperty;
+import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.server.ServerWorld;
 import org.apache.logging.log4j.LogManager;
@@ -144,6 +148,27 @@ public class FarmingAction {
         return best;
     }
 
+    /**
+     * Find the nearest ground item (dropped loot) within {@code radius} of {@code center}.
+     * Used by the farming state machine to walk over and collect harvest drops.
+     * @return the block position of the closest item entity, or null if none
+     */
+    public static BlockPos findNearestGroundItem(ServerWorld world, BlockPos center, int radius) {
+        AxisAlignedBB box = new AxisAlignedBB(center).inflate(radius);
+        List<ItemEntity> items = world.getEntitiesOfClass(ItemEntity.class, box);
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (ItemEntity e : items) {
+            if (e == null || !e.isAlive()) continue;
+            double d = e.blockPosition().distSqr(center);
+            if (d < bestD) {
+                bestD = d;
+                best = e.blockPosition().immutable();
+            }
+        }
+        return best;
+    }
+
     // ---------------------------------------------------------------
     //  Full 360° scans (used when already in farming state)
     //  Returns candidates sorted by distance so the caller can
@@ -247,7 +272,8 @@ public class FarmingAction {
 
     /**
      * Harvest ONE mature crop at the given position.
-     * Breaks the block and drops items into the world for the item attraction system to collect.
+     * Breaks the block and drops items into the world; the farming state machine then sends the
+     * villager to walk over and collect them.
      * @return the crop Block that was harvested, or null if nothing was harvested
      */
     public static Block harvestBlockAt(VillagerEntity villager, ServerWorld world,
@@ -260,12 +286,14 @@ public class FarmingAction {
             return null;
         }
 
-        // Break the crop — drops items into the world.
-        // Items will be picked up by the general item attraction system.
-        world.destroyBlock(cropPos, true);
+        // Break the crop — drops items into the world. The farming state machine then sends the
+        // villager to walk over and collect the drops (harvest → pick-up → replant loop).
+        if (!world.destroyBlock(cropPos, true)) return null;
 
         agent.addMemory("Harvested " + block.getRegistryName() + " at " + cropPos);
         LOGGER.info(agent.getName() + " harvested " + block.getRegistryName() + " at " + cropPos);
+        agent.gainCapabilityXp(CapabilityId.FARMING, ModConfig.CAPABILITY_PRACTICE_XP.get(),
+                villager, world.getGameTime());
         return block;
     }
 
@@ -292,13 +320,15 @@ public class FarmingAction {
             if (count <= 0) continue;
 
             // Place the crop at age 0
-            world.setBlock(plantPos, cropBlock.defaultBlockState(), 3);
+            if (!world.setBlock(plantPos, cropBlock.defaultBlockState(), 3)) return false;
 
             // Remove one seed from inventory
             agent.getInventory().removeItem(seedStack, 1);
 
             agent.addMemory("Planted " + seedItem.getRegistryName() + " at " + plantPos);
             LOGGER.info(agent.getName() + " planted " + seedItem.getRegistryName() + " at " + plantPos);
+            agent.gainCapabilityXp(CapabilityId.FARMING, ModConfig.CAPABILITY_PRACTICE_XP.get(),
+                    villager, world.getGameTime());
             return true;
         }
 
@@ -308,7 +338,7 @@ public class FarmingAction {
 
     /**
      * Plant a specific crop type on the farmland block at the given position.
-     * Falls back to any available seed if the villager doesn't have the requested one.
+     * Returns false when the requested seed is unavailable; callers choose a fallback.
      * @param cropBlock the desired crop block to plant (e.g. Blocks.WHEAT), or null for any
      * @return true if a seed was planted
      */
@@ -327,7 +357,7 @@ public class FarmingAction {
             if (seedItem != null) {
                 ItemStack seedStack = new ItemStack(seedItem);
                 if (agent.getInventory().countItem(seedStack) > 0) {
-                    world.setBlock(plantPos, cropBlock.defaultBlockState(), 3);
+                    if (!world.setBlock(plantPos, cropBlock.defaultBlockState(), 3)) return false;
                     agent.getInventory().removeItem(seedStack, 1);
                     agent.addMemory("Planted " + seedItem.getRegistryName() + " at " + plantPos);
                     LOGGER.info(agent.getName() + " planted " + seedItem.getRegistryName() + " at " + plantPos);
@@ -488,10 +518,16 @@ public class FarmingAction {
 
     /** Nearest cultivatable dirt (already near water by definition) — a good starting block. */
     public static BlockPos findNearestCultivatableDirt(ServerWorld world, BlockPos center) {
+        return findNearestCultivatableDirt(world, center, SCAN_RADIUS);
+    }
+
+    /** Nearest cultivatable dirt within {@code radius} — used by the reclaim planner to look
+     *  further than the normal harvest/plant scan radius. */
+    public static BlockPos findNearestCultivatableDirt(ServerWorld world, BlockPos center, int radius) {
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
-        for (int x = -SCAN_RADIUS; x <= SCAN_RADIUS; x++) {
-            for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
+        for (int x = -radius; x <= radius; x++) {
+            for (int z = -radius; z <= radius; z++) {
                 BlockPos p = center.offset(x, 0, z);
                 if (isCultivatableDirt(world, p)) {
                     double d = p.distSqr(center);
@@ -529,6 +565,8 @@ public class FarmingAction {
         }
         agent.addMemory("Tilled " + dirtPos + " into farmland");
         LOGGER.info(agent.getName() + " tilled " + dirtPos);
+        agent.gainCapabilityXp(CapabilityId.FARMING, ModConfig.CAPABILITY_PRACTICE_XP.get(),
+                villager, world.getGameTime());
         return true;
     }
 
@@ -542,33 +580,53 @@ public class FarmingAction {
         VillagerAction cur = agent.getCurrentAction();
         if (cur != null && cur.isFarmMove()) {
             BlockPos t = cur.getTargetBlockPos();
-            if (t == null) { agent.setCurrentAction(null); return 2; }
+            if (t == null) {
+                LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " farmMove target null -> abort (unreachable)");
+                agent.setCurrentAction(null); return 2;
+            }
             if (villager.blockPosition().distSqr(t) <= arriveSq) {
+                LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " arrived at farm target " + t + " ('" + desc + "')");
                 agent.setCurrentAction(null);
                 villager.getNavigation().stop();
                 return 1;
             }
             cur.incrementStuckTicks();
             if (cur.getStuckTicks() > stuckTimeout) {
+                LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " farmMove STUCK " + cur.getStuckTicks()
+                        + " ticks at " + t + " -> unreachable (drop)");
                 agent.setCurrentAction(null);
                 villager.getNavigation().stop();
                 return 2;
             }
             if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(t.getX() + 0.5, t.getY(), t.getZ() + 0.5, 0.35);
+                LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " walking to " + t + " ('" + desc
+                        + "') stuck=" + cur.getStuckTicks());
+                if (!villager.getNavigation().moveTo(t.getX() + 0.5, t.getY(), t.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED)) return 2;
             }
             return 0;
         }
-        if (cur != null) return 0; // unrelated action owns the villager
-        if (target == null) return 2;
-        if (villager.blockPosition().distSqr(target) <= arriveSq) return 1;
+        if (cur != null) {
+            // unrelated action owns the villager — this is the sleep-vs-farm contention signal.
+            LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " BLOCKED by unrelated action " + cur
+                    + " (wanted '" + desc + "' goalDriven=" + goalDriven + ")");
+            return 0;
+        }
+        if (target == null) {
+            LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " target null for '" + desc + "' -> unreachable");
+            return 2;
+        }
+        if (villager.blockPosition().distSqr(target) <= arriveSq) {
+            LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " already at target " + target + " ('" + desc + "')");
+            return 1;
+        }
         VillagerAction mv = new VillagerAction(VillagerAction.ActionType.MOVE, desc);
         mv.setTargetBlockPos(target);
         mv.setPhase(VillagerAction.ActionPhase.WALKING);
         mv.setFarmMove(true);
         mv.setGoalDriven(goalDriven);
         agent.setCurrentAction(mv);
-        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.35);
+        if (!villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED)) return 2;
+        LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " new farmMove -> " + target + " ('" + desc + "')");
         return 0;
     }
 

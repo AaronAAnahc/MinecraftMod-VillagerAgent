@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Parses structured TODO directives out of an LLM reply so that a villager can turn
+ * Parses structured {@code TODO:} directives out of an LLM reply so that a villager can turn
  * conversation into executable goals. The same parser is used for both player-driven chat
  * and the villager's own autonomous thinking.
  *
@@ -22,9 +22,9 @@ import java.util.UUID;
  * </pre>
  * These lines are stripped from the player-visible reply (see {@link #stripTodoLines}).
  */
-public final class TodoParser {
+public final class GoalParser {
 
-    private TodoParser() {}
+    private GoalParser() {}
 
     public static List<AgentGoal> parse(String text, VillagerAgentData agent) {
         List<AgentGoal> out = new ArrayList<>();
@@ -39,8 +39,9 @@ public final class TodoParser {
             String type = tok[0].toLowerCase();
 
             switch (type) {
-                case "craft":
-                case "gather": {
+                case "drop_item":
+                case "pickup_item":
+                case "craft": {
                     if (tok.length < 2) break;
                     String item = tok[1];
                     int qty = 1;
@@ -50,17 +51,33 @@ public final class TodoParser {
                     AgentGoal g = new AgentGoal(type, "TODO: " + type + " " + item, 5);
                     g.setTargetItem(item);
                     g.setTargetQuantity(qty);
+                    if (!"craft".equals(type)) {
+                        if (tok.length >= 3) {
+                            if (!tok[2].startsWith("x")) break;
+                            try { Integer.parseInt(tok[2].substring(1)); }
+                            catch (NumberFormatException invalid) { break; }
+                        }
+                        if (qty <= 0) break;
+                        if ("pickup_item".equals(type) && tok.length >= 4) {
+                            try { g.setTargetEntityId(UUID.fromString(tok[3])); }
+                            catch (IllegalArgumentException invalid) { break; }
+                        }
+                    }
                     g.setImportance(6);
                     out.add(g);
                     break;
                 }
+                case "harvest":
+                case "plant":
+                case "till":
+                case "collect_crops":
                 case "move": {
                     if (tok.length < 4) break;
                     try {
                         int x = Integer.parseInt(tok[1]);
                         int y = Integer.parseInt(tok[2]);
                         int z = Integer.parseInt(tok[3]);
-                        AgentGoal g = new AgentGoal("move", "TODO: move to " + x + "," + y + "," + z, 5);
+                        AgentGoal g = new AgentGoal(type, "TODO: " + type + " at " + x + "," + y + "," + z, 5);
                         g.setTargetLocation(new BlockPos(x, y, z));
                         g.setImportance(6);
                         out.add(g);
@@ -119,6 +136,7 @@ public final class TodoParser {
                     break; // unknown directive type — ignore
             }
         }
+        for (AgentGoal goal : out) goal.setSource(AgentGoal.Source.LLM);
         return out;
     }
 

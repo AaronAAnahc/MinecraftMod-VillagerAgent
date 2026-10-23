@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.item.crafting.IRecipe;
 import net.minecraft.item.crafting.Ingredient;
 import net.minecraft.util.ResourceLocation;
@@ -122,5 +123,43 @@ public final class NativeRecipeResolver {
             out.add(options[0].getItem().getRegistryName().toString());
         }
         return out;
+    }
+
+    /**
+     * List the recipe's ingredient item ids (registry names) that the inventory does <em>not</em>
+     * have enough of for the requested {@code qty}. Shared by {@link FailureRecoveryPlanner} (to
+     * recurse the recovery chain on missing materials) and {@code CraftSkill} (to report which
+     * material caused a craft to fail). Empty list = everything in stock.
+     */
+    public static List<String> missingMaterials(AgentInventory inv, ResolvedRecipe recipe, int qty) {
+        return new ArrayList<>(missingMaterialQuantities(inv, recipe, qty).keySet());
+    }
+
+    /** Concrete deficits for the same recipe choices used during consumption. */
+    public static Map<String, Integer> missingMaterialQuantities(AgentInventory inv, ResolvedRecipe recipe, int qty) {
+        Map<Item, Integer> required = new java.util.LinkedHashMap<>();
+        Map<String, Integer> missing = new java.util.LinkedHashMap<>();
+        if (recipe == null) return missing;
+        qty = Math.max(1, qty);
+        if (recipe.kind == ResolvedRecipe.Kind.VANILLA) {
+            for (Ingredient ingredient : recipe.vanilla.getIngredients()) {
+                if (ingredient == null || ingredient == Ingredient.EMPTY) continue;
+                ItemStack[] options = ingredient.getItems();
+                if (options.length == 0) continue;
+                Item pick = options[0].getItem();
+                for (ItemStack option : options) if (inv.countItem(option) > 0) { pick = option.getItem(); break; }
+                required.merge(pick, qty, Integer::sum);
+            }
+        } else {
+            for (CustomRecipe.IngredientStack ingredient : recipe.custom.inputs) {
+                Item item = ForgeRegistries.ITEMS.getValue(ingredient.item);
+                if (item != null && item != Items.AIR) required.merge(item, ingredient.count * qty, Integer::sum);
+            }
+        }
+        for (Map.Entry<Item, Integer> entry : required.entrySet()) {
+            int shortage = entry.getValue() - inv.countItem(new ItemStack(entry.getKey()));
+            if (shortage > 0) missing.put(entry.getKey().getRegistryName().toString(), shortage);
+        }
+        return missing;
     }
 }

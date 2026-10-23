@@ -1,6 +1,7 @@
 package com.github.AaronAA0721.villageragent.ai.harness;
 
 import com.github.AaronAA0721.villageragent.ai.AgentGoal;
+import com.github.AaronAA0721.villageragent.ai.BrainLog;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
@@ -73,9 +74,9 @@ public final class HarnessDecisionPlanner {
         String goalType;
         switch (act) {
             case CRAFT:    goalType = "craft"; break;
-            case GATHER:
             case HARVEST:
-            case GROW:     goalType = "gather"; break;
+            case GROW:     goalType = "farm"; break;
+            case GATHER:   return; // no completable gather skill — do not enqueue a dead goal
             case MOVE:     goalType = "move"; break;
             case SOCIALIZE: goalType = "socialize"; break;
             case TRADE:    goalType = "trade"; break;
@@ -88,6 +89,8 @@ public final class HarnessDecisionPlanner {
                 : (act + (schema.target != null && !schema.target.isEmpty() ? " " + schema.target : ""));
 
         AgentGoal goal = new AgentGoal(goalType, desc, 6);
+        goal.setSource(AgentGoal.Source.LLM);
+        if (act == DecisionSchema.DecisionAction.MOVE) goal.setTargetLocation(ActionValidator.parseCoords(schema.target));
         if (schema.target != null && !schema.target.isEmpty()
                 && (act == DecisionSchema.DecisionAction.CRAFT || act == DecisionSchema.DecisionAction.GATHER)) {
             goal.setTargetItem(schema.target);
@@ -96,6 +99,9 @@ public final class HarnessDecisionPlanner {
         if (agent.getGoals().size() < VillagerAgentManager.getMaxGoals()) {
             agent.getGoals().add(goal);
             agent.addMemory("Harness goal: " + goal.getDescription());
+            BrainLog.goalAdded(agent, goal, "harness_daily");
+        } else {
+            BrainLog.goalSkipped(agent, goal, "harness_daily");
         }
     }
 }

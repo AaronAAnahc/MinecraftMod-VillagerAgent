@@ -1,93 +1,75 @@
-# VillagerAgent 可视化调试与功能自检手册
+# 调试与验证
 
-> 配合 `debugoverlay` 叠加层使用。开启方式见 §1，各系统怎么判断"活着"见 §3，日志关键词见 §4。
+核对日期：2026-10-23。本文说明可执行检查和观察方法，不宣称本次整理运行过 Minecraft 验收。
 
-## 1. 开启叠加层（二选一）
+## 自动检查
 
-最稳的方式是在游戏内敲命令（自动持久化到 `config/villageragent-common.toml`）：
+在项目根目录运行：
 
+```powershell
+.\gradlew.bat compileJava --console=plain
+.\gradlew.bat workOrderChecks --console=plain
+.\gradlew.bat goalExitChecks --console=plain
+.\gradlew.bat check --console=plain
 ```
-/villageragent set debugoverlay true
-/villageragent list                          # 确认 Debug Overlay: ENABLED
-```
 
-细粒度开关（改 config 文件里的 `enable_debug_overlay` / `debug_show_hud` / `debug_show_buildings` / `debug_show_frustum`）：
+`WorkOrderBookChecks` 验证请求合并、承接排他性、续租/过期、库存满足、部分交付等纯 Java 订单规则；`GoalExitPolicyChecks` 验证目标保留、失败退出和冷却。`GoalSchedulerChecks` 验证 wander 兜底、抢占、加权选择及农田锚点 NBT 往返；`check` 依赖这三项。编译检查接口和映射，规则检查覆盖指定逻辑，游戏内动作、寻路、实体加载与表现需另行验收。
 
-| 配置项 | 默认 | 作用 |
-|---|---|---|
-| `enable_debug_overlay` | false | 总开关（服务端是否下发调试快照） |
-| `debug_render_range` | 64 | 玩家周围绘制建筑盒/视锥的半径（8–256） |
-| `debug_show_hud` | true | 左上 HUD 面板 |
-| `debug_show_buildings` | true | 世界线框建筑盒 |
-| `debug_show_frustum` | true | 村民视锥锥体 |
+## 日志与 idle 排查
 
-> ⚠️ 叠加层只在**服务端确实在下发数据**时才显示——你得先有村民被注册成 agent（自然刷出的村民，或召唤命令）。
+开启 `brain_log_enabled`，在实际运行实例的 `logs/latest.log` 按村民 UUID 筛选 `VillagerBrain`；同名村民需要分别追踪。先看 `SNAPSHOT` 的 activity、running、action、位置、路径、疲劳、农业机会与候选分数，再按下表展开。
 
-## 2. 叠加层三大信息源（看什么 = 正常）
-
-| 信息源 | 正常表现 | 说明 |
-|---|---|---|
-| **左上 HUD 面板** | 顶行 `agents=N  buildings(near)=M`；准星对准村民后只显示**身份标签**（名字/职业）+ **空间感知**（frustum 扫描 blocks/entities、env 摘要）。**不显示**村民的心理活动（心情/目标/记忆/计划/动作/需求） | 对准谁显示谁；空白说明没注册成 agent 或没对准 |
-| **建筑线框盒** | 房屋周围出现线框盒（house=绿 / cave_house=蓝 / barn=橙 / 其它=黄） | 出现 = `WorldStructureIndex` + `BuildingLocator` 工作正常 |
-| **青色视锥锥体** | 每个附近村民头顶沿朝向射出一段锥体 | 出现 = `FrustumCuller`/感知正常 |
-
-**快速判健**：开 overlay → 走到村庄 → 看到房屋**世界线框盒**（会随相机正确贴在建筑上，而不是飘在屏幕固定位置）+ 村民青色视锥锥体 + 准星对准村民后 HUD 显示其身份与感知，就说明**感知系统正常**。村民的心理活动（心情/目标/记忆）不在 HUD 显示，属正常设计。
-
-## 3. 各系统自检清单
-
-| 系统 | 怎么验证 |
+| 标签 | 检查内容 |
 |---|---|
-| **视觉 / 建筑检测** | 世界线框盒正确贴在房屋上（绿=house / 蓝=cave_house / 橙=barn / 黄=其它）；盒子位置应随相机移动而正确跟随建筑 |
-| **分块记忆** | 服务端行为，日志/命令验证；叠加层不再以 HUD 形式展示 chunk 标签（建筑盒本身即检测证据） |
-| **目标 / 记忆 / 心情** | 属村民内部状态，**HUD 不再显示**（设计如此）。需排查时看服务端日志或对应系统日志 |
-| **LLM 集成** | 村民名字/性格由 LLM 生成、聊天有回复；日志见 `LLMService` 的 `=== OpenAI API Request/Response ===`（需 DEBUG 级日志） |
-| **交易 / 种田 / 战斗 / 社交 / 日程** | 日志关键词见 §4（HUD 已不再显示 `action=`，以日志为准） |
-| **物品吸引 / 装备** | 村民自动捡起/装备地面物品（日志 `ItemAttractionSystem` DEBUG） |
+| `no-candidate` | 目标总数、handler 资格、正分但不可执行的原因 |
+| `SWITCH`、`skill-exit` | 目标切换、结果和失败原因 |
+| `order-offer-empty` | 资格、订单所有权、距离、需求方加载状态 |
+| `order-claim/wait/blocked` | 租约、库存、资源与工具缺口 |
+| `resource-scan` | 匹配、自然树、暴露、站位与路径各阶段候选 |
+| `order-source/break/collected/delivery` | 采集、掉落拾取和实际交付 |
+| `move-start/no-path/stuck` | 导航请求与实际位移 |
+| `social-empty/no-path/chat` | 邻居机会、寻路和实际对话 |
+| `job-site-empty/approach/select/reject` | POI 候选、路径完整性、暂时排除位置与工作站接近 |
+| `wander-fallback` | 每个目标的分数、冷却、handler 状态，农田锚点、普通/资源职业 |
+| `farm-session-start/end`、`farm-step/done`、`farm-skip` | 连续作业会话、子动作与跳过的位置（完成标签为 `farm-step-done`） |
+| `farm-memory-add/defer/forget`、`farm-travel/arrive` | 农田记录、暂缓、失效、远程前往与现场检查 |
 
-## 4. 关键日志行（控制台 / `logs/latest.log`）
+表中斜杠缩写分别对应带同一前缀的完整标签，例如 `order-wait`、`move-stuck`。`SNAPSHOT` 每村民至多约 200 ticks 一条，排查需覆盖数次慢更新。运行目标存在时，显示活动本身不能作为停工结论；到达、采集、交付要结合实际坐标、方块、双方背包和订单状态。
 
-```
-# 行动执行（INFO，最直观）
-Villager <名> is crafting: <配方>
-<名> harvested <方块> at <坐标>
-<名> planted <种子> at <坐标>
-<名> is moving to: <描述>   /   is gathering: <物品>   /   is idle for N ticks
+漫游使用已加载且可达地点，原版 `GroundPathNavigator` 推进移动，`VillagerNavigationSupport` 处理导航辅助及失败判断。遇到卡住时检查目标高度、区块加载、门、站位和实际位移。
 
-# 战斗 / 合成 / 种田异常（WARN）
-Recipe not found / Cannot craft ... - missing ingredients
-<名> cannot harvest: no world access   /   <名> cannot plant: no world access
+## 可视化
 
-# LLM（DEBUG，需开 debug 日志）
-=== OpenAI API Request ===   /   === OpenAI API Response ===
-Response Code: 200 ...        # 非 200 = API key / 网络问题
-Unknown LLM API type: <x>     # 配置里 apiType 写错
-```
+用 `/va config set debugoverlay true` 开启，以 `/va config list` 核对。`DebugSync` 向客户端发送快照，`DebugOverlay` 绘制 HUD、建筑、种子和距离场；具体显示受 `debug_show_*` 控制。HUD 是感知观察入口，行为链以服务端日志为准。
 
-## 5. 常见故障排查
+无图形时检查开关、附近受管村民、快照下发和客户端渲染；无建筑盒时检查床的加载/放置播种、pending 队列、周边区块加载、屋顶和几何预算。建筑发现来源包含区块加载床事件。
 
-- **HUD 完全不显示** → 检查 `enable_debug_overlay=true` 且 `debug_show_hud=true`；确认有村民被注册成 agent（无 agent 则 snapshot 全空）。
-- **建筑盒不出现** → 村民还没走过/睡眠过那片区域（`WorldStructureIndex` 靠"床事件"播种，需要村民交互过）。多待一会儿或让村民睡觉。
-- **视锥锥体不出现** → 附近没有"agent 村民"（普通村民不会画锥体，只看被注册成 agent 的）。
-- **LLM 没反应** → 看 `LLMService` 日志：API key 是否为空、Response Code 是否 200、`apiType` 是否拼写正确（openai/anthropic/ollama/gemini）。
-- **编译报错** → Forge 1.16.5（official 映射）下 `Tessellator`/`BufferBuilder`/`DefaultVertexFormats` 在 `net.minecraft.client.renderer*` 包，不是 `com.mojang.blaze3d.vertex`；`Tessellator` 必须用全限定名 `net.minecraft.client.renderer.Tessellator.getInstance()`。
+## 游戏内验收场景
 
-## 6. 编译运行
+1. 无 LLM，两个成年村民、天然树及可达露天矿：请求物资，观察接单、采集、拾取、交付及库存守恒。
+2. 两个工人竞争一单，中断/卸载承接者：核对唯一租约及释放后的重新承接。
+3. 缺工具、目标方块消失、路径阻断、满背包、部分供货：检查 WAITING/BLOCKED/FAIL、冷却和真实剩余缺口。
+4. 保存重进：核对职业和需求保留，执行租约重新领取；建造任务另测 BuildJob 与世界核对。
+5. 农民观察农田后移到 40–80 格外，确认 `farm-travel → farm-arrive → 农活`；存档重进、拆除锚点、阻断路径、未成熟农田也分别检查。农耕、白天疲劳睡眠、邻居社交：核对机会/需求、技能结果与真实动作。
+6. 床几何：按 [建筑算法](bed_room_search_implementation.md) 的边界场景检查索引与线框。
+7. LLM 启用/失效：分别检查对话、回退、线程回写与请求日志；记录实际服务、配置与响应结果。
 
-```bash
-# 出 jar（放进 .minecraft/mods/）
-./gradlew.bat build -x test
-# 或 直接起客户端跑（首次会下载依赖，较慢）
-./gradlew.bat runClient
-```
+验证报告应记录 jar/源码版本、测试世界条件、命令、日志位置和观察到的结果。当前文档没有规模/TPS、行为分布或 LLM 时延的实测结论。
 
-jar 在 `E:\project\VillagerAgent\build\libs\`。进去后 `/villageragent set debugoverlay true` 即可看叠加层。
+### 主动丢出与拾取验收
 
-## 附：调试子系统文件清单
+通过 TODO 指令创建 `drop_item` / `pickup_item`（格式见执行链专题），观察 `pickup-target` 与 `pickup-collected` 日志：
 
-- `network/DebugDataPacket.java` —— 服务器→客户端调试快照（含 encode/decode/handle）
-- `debug/DebugSync.java` —— 服务端每 10 tick 为每个玩家打包并下发
-- `client/DebugOverlay.java` —— 客户端 HUD 面板 + 世界线框
-- `ModConfig.java` —— 5 个开关
-- `ModNetworking.java` —— 注册 `DebugDataPacket`
-- `VillagerEventHandler.java` —— 世界 tick 调 `DebugSync.tick`
-- `VillagerAgentCommand.java` —— 加 `debugoverlay` 选项
+- 在 8–12 格外放目标物品，关闭 `autopickup`，确认村民主动走近并取得指定数量；走到地点但未入包不得成功。
+- 让物品随水流移动、合并或被另一玩家抢走；按种类目标可重查，指定 UUID 消失应报告失败。
+- 背包已满或仅剩部分空间，核对物品 NBT、地面余量与目标剩余量，不能复制或吞物。
+- 丢出多个不同 NBT 的同种堆叠，核对各堆叠保留 NBT；生成实体被事件取消不得扣除对应库存。
+- 阻断路径、卸载实体、抢占任务后恢复，确认能退出或重新寻路。恢复被动拾取后可能继续吸取余物，这是独立机制。
+
+`goalSchedulerChecks` 还覆盖物品 TODO 的数量、UUID 及非法参数解析；实体、寻路与库存转移需以上游戏内场景验证。
+
+农耕连续性验收：在同一 25×25 作业区设置超过 12 株成熟作物、空农田和靠水可翻土，关闭被动拾取；应看到同一 farm 会话中反复 HARVEST→COLLECT→PLANT/TILL，直至无可执行内容才出现 farm-session-end。另测缺种子、缺锄头、满背包、不可达目标、紧急抢占和两名农民同时作业。自动调度测试覆盖农耕子动作间不让位及紧急抢占，尚未替代游戏内方块/掉落验证。
+
+### 嵌套任务回归
+
+`gradlew taskExecutionChecks`（同时纳入 `check`）验证执行树、三级嵌套、子结果隔离、取消后局部状态重建、规则与 LLM/玩家来源限制、任意复合技能的执行权和紧急抢占条件。`task-child-start` / `task-child-exit` 提供完整任务路径。游戏内应确认 farm 根任务连续收割/捡拾/播种/翻地、不可达目标跳过、紧急抢占后重新检查现场。自动检查不覆盖真实世界寻路。

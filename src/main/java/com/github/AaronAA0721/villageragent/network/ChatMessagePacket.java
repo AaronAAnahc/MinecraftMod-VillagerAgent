@@ -2,13 +2,17 @@ package com.github.AaronAA0721.villageragent.network;
 
 import com.github.AaronAA0721.villageragent.ai.AgendaParser;
 import com.github.AaronAA0721.villageragent.ai.AgentGoal;
+import com.github.AaronAA0721.villageragent.ai.BrainLog;
 import com.github.AaronAA0721.villageragent.ai.LLMService;
+import com.github.AaronAA0721.villageragent.ai.LLMSetupReminder;
 import com.github.AaronAA0721.villageragent.ai.LongTermAgenda;
-import com.github.AaronAA0721.villageragent.ai.TodoParser;
+import com.github.AaronAA0721.villageragent.ai.GoalParser;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.ai.VillagerVisionSystem;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.Util;
+import net.minecraft.util.text.ITextComponent;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.network.PacketBuffer;
@@ -55,7 +59,21 @@ public class ChatMessagePacket {
                 LOGGER.warn("No agent found for villager: " + packet.villagerId);
                 return;
             }
-            
+
+            // P1 fix: if the LLM is not configured, don't call it (it would just fail and
+            // leave the villager "lost in thought"). Send the setup hint to the player's
+            // chat bar instead, and a short pointer into the dialog so it isn't stuck on "...".
+            if (!LLMSetupReminder.isConfigured()) {
+                for (ITextComponent line : LLMSetupReminder.buildReminder()) {
+                    player.sendMessage(line, Util.NIL_UUID);
+                }
+                ModNetworking.CHANNEL.send(
+                        PacketDistributor.PLAYER.with(() -> player),
+                        new VillagerResponsePacket(packet.villagerId, agent.getName(),
+                                agent.getName() + "：LLM 还没配置好，设置方法已经发到聊天栏了。"));
+                return;
+            }
+
             String playerName = player.getName().getString();
             LOGGER.info("Chat from " + playerName + " to " + agent.getName() + ": " + packet.message);
 
@@ -92,13 +110,16 @@ public class ChatMessagePacket {
 
                 // Parse any hidden TODO: directives the LLM embedded into executable goals.
                 // Capped to MAX_GOALS so a chatty villager can't grow the agenda without bound.
-                List<AgentGoal> parsed = TodoParser.parse(response, agent);
+                List<AgentGoal> parsed = GoalParser.parse(response, agent);
                 if (!parsed.isEmpty()) {
                     for (AgentGoal g : parsed) {
                         if (agent.getGoals().size() < VillagerAgentManager.getMaxGoals()) {
                             agent.getGoals().add(g);
                             agent.addMemory("New goal from chat: " + g.getDescription()
                                     + " (importance " + g.getImportance() + ")");
+                            BrainLog.goalAdded(agent, g, "chat_todo");
+                        } else {
+                            BrainLog.goalSkipped(agent, g, "chat_todo");
                         }
                     }
                     LOGGER.info("{} parsed {} TODO directive(s) from chat into goals",
@@ -118,7 +139,7 @@ public class ChatMessagePacket {
                 }
 
                 // The player only sees the spoken reply — TODO / REMEMBER lines stay hidden.
-                String visible = TodoParser.stripTodoLines(response);
+                String visible = GoalParser.stripTodoLines(response);
                 visible = AgendaParser.stripRememberLines(visible);
                 VillagerResponsePacket responsePacket = new VillagerResponsePacket(
                         packet.villagerId,

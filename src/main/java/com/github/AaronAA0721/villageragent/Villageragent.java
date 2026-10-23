@@ -62,6 +62,14 @@ public class Villageragent {
         LOGGER.info("===========================================");
         LOGGER.info("Initializing AI agent system...");
         LOGGER.info("LLM API Type: " + ModConfig.LLM_API_TYPE.get());
+        LOGGER.info("LLM API URL: " + ModConfig.LLM_API_URL.get());
+        LOGGER.info("LLM Model: " + ModConfig.LLM_MODEL.get());
+        boolean llmKeySet = ModConfig.LLM_API_KEY.get() != null && !ModConfig.LLM_API_KEY.get().trim().isEmpty();
+        LOGGER.info("LLM API Key: " + (llmKeySet ? "configured (brain online)" : "NOT SET (rule brain active)"));
+        if (!llmKeySet) {
+            LOGGER.warn("[VillagerAgent] LLM API key is EMPTY — rule-driven behaviour remains active; language enrichment is unavailable. "
+                    + "Fix: run /va llm apikey <key> in-game, or set llm_api_key in config/villageragent-common.toml.");
+        }
         LOGGER.info("AI Agents Enabled: " + ModConfig.ENABLE_AI_AGENTS.get());
         LOGGER.info("Villager Chat Enabled: " + ModConfig.ENABLE_VILLAGER_CHAT.get());
         LOGGER.info("World Interaction Enabled: " + ModConfig.ENABLE_WORLD_INTERACTION.get());
@@ -76,6 +84,8 @@ public class Villageragent {
         VillagerAgentConfigDir.ensureDir();
         VillagerAgentConfigDir.extractDefault("custom_recipes.json");
         VillagerAgentConfigDir.extractDefault("proficiency.json");
+        VillagerAgentConfigDir.extractDefault("craft_unlocks.json");
+        VillagerAgentConfigDir.extractDefault("default_chat_lines.json");
         LOGGER.info("VillagerAgent editable configs are in config/villageragent/");
 
         // Register network packets

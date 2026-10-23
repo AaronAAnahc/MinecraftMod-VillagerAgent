@@ -18,6 +18,7 @@ import net.minecraft.util.SoundCategory;
 import net.minecraft.util.SoundEvents;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.world.server.ServerWorld;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -214,8 +215,11 @@ public class CombatAction {
      *  player-centric stat, so we estimate a fixed interval rather than misreading it. */
     private static final double MOB_ATTACK_INTERVAL_TICKS = 20.0;
 
+    /** Per-level bonus added to a villager's combat power (§3b of the sleep/combat SPEC). */
+    public static final double LEVEL_POWER_BONUS = 0.3;
+
     /** Villager's damage per second (best weapon — or bare hands — × attacks/sec on
-     *  {@link #ATTACK_COOLDOWN_TICKS}). */
+     *  {@link #ATTACK_COOLDOWN_TICKS}). Retained for the solo time-to-kill comparison. */
     public static double villagerDps(VillagerAgentData agent) {
         float damagePerHit = findBestWeaponDamage(agent, null); // BASE_DAMAGE if unarmed
         double attacksPerSecond = 20.0 / ATTACK_COOLDOWN_TICKS;
@@ -232,17 +236,54 @@ public class CombatAction {
     }
 
     /**
-     * Time-to-kill comparison: fight only if the time to kill the threat is strictly less than
-     * the time for the threat to kill the villager.
+     * Whether the villager holds a real weapon — damage strictly above the bare-hand base.
+     * When {@code combat_require_weapon} is off, even fists count as "armed".
+     */
+    public static boolean isArmed(VillagerAgentData agent) {
+        return combatPower(agent, null) > 0.0;
+    }
+
+    /**
+     * Combat power of one villager (§3b): weapon damage + villager-level bonus.
+     * <ul>
+     *   <li>Bare hands contribute 0 when {@code combat_require_weapon} is on — so they
+     *       neither solo-fight nor count toward a group charge's total power.</li>
+     *   <li>With the flag off, a fist is worth {@link #BASE_DAMAGE} + level bonus (legacy behaviour).</li>
+     * </ul>
+     */
+    public static double combatPower(VillagerAgentData agent, VillagerEntity villager) {
+        boolean requireWeapon = ModConfig.COMBAT_REQUIRE_WEAPON.get();
+        float weaponDamage = findBestWeaponDamage(agent, null); // BASE_DAMAGE if unarmed
+        boolean hasRealWeapon = weaponDamage > BASE_DAMAGE + 1e-3;
+        if (requireWeapon && !hasRealWeapon) return 0.0;
+        int level = (villager != null) ? villager.getVillagerData().getLevel() : 0;
+        return weaponDamage + level * LEVEL_POWER_BONUS;
+    }
+
+    /**
+     * Whether this villager may actively attack (solo or as part of a group charge): it must be
+     * armed (per {@link #combatPower}) <em>and</em> healthy enough
+     * ({@code combat_charge_min_health}). Bare-handed or badly-wounded villagers only pin/distract.
+     */
+    public static boolean mayAttack(VillagerEntity villager, VillagerAgentData agent) {
+        return combatPower(agent, villager) > 0.0
+                && villager.getHealth() >= ModConfig.COMBAT_CHARGE_MIN_HEALTH.get();
+    }
+
+    /**
+     * Time-to-kill comparison: fight only if the time to kill the threat is at most
+     * {@code combat_solo_win_factor} × the time for the threat to kill the villager.
+     * A bare-handed villager (with {@code combat_require_weapon} on) never wins solo.
      */
     public static boolean wouldWinSolo(VillagerEntity villager, VillagerAgentData agent, LivingEntity threat) {
+        if (ModConfig.COMBAT_REQUIRE_WEAPON.get() && !isArmed(agent)) return false;
         double myDps = villagerDps(agent);
         double tDps = threatDps(threat);
         if (tDps <= 0.0) return true;  // threat can't hurt us → free win
         if (myDps <= 0.0) return false;
         double myTimeToKill = threat.getHealth() / myDps;
         double threatTimeToKill = villager.getHealth() / tDps;
-        return myTimeToKill < threatTimeToKill;
+        return myTimeToKill <= threatTimeToKill * ModConfig.COMBAT_SOLO_WIN_FACTOR.get();
     }
 
     /** Panic-flee: run directly away from the threat by {@link #FLEE_DISTANCE} blocks. */
