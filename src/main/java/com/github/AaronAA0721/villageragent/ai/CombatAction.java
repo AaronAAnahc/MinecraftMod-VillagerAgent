@@ -265,8 +265,16 @@ public class CombatAction {
      * armed (per {@link #combatPower}) <em>and</em> healthy enough
      * ({@code combat_charge_min_health}). Bare-handed or badly-wounded villagers only pin/distract.
      */
+    /** Reuse the sleep scheduler thresholds and the actual world clock, not cached night state. */
+    public static boolean maySupport(VillagerEntity villager, VillagerAgentData agent) {
+        float fatigue = agent.getFatigue();
+        return fatigue < GoalScheduler.REST_INTERRUPT_FATIGUE
+                && !(com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isNightTime(villager.level.getDayTime())
+                    && fatigue >= GoalScheduler.REST_MIN_FATIGUE);
+    }
+
     public static boolean mayAttack(VillagerEntity villager, VillagerAgentData agent) {
-        return combatPower(agent, villager) > 0.0
+        return maySupport(villager, agent) && combatPower(agent, villager) > 0.0
                 && villager.getHealth() >= ModConfig.COMBAT_CHARGE_MIN_HEALTH.get();
     }
 
@@ -286,15 +294,21 @@ public class CombatAction {
         return myTimeToKill <= threatTimeToKill * ModConfig.COMBAT_SOLO_WIN_FACTOR.get();
     }
 
-    /** Panic-flee: run directly away from the threat by {@link #FLEE_DISTANCE} blocks. */
+    /** Vanilla villager panic package uses normal speed 0.5 multiplied by 1.5. */
+    public static final double PANIC_SPEED = 0.75;
+
     public static void flee(VillagerEntity villager, LivingEntity threat) {
-        double dx = villager.getX() - threat.getX();
-        double dz = villager.getZ() - threat.getZ();
-        double len = Math.sqrt(dx * dx + dz * dz);
-        if (len < 1e-3) { dx = 1.0; dz = 0.0; len = 1.0; }
-        double nx = villager.getX() + (dx / len) * FLEE_DISTANCE;
-        double nz = villager.getZ() + (dz / len) * FLEE_DISTANCE;
-        villager.getNavigation().moveTo(nx, villager.getY(), nz, 0.5);
+        // Preserve a useful escape path instead of replacing it every scan.
+        net.minecraft.pathfinding.Path current = villager.getNavigation().getPath();
+        if (!villager.getNavigation().isDone() && current != null
+                && current.getTarget().distSqr(threat.blockPosition()) > villager.distanceToSqr(threat)) return;
+        for (int attempt = 0; attempt < 6; attempt++) {
+            net.minecraft.util.math.vector.Vector3d pos = net.minecraft.entity.ai.RandomPositionGenerator
+                    .getLandPosAvoid(villager, 16, 7, threat.position());
+            if (pos == null || pos.distanceToSqr(threat.position()) <= villager.distanceToSqr(threat)) continue;
+            net.minecraft.pathfinding.Path path = villager.getNavigation().createPath(pos.x, pos.y, pos.z, 0);
+            if (path != null && path.canReach() && villager.getNavigation().moveTo(path, PANIC_SPEED)) return;
+        }
     }
 
     /**

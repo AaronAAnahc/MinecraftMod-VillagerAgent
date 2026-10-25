@@ -16,7 +16,7 @@ import org.apache.logging.log4j.Logger;
  * villager who has personally seen e.g. iron ore in some chunk can, on a social encounter,
  * copy that single feature anchor into a neighbour's {@link ChunkMemory}.
  *
- * <p>Design rules (see {@code docs/world_event_bus_gossip_design.md} §四):
+ * <p>Design rules (see {@code docs/world_event_bus_gossip_design.md} section 4):
  * <ul>
  *   <li><b>One fact per encounter</b>, <b>unidirectional</b>, with probability
  *       {@link ModConfig#GOSSIP_CHANCE} — a symmetric exchange would diffuse too fast to debug.</li>

@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Resilience layer for every LLM call (plan: 技术力提升计划书 §1.3 — {@code LLMGuard}).
+ * Resilience layer for every LLM call (plan: Technical Capability Improvement Plan §1.3 — {@code LLMGuard}).
  *
  * <p>Wraps {@link LLMService#queryLLM(String, String)} so that a flaky / slow / down API
  * can never stall or crash the game thread, and an API outage cannot cascade into a

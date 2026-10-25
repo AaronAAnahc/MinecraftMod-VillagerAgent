@@ -20,7 +20,7 @@ import java.util.Random;
 
 /**
  * <b>Legacy</b> scheduled-activity translator. The daily-schedule planner that fed
- * {@code scheduledActivity} was removed (行为生成器统一重构方案): behaviour now flows through the
+ * {@code scheduledActivity} was removed (Unified Behavior Generator Refactoring Plan): behaviour now flows through the
  * goal funnel ({@code RoutineScheduler} → {@code GoalScheduler} → skills), so {@link #tick} is no
  * longer called and the explore/rest/craft branches here are dead.
  *
@@ -61,7 +61,8 @@ public class VillagerActivitySystem {
         // Never interrupt an in-progress build (single block or multi-block BuildJob)
         if (agent.getBuildJob() != null) return;
         VillagerAction cur = agent.getCurrentAction();
-        if (cur != null && (cur.getActionType() == VillagerAction.ActionType.ATTACK
+        if (cur != null && (cur.getActionType() == VillagerAction.ActionType.RALLY
+                || cur.getActionType() == VillagerAction.ActionType.ATTACK
                 || cur.getActionType() == VillagerAction.ActionType.HARVEST
                 || cur.getActionType() == VillagerAction.ActionType.GROW
                 || cur.getActionType() == VillagerAction.ActionType.GATHER

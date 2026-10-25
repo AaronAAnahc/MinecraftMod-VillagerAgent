@@ -37,7 +37,7 @@ public class ModConfig {
     /** Ambient inner-thought bubbles ('[Name thinks]') broadcast to nearby players. OFF by default. */
     public static final ForgeConfigSpec.BooleanValue ENABLE_VILLAGER_THOUGHTS;
 
-    // ── Decision Harness (plan: 技术力提升计划书 Module 1) ──
+    // ── Decision Harness (plan: Technical Capability Improvement Plan Module 1) ──
     /** Master switch for the whole harness (resilience + structured LLM decisions). */
     public static final ForgeConfigSpec.BooleanValue HARNESS_ENABLED;
     /** Per-LLM-call timeout in ms. On timeout the villager falls back to rule-based behaviour. */
@@ -79,6 +79,7 @@ public class ModConfig {
     public static final ForgeConfigSpec.DoubleValue COMBAT_CHARGE_TOTAL_POWER;
     /** Per-villager attack gate: must have at least this much health to swing. */
     public static final ForgeConfigSpec.DoubleValue COMBAT_CHARGE_MIN_HEALTH;
+    public static final ForgeConfigSpec.DoubleValue COMBAT_RALLY_RADIUS;
 
     // ── Economy (LLM-free village supply/demand) ──
     /** Master switch for the autonomous village economy (trade messages + item exchange). */
@@ -307,6 +308,12 @@ public class ModConfig {
 
         BUILDER.push("Combat");
 
+        COMBAT_RALLY_RADIUS = BUILDER
+                .comment("Alarm broadcast radius in blocks around the threat. Only loaded managed villagers "
+                        + "in the same dimension respond. This is a radius, not village membership; "
+                        + "responders must still arrive before contributing combat power.")
+                .defineInRange("combat_rally_radius", 64.0, 8.0, 512.0);
+
         COMBAT_REQUIRE_WEAPON = BUILDER
                 .comment("Require a villager to hold a real weapon (sword/axe/tool with damage above the "
                         + "bare-hand base) before it will attack on its own. Bare-handed villagers never "
@@ -323,14 +330,14 @@ public class ModConfig {
 
         COMBAT_CHARGE_TOTAL_POWER = BUILDER
                 .comment("Group-charge gate: villagers may charge a threat together only once the summed "
-                        + "combat power of all responders reaches this value (replaces the old head-count + "
-                        + "DPS check). Iron sword ≈6-7 can charge alone; stone ≈5 or wood ≈4 need 2 responders.")
+                        + "combat power of arrived, healthy responders reaches this value (replaces the old head-count + "
+                        + "DPS check). At least two arrived, eligible villagers are required regardless of weapon strength.")
                 .defineInRange("combat_charge_total_power", 5.0, 0.0, 1000.0);
 
         COMBAT_CHARGE_MIN_HEALTH = BUILDER
                 .comment("Per-villager attack gate: a villager only actively attacks (solo or in a group "
                         + "charge) when its current health is at least this value. Below it, even in a "
-                        + "charged group, it only runs to the rally point to pin/distract.")
+                        + "charged group, it stops attacking and retreats.")
                 .defineInRange("combat_charge_min_health", 10.0, 0.0, 20.0);
 
         BUILDER.pop();

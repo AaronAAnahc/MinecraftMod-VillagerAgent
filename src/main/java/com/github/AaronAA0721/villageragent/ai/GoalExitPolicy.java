@@ -25,6 +25,7 @@ public final class GoalExitPolicy {
                     && goal.getLastFailure().reason == com.github.AaronAA0721.villageragent.ai.behavior.FailureReason.UNREACHABLE
                     ? 200 : Math.max(200, goal.getCooldownTicks())));
         }
+        goal.setCooldownUntilTick(Math.max(goal.getCooldownUntilTick(), now + goal.getMinimumExitCooldownTicks()));
         goal.setCompleted(false);
         return true;
     }

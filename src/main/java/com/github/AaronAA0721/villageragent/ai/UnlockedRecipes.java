@@ -14,7 +14,7 @@ import java.util.Set;
  *
  * <p>Starts empty. On a capability level-up the set is refreshed — every recipe whose
  * {@code requiredCapability} is met at the new level is added; on a level drop (rust decay) recipes
- * whose {@code requiredLevel} now exceeds the current level are removed ("掉级即锁"). The set is
+ * whose {@code requiredLevel} now exceeds the current level are removed ("relock on level loss"). The set is
  * stored on {@code VillagerAgentData} (NBT) so it survives restarts.
  */
 public class UnlockedRecipes {

@@ -16,7 +16,7 @@ import java.util.Arrays;
  * Data-driven mapping from cumulative capability XP → capability level (0..maxLevel).
  *
  * <p>Capability levels are <em>finer</em> than the vanilla trade tiers: default is 11 levels
- * (0 = "完全不会" … 11 = Master), and every 2 capability levels map to one vanilla trade level
+ * (0 = "untrained" … 11 = Master), and every 2 capability levels map to one vanilla trade level
  * via {@code vanillaLevel = max(0, (capabilityLevel - 1) / 2)}. This is separate from
  * {@link ProficiencyLevelTable} (the 5-tier vanilla trade table that {@link VillagerProficiency}
  * mirrors onto the trading UI).
@@ -32,22 +32,22 @@ public final class CapabilityLevelTable {
 
     /**
      * Built-in cumulative XP required to BE at each level (index = level, 0..11).
-     * Level 0 = no capability (0 XP). Level 1 = "会一点" (10 XP), level 3 = "职业第一级"
+     * Level 0 = no capability (0 XP). Level 1 = "beginner" (10 XP), level 3 = "first profession tier"
      * (Novice, 50 XP), level 5 = Apprentice, 7 = Journeyman, 9 = Expert, 11 = Master.
      */
     private static final int[] DEFAULT_THRESHOLDS = {
-            0,    // 0 — 完全不会
-            10,   // 1 — 会一点
+            0,    // 0 — untrained
+            10,   // 1 — beginner
             25,   // 2
-            50,   // 3 — 职业第一级 (Novice)
+            50,   // 3 — first profession tier (Novice)
             90,   // 4
-            145,  // 5 — 第二级 (Apprentice)
+            145,  // 5 — second tier (Apprentice)
             215,  // 6
-            300,  // 7 — 第三级 (Journeyman)
+            300,  // 7 — third tier (Journeyman)
             400,  // 8
-            515,  // 9 — 第四级 (Expert)
+            515,  // 9 — fourth tier (Expert)
             645,  // 10
-            790   // 11 — 第五级 (Master)
+            790   // 11 — fifth tier (Master)
     };
 
     private static CapabilityLevelTable INSTANCE;
@@ -101,9 +101,9 @@ public final class CapabilityLevelTable {
         return cumulative[level];
     }
 
-    /** Derive the level (0..maxLevel) for a given cumulative XP. 0 = "完全不会". */
+    /** Derive the level (0..maxLevel) for a given cumulative XP. 0 = "untrained". */
     public int levelForXp(int xp) {
-        if (xp < cumulative[1]) return 0; // below "会一点" — no capability
+        if (xp < cumulative[1]) return 0; // below "beginner" — no capability
         int lvl = 1;
         for (int l = 2; l <= maxLevel; l++) {
             if (xp >= cumulative[l]) lvl = l;

@@ -31,11 +31,18 @@ public final class GoalScheduler {
                 || (isFallback(current) && !isFallback(candidate))
                 || (candidate.getPriority() >= 9 && candidate.getPriority() > current.getPriority()));
     }
+    public static final float REST_MIN_FATIGUE = 40;
+    public static final float REST_INTERRUPT_FATIGUE = 80;
+    public static boolean isNonUrgentRest(VillagerAgentData agent, AgentGoal goal) {
+        return com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isSleepGoal(goal)
+                && agent.getFatigue() < REST_INTERRUPT_FATIGUE;
+    }
     public static boolean shouldPreempt(VillagerAgentData agent, AgentGoal current, AgentGoal candidate) {
+        if (isNonUrgentRest(agent, candidate)) return false;
         return shouldPreempt(current, candidate) || (candidate != null && current != null
                 && current.getPriority() < 9 && !com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isSleepGoal(current)
                 && com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isSleepGoal(candidate)
-                && (agent.brain().nightRest || agent.getFatigue() >= 80));
+                && agent.getFatigue() >= REST_INTERRUPT_FATIGUE);
     }
     public static double utility(VillagerAgentData a, AgentGoal g, long now) {
         if (g.isCompleted() || g.isSuspended() || g.isExpired(now) || g.isOnCooldown(now)) return 0;
@@ -43,8 +50,8 @@ public final class GoalScheduler {
         switch (g.getGoalType()) {
             case "farm": u *= Math.min(4, (a.brain().farmOpportunities + (a.brain().rememberedFarm != null ? 3 : 0)) / 3.0); break;
             case "rest": case "sleep":
-                if (a.getFatigue() < 45) return 0;
-                if (a.brain().nightRest) u *= 4;
+                if (a.getFatigue() < REST_MIN_FATIGUE) return 0;
+                u *= a.brain().nightRest ? 4 : a.getFatigue() >= REST_INTERRUPT_FATIGUE ? 1 : 0.005;
                 u *= Math.max(1, Math.pow(a.getFatigue() / 35.0, 2)); break;
             case "socialize":
                 if (a.brain().socialPartner == null || now - a.getLastSocialTick() < 400 || a.isSocializing()) return 0;
@@ -78,7 +85,7 @@ public final class GoalScheduler {
     }
 
     public static AgentGoal pickNextGoal(VillagerAgentData a, List<AgentGoal> goals, long now) {
-        if (a.brain().nightRest || a.getFatigue() >= 80) {
+        if (a.getFatigue() >= REST_INTERRUPT_FATIGUE) {
             AgentGoal rest = null;
             boolean emergency = false;
             for (AgentGoal g : goals) {
@@ -88,12 +95,20 @@ public final class GoalScheduler {
             }
             if (rest != null && !emergency) return rest;
         }
-        return pickScored(goals, g -> utility(a, g, now), RANDOM.nextDouble());
+        boolean importantWork = !a.brain().nightRest && goals.stream().anyMatch(g -> g.getPriority() >= 6
+                && !com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isSleepGoal(g) && utility(a, g, now) > 0);
+        return pickScored(goals, g -> importantWork && isNonUrgentRest(a, g) ? 0 : utility(a, g, now), RANDOM.nextDouble(),
+                a.brain().nightRest || a.getFatigue() >= REST_INTERRUPT_FATIGUE);
     }
 
     /** Caller supplies only executable goals. Idle wandering runs only when all other scores are zero. */
     static AgentGoal pickScored(List<AgentGoal> goals,
                                java.util.function.ToDoubleFunction<AgentGoal> scorer, double sample) {
+        return pickScored(goals, scorer, sample, true);
+    }
+    private static AgentGoal pickScored(List<AgentGoal> goals,
+                                       java.util.function.ToDoubleFunction<AgentGoal> scorer, double sample,
+                                       boolean restSuppressesWandering) {
         Map<AgentGoal, Double> scores = new LinkedHashMap<>();
         AgentGoal emergency = null;
         boolean hasPurpose = false;
@@ -101,7 +116,8 @@ public final class GoalScheduler {
             double u = scorer.applyAsDouble(g);
             if (u <= 0) continue;
             scores.put(g, u);
-            if (!isFallback(g)) hasPurpose = true;
+            if (!isFallback(g) && (restSuppressesWandering
+                    || !com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill.isSleepGoal(g))) hasPurpose = true;
             if (g.getPriority() >= 9 && (emergency == null || g.getPriority() > emergency.getPriority())) emergency = g;
         }
         if (emergency != null) return emergency;

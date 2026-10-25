@@ -196,6 +196,8 @@ public class VillagerEventHandler {
      */
     @SubscribeEvent
     public void onWorldTick(TickEvent.WorldTickEvent event) {
+        if (event.phase == TickEvent.Phase.END && !event.world.isClientSide)
+            TradeDemo.tick((ServerWorld) event.world);
         if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
 
         if (event.phase == TickEvent.Phase.END && !event.world.isClientSide) {
@@ -343,6 +345,11 @@ public class VillagerEventHandler {
         ServerWorld serverWorld = (ServerWorld) event.getWorld();
         VillagerAgentSavedData savedData = VillagerAgentSavedData.get(serverWorld);
         LOGGER.info("Loaded villager agent data from world save");
+    }
+
+    @SubscribeEvent
+    public void onWorldUnload(WorldEvent.Unload event) {
+        if (event.getWorld() instanceof ServerWorld) TradeDemo.clear((ServerWorld) event.getWorld());
     }
 
     /**

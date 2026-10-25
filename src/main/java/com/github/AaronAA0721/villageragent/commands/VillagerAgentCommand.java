@@ -102,6 +102,21 @@ public class VillagerAgentCommand {
                 .then(Commands.argument("item", StringArgumentType.word())
                     .then(Commands.argument("quantity", IntegerArgumentType.integer(1, 256))
                         .executes(VillagerAgentCommand::requestMaterial))))
+            .then(VillagerControlCommands.trade())
+            .then(VillagerControlCommands.items("craft"))
+            .then(VillagerControlCommands.items("give"))
+            .then(VillagerControlCommands.wearHoe())
+            .then(VillagerControlCommands.till())
+            .then(Commands.literal("demo_trade")
+                .then(Commands.argument("from", net.minecraft.command.arguments.EntityArgument.entity())
+                    .then(Commands.argument("to", net.minecraft.command.arguments.EntityArgument.entity())
+                        .then(Commands.argument("item", net.minecraft.command.arguments.ItemArgument.item())
+                            .then(Commands.argument("count", IntegerArgumentType.integer(1, 64))
+                                .executes(ctx -> com.github.AaronAA0721.villageragent.ai.TradeDemo.start(
+                                    ctx.getSource(), net.minecraft.command.arguments.EntityArgument.getEntity(ctx, "from"),
+                                    net.minecraft.command.arguments.EntityArgument.getEntity(ctx, "to"),
+                                    net.minecraft.command.arguments.ItemArgument.getItem(ctx, "item").createItemStack(
+                                        IntegerArgumentType.getInteger(ctx, "count"), false))))))))
             .then(Commands.literal("orders").executes(VillagerAgentCommand::showOrders));
     }
 
@@ -182,6 +197,14 @@ public class VillagerAgentCommand {
                 ModConfig.ENABLE_BUILDING.set(value);
                 optionName = "Building";
                 break;
+            case "debughud":
+                ModConfig.DEBUG_SHOW_HUD.set(value);
+                optionName = "Debug HUD";
+                break;
+            case "thoughts":
+                ModConfig.ENABLE_VILLAGER_THOUGHTS.set(value);
+                optionName = "Villager Thoughts";
+                break;
             case "debugoverlay":
                 ModConfig.ENABLE_DEBUG_OVERLAY.set(value);
                 optionName = "Debug Overlay";
@@ -196,7 +219,7 @@ public class VillagerAgentCommand {
                 break;
             default:
                 source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Unknown option: " + option), false);
-                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay, harness, harnessdaily"), false);
+                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay, debughud, thoughts, harness, harnessdaily"), false);
                 success = false;
         }
         
@@ -236,6 +259,14 @@ public class VillagerAgentCommand {
                 value = ModConfig.ENABLE_BUILDING.get();
                 optionName = "Building";
                 break;
+            case "debughud":
+                value = ModConfig.DEBUG_SHOW_HUD.get();
+                optionName = "Debug HUD";
+                break;
+            case "thoughts":
+                value = ModConfig.ENABLE_VILLAGER_THOUGHTS.get();
+                optionName = "Villager Thoughts";
+                break;
             case "debugoverlay":
                 value = ModConfig.ENABLE_DEBUG_OVERLAY.get();
                 optionName = "Debug Overlay";
@@ -268,6 +299,8 @@ public class VillagerAgentCommand {
         sendConfigLine(source, "Villager Chat", ModConfig.ENABLE_VILLAGER_CHAT.get());
         sendConfigLine(source, "World Interaction", ModConfig.ENABLE_WORLD_INTERACTION.get());
         sendConfigLine(source, "Building", ModConfig.ENABLE_BUILDING.get());
+        sendConfigLine(source, "Debug HUD", ModConfig.DEBUG_SHOW_HUD.get());
+        sendConfigLine(source, "Villager Thoughts", ModConfig.ENABLE_VILLAGER_THOUGHTS.get());
         sendConfigLine(source, "Debug Overlay", ModConfig.ENABLE_DEBUG_OVERLAY.get());
         sendConfigLine(source, "Decision Harness", ModConfig.HARNESS_ENABLED.get());
         sendConfigLine(source, "Harness Daily Goal", ModConfig.HARNESS_DRIVE_DAILY_GOAL.get());

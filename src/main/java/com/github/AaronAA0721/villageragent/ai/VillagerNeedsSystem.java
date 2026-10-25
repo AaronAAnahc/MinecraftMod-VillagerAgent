@@ -24,7 +24,7 @@ import java.util.Map;
  *
  * <h3>Fatigue (0–100, starts at 0)</h3>
  * <ul>
- *   <li>Accumulates while awake: 4.5 points/1200 ticks at leisure, 6 while working.</li>
+ *   <li>Accumulates while awake: 3 points/1200 ticks idle or moving, 12 during other activities.</li>
  *   <li>Sleep restores fatigue; dawn does not reset it.</li>
  * </ul>
  *
@@ -54,20 +54,6 @@ public class VillagerNeedsSystem {
      */
     public static void tick(ServerWorld world, VillagerAgentData agent) {
         long gameTime  = world.getGameTime();
-        long previous = agent.brain().lastFatigueTick;
-        agent.brain().lastFatigueTick = gameTime;
-        net.minecraft.entity.Entity self = world.getEntity(agent.getVillagerId());
-        boolean sleeping = self instanceof net.minecraft.entity.LivingEntity && ((net.minecraft.entity.LivingEntity) self).isSleeping();
-        if (previous >= 0 && !sleeping) {
-            AgentGoal goal = agent.getRunningGoal();
-            String type = goal == null ? "" : goal.getGoalType();
-            boolean working = goal != null && !"wander".equals(type) && !"socialize".equals(type)
-                    && !"converse".equals(type) && !"rest".equals(type) && !"sleep".equals(type);
-            // Integrate each needs sample, including pauses between work actions. Do not charge unloaded time.
-            float elapsedFatigue = Math.max(0, Math.min(Math.max(200, com.github.AaronAA0721.villageragent.config.ModConfig.AGENT_THINK_INTERVAL.get()), gameTime - previous));
-            agent.setFatigue(agent.getFatigue() + (working ? 6f : 4.5f) * elapsedFatigue / 1200f);
-        }
-
         if (agent.brain().lastNeedsTick < 0) { agent.brain().lastNeedsTick = gameTime; return; }
         long elapsed = gameTime - agent.brain().lastNeedsTick;
         if (elapsed < DECAY_INTERVAL) return;
@@ -85,6 +71,26 @@ public class VillagerNeedsSystem {
 
         // ── Mood (re-derived every needs tick) ──
         agent.setMood(deriveMood(agent));
+    }
+
+    /** Per-tick sampling avoids charging a whole slow-update interval as work after a walk. */
+    public static void tickFatigue(ServerWorld world, net.minecraft.entity.merchant.villager.VillagerEntity self, VillagerAgentData agent) {
+        long now = world.getGameTime(), previous = agent.brain().lastFatigueTick;
+        agent.brain().lastFatigueTick = now;
+        if (previous < 0 || previous == now || self.isSleeping()) return;
+        VillagerAction action = agent.getCurrentAction();
+        AgentGoal goal = agent.brain().tasks.activeGoal();
+        if (goal == null) goal = agent.getRunningGoal();
+        String type = goal == null ? "" : goal.getGoalType();
+        boolean moving = !self.getNavigation().isDone()
+                || (action != null && (action.getActionType() == VillagerAction.ActionType.MOVE
+                || action.getPhase() == VillagerAction.ActionPhase.WALKING));
+        boolean working = !moving && (goal != null || action != null)
+                && !"move".equals(type) && !"goto".equals(type) && !"wander".equals(type)
+                && !"pickup_item".equals(type) && !"collect_crops".equals(type)
+                && !"rest".equals(type) && !"sleep".equals(type);
+        // 6000 ticks working + 6000 idle/moving = 60 + 15 = 75, starting at zero.
+        agent.setFatigue(agent.getFatigue() + (working ? 12f : 3f) * Math.min(1, now - previous) / 1200f);
     }
 
     // ── Eating ───────────────────────────────────────────────────────────────

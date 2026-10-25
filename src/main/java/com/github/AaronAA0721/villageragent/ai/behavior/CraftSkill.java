@@ -23,20 +23,91 @@ import net.minecraftforge.registries.ForgeRegistries;
 import java.util.List;
 import java.util.Optional;
 
-/**
- * "craft" goal: produce a catalog item at the villager's workstation ("上班式" production).
- *
- * <p>Three phases, state carried on {@code currentAction}:
- * <ol>
- *   <li><b>Walk</b> to the JOB_SITE (a {@code MOVE} goal action).</li>
- *   <li><b>Work</b> at the bench (a {@code CRAFT} action) for {@code CRAFT_WORK_TICKS}, then
- *       consume materials and produce the item (re-verifying at execution time).</li>
- * </ol>
- * Validation is code-judged (catalog + capability gate via {@code unlockedRecipes}), never trusted
- * from the LLM. A Master-level smith also gets a random enchantment via
- * {@link VillagerAgentManager#enchantFirstStack}.
- */
+/** Standard grid recipes use an inventory-aware dependency plan and remembered crafting tables.
+ * Other recipe types retain the existing profession-station production path. */
 public class CraftSkill implements VillagerSkill {
+    @Override public boolean isComposite() { return true; }
+    private static final class PlanState {
+        com.github.AaronAA0721.villageragent.ai.CraftingPlan plan;
+        int next, workTicks;
+        BlockPos table;
+    }
+
+    private SkillResult craftGrid(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager,
+                                  ServerWorld world, Item target) {
+        PlanState state = agent.brain().tasks.current().state(PlanState.class, PlanState::new);
+        if (state.plan == null) {
+            com.github.AaronAA0721.villageragent.ai.CraftingPlan.unlockDependencies(agent, world);
+            state.plan = com.github.AaronAA0721.villageragent.ai.CraftingPlan.build(
+                    world, agent.getInventory(), target, Math.max(1, goal.getTargetQuantity()));
+            if (!state.plan.complete) {
+                for (java.util.Map.Entry<String, Integer> need : state.plan.missing.entrySet()) {
+                    com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, need.getKey(),
+                        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, need.getKey()) + need.getValue());
+                    com.github.AaronAA0721.villageragent.ai.VillageSignalBoard.get().post(agent.getVillagerId(), villager.blockPosition(),
+                        com.github.AaronAA0721.villageragent.ai.VillageSignalBoard.MsgType.TRADE_WANT,
+                        new ResourceLocation(need.getKey()), need.getValue(), world.getGameTime());
+                }
+                if (!state.plan.missing.isEmpty()) {
+                    java.util.Map.Entry<String, Integer> need = state.plan.missing.entrySet().iterator().next();
+                    goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
+                }
+                return SkillResult.BLOCKED;
+            }
+        }
+        if (state.next >= state.plan.steps.size()) return SkillResult.SUCCESS;
+        com.github.AaronAA0721.villageragent.ai.CraftingPlan.Step step = state.plan.steps.get(state.next);
+        if (step.needsTable()) {
+            if (state.table != null && (!world.isLoaded(state.table)
+                    || !world.getBlockState(state.table).is(net.minecraft.block.Blocks.CRAFTING_TABLE))) {
+                state.table = null; state.workTicks = 0; agent.setCurrentAction(null); villager.getNavigation().stop();
+            }
+            if (state.table == null) {
+                com.github.AaronAA0721.villageragent.ai.WorkbenchMemory.observe(villager, world);
+                net.minecraft.pathfinding.Path path = com.github.AaronAA0721.villageragent.ai.WorkbenchMemory.path(agent, villager, world);
+                if (path == null) {
+                    agent.addMemory("Need a reachable crafting table for " + goal.getTargetItem());
+                    // Crafting tables are shared facilities, not profession POIs: never request a job site.
+                    return SkillResult.WAITING;
+                }
+                state.table = path.getTarget();
+                if (!villager.getNavigation().moveTo(path, VillagerNavigationSupport.WALK_SPEED)) return SkillResult.WAITING;
+                VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to remembered crafting table");
+                move.setTargetBlockPos(state.table); move.setStandCell(path.getNodePos(path.getNodeCount() - 1)); move.setGoalDriven(true); move.setPhase(VillagerAction.ActionPhase.WALKING);
+                agent.setCurrentAction(move);
+            }
+            if (villager.blockPosition().distSqr(state.table) > 4) {
+                if (villager.getNavigation().isDone()) {
+                    state.table = null;
+                    return SkillResult.WAITING;
+                }
+                return SkillResult.RUNNING;
+            }
+            villager.getNavigation().stop();
+        }
+        if (agent.getCurrentAction() == null || agent.getCurrentAction().getActionType() != VillagerAction.ActionType.CRAFT) {
+            VillagerAction work = new VillagerAction(VillagerAction.ActionType.CRAFT, "Crafting " + step.recipe.getId());
+            work.setGoalDriven(true); work.setPhase(VillagerAction.ActionPhase.ACTING); agent.setCurrentAction(work);
+        }
+        if (++state.workTicks < 20) return SkillResult.RUNNING;
+        if (!step.apply(agent.getInventory(), world)) {
+            // Inventory changed or capacity was lost: discard only the unexecuted plan and retry later.
+            return SkillResult.WAITING;
+        }
+        com.github.AaronAA0721.villageragent.ai.BrainLog.diagnostic(agent, "craft-step", "recipe=" + step.recipe.getId());
+        if (step.recipe.getResultItem().getItem() == target && goal.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE)
+            goal.setTargetQuantity(Math.max(0, goal.getTargetQuantity() - step.recipe.getResultItem().getCount()));
+        state.next++; state.workTicks = 0; agent.setCurrentAction(null);
+        if (state.next == state.plan.steps.size()) {
+            if (SkillCraftCatalog.canEnchant(agent.getProfession(), villager.getVillagerData().getLevel(), goal.getTargetItem()))
+                VillagerAgentManager.enchantFirstStack(agent, target, villager);
+            agent.gainCapabilityXp(CapabilityId.CRAFTING, ModConfig.CAPABILITY_PRACTICE_XP.get(), villager, world.getGameTime());
+            com.github.AaronAA0721.villageragent.ai.VillagerEquipmentHelper.refreshEquipment(villager, agent);
+            return SkillResult.SUCCESS;
+        }
+        return SkillResult.RUNNING;
+    }
+
 
     @Override public String id() { return "craft"; }
 
@@ -74,6 +145,8 @@ public class CraftSkill implements VillagerSkill {
             agent.addMemory("Unknown item: " + itemId + " — dropping the goal");
             return SkillResult.DELETE;
         }
+        if (com.github.AaronAA0721.villageragent.ai.CraftingPlan.supports(world, target))
+            return craftGrid(agent, goal, villager, world, target);
         ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, target);
         if (recipe == null) {
             // No vanilla / custom recipe exists for this item — the goal can never be satisfied.

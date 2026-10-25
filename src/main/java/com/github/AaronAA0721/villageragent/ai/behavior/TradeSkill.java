@@ -21,7 +21,7 @@ public class TradeSkill implements VillagerSkill {
 
     @Override public String id() { return "trade"; }
     @Override public CapabilityId requiredCapability() { return CapabilityId.SOCIAL; }
-    @Override public int minLevel() { return 2; } // "交易/求偶" — second social tier
+    @Override public int minLevel() { return 2; } // "trade/courtship" — second social tier
 
     @Override
     public boolean canHandle(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {

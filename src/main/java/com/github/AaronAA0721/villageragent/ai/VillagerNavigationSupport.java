@@ -41,6 +41,7 @@ public final class VillagerNavigationSupport {
         GroundPathNavigator ground = (GroundPathNavigator) navigation;
         // Vanilla sets these in its constructor. Keep them explicit for managed villagers in case
         // another AI controller changed the node evaluator during a previous action.
+        ground.setCanFloat(true);
         ground.setCanOpenDoors(true);
         ground.getNodeEvaluator().setCanPassDoors(true);
 

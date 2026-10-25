@@ -63,7 +63,7 @@ public final class RoutineScheduler {
                     }
                     // Existing saves retain routine fields; migrate the old 1000-tick wander
                     // pause so already-managed villagers do not keep standing idle for ~50 s.
-                    if ("wander".equals(type)) {
+                    if ("wander".equals(type) || "find_job_site".equals(type)) {
                         g.setCooldownTicks(seeded.getCooldownTicks());
                         long latest = world.getGameTime() + seeded.getCooldownTicks();
                         if (g.getCooldownUntilTick() > latest) g.setCooldownUntilTick(latest);
@@ -86,10 +86,10 @@ public final class RoutineScheduler {
                 // Only villagers who can actually farm get this routine (FarmSkill gates FARMING>=1).
                 if (agent.getCapabilityPool().levelOf(CapabilityId.FARMING) < 1) return null;
                 g = new AgentGoal("farm", "Tend the fields (routine)", 5);
-                apply(g, 1000, 6.0, 0.0, 6);   // daytime only, re-runs every 1000 ticks (~50 s)
+                apply(g, 1200, 6.0, 0.0, 6);   // 60-second cooldown after a bounded field session
                 break;
             case "restock":
-                // GATE (行为生成器统一重构方案 §3.4): only employed villagers restock. An
+                // GATE (Unified Behavior Generator Refactoring Plan §3.4): only employed villagers restock. An
                 // unemployed/nitwit villager has no starter items and no workstation — a restock
                 // routine for them is a dead goal (the NOHANDLER we saw in the live log).
                 if (!JobStarterItems.hasStarterItems(agent.getProfession())) return null;
@@ -105,14 +105,14 @@ public final class RoutineScheduler {
                 apply(g, 100, 1.0, 1.0, 2);   // short pause before another walk if no other task is ready
                 break;
             case "find_job_site":
-                // GATE (行为生成器统一重构方案 §六): only jobless non-nitwit villagers seek work.
-                // Employed villagers whose workstation was destroyed re-find it via
-                // FailureRecoveryPlanner (NO_JOB_SITE), not via this routine.
-                if (JobStarterItems.hasStarterItems(agent.getProfession())) return null;
+                net.minecraft.entity.Entity worker = world.getEntity(agent.getVillagerId());
+                if (!(worker instanceof net.minecraft.entity.merchant.villager.VillagerEntity)) return null;
+                if (com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.hasValidJobSite(
+                        (net.minecraft.entity.merchant.villager.VillagerEntity) worker, world)) return null;
                 if (isNitwit(agent.getProfession())) return null;
                 if (agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) return null;
                 g = new AgentGoal("find_job_site", "Find a job site to work at (routine)", 4);
-                apply(g, 2000, 4.0, 0.0, 4);  // daytime only, re-check every 100 s
+                apply(g, 100, 4.0, 0.0, 4);   // retry after five seconds
                 break;
             case "craft":
                 // GATE: only professions whose pool lists craft as a main duty (smiths, librarian…)

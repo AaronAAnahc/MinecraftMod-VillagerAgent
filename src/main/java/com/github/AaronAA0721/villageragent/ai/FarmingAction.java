@@ -11,6 +11,8 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.state.IntegerProperty;
+import net.minecraft.util.SoundCategory;
+import net.minecraft.util.SoundEvents;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.server.ServerWorld;
@@ -324,6 +326,7 @@ public class FarmingAction {
 
             // Remove one seed from inventory
             agent.getInventory().removeItem(seedStack, 1);
+                    world.playSound(null, plantPos, SoundEvents.CROP_PLANTED, SoundCategory.BLOCKS, 1.0F, 1.0F);
 
             agent.addMemory("Planted " + seedItem.getRegistryName() + " at " + plantPos);
             LOGGER.info(agent.getName() + " planted " + seedItem.getRegistryName() + " at " + plantPos);
@@ -359,6 +362,7 @@ public class FarmingAction {
                 if (agent.getInventory().countItem(seedStack) > 0) {
                     if (!world.setBlock(plantPos, cropBlock.defaultBlockState(), 3)) return false;
                     agent.getInventory().removeItem(seedStack, 1);
+                    world.playSound(null, plantPos, SoundEvents.CROP_PLANTED, SoundCategory.BLOCKS, 1.0F, 1.0F);
                     agent.addMemory("Planted " + seedItem.getRegistryName() + " at " + plantPos);
                     LOGGER.info(agent.getName() + " planted " + seedItem.getRegistryName() + " at " + plantPos);
                     return true;
@@ -467,9 +471,17 @@ public class FarmingAction {
         return false;
     }
 
-    /** "Cultivatable" dirt: tillable AND within water range — the precondition for ploughing. */
+    /** Same-height edge connection to existing farmland; diagonals and height changes do not connect. */
+    public static boolean hasAdjacentFarmland(ServerWorld world, BlockPos pos) {
+        for (BlockPos neighbor : new BlockPos[] {pos.north(), pos.south(), pos.east(), pos.west()}) {
+            if (world.isLoaded(neighbor) && isFarmland(world, neighbor)) return true;
+        }
+        return false;
+    }
+
+    /** New farmland must extend an existing field and remain within water range. */
     public static boolean isCultivatableDirt(ServerWorld world, BlockPos pos) {
-        return isTillableDirt(world, pos) && hasWaterNearby(world, pos);
+        return isTillableDirt(world, pos) && hasAdjacentFarmland(world, pos) && hasWaterNearby(world, pos);
     }
 
     public static boolean isFarmland(ServerWorld world, BlockPos pos) {
@@ -493,7 +505,8 @@ public class FarmingAction {
      * trampled back to dirt it still sits among its former peers — that is the maintenance case.
      */
     public static boolean isRevertedFarmland(ServerWorld world, BlockPos pos) {
-        return isTillableDirt(world, pos) && countFarmlandNeighbors(world, pos) >= 3;
+        return isTillableDirt(world, pos) && hasAdjacentFarmland(world, pos)
+                && countFarmlandNeighbors(world, pos) >= 3;
     }
 
     public static boolean hasRevertedFarmlandNearby(ServerWorld world, BlockPos center, int radius) {
@@ -552,17 +565,21 @@ public class FarmingAction {
      */
     public static boolean tillBlockAt(VillagerEntity villager, ServerWorld world,
                                       VillagerAgentData agent, BlockPos dirtPos) {
-        if (!isTillableDirt(world, dirtPos)) return false;
-        if (!hasHoe(agent)) return false;
-        world.setBlock(dirtPos, Blocks.FARMLAND.defaultBlockState()
-                .setValue(FarmlandBlock.MOISTURE, 7), 3);
-        // equip the hoe for visual display
-        for (ItemStack s : agent.getInventory().getItems()) {
-            if (!s.isEmpty() && s.getItem() instanceof HoeItem) {
-                villager.setItemSlot(EquipmentSlotType.MAINHAND, s.copy());
-                break;
-            }
+        // Recheck the connection at mutation time: neighbouring farmland may have disappeared.
+        if (!world.isLoaded(dirtPos) || !isTillableDirt(world, dirtPos)
+                || !hasAdjacentFarmland(world, dirtPos)) return false;
+        if (!world.isEmptyBlock(dirtPos.above())) return false;
+        ItemStack hoe = ItemStack.EMPTY;
+        for (ItemStack stack : agent.getInventory().getItems()) {
+            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) { hoe = stack; break; }
         }
+        if (hoe.isEmpty()) return false;
+        if (!world.setBlock(dirtPos, Blocks.FARMLAND.defaultBlockState()
+                .setValue(FarmlandBlock.MOISTURE, 7), 3)) return false;
+        world.playSound(null, dirtPos, SoundEvents.HOE_TILL, SoundCategory.BLOCKS, 1.0F, 1.0F);
+        // Damage the real inventory stack, not the visual equipment copy; vanilla handles Unbreaking/breakage.
+        hoe.hurtAndBreak(1, villager, entity -> entity.broadcastBreakEvent(EquipmentSlotType.MAINHAND));
+        villager.setItemSlot(EquipmentSlotType.MAINHAND, hoe.isEmpty() ? ItemStack.EMPTY : hoe.copy());
         agent.addMemory("Tilled " + dirtPos + " into farmland");
         LOGGER.info(agent.getName() + " tilled " + dirtPos);
         agent.gainCapabilityXp(CapabilityId.FARMING, ModConfig.CAPABILITY_PRACTICE_XP.get(),

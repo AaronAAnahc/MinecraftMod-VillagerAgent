@@ -1,215 +1,148 @@
 package com.github.AaronAA0721.villageragent.ai.behavior;
 
-import com.github.AaronAA0721.villageragent.ai.VillagerNavigationSupport;
-import com.github.AaronAA0721.villageragent.ai.AgentGoal;
-import com.github.AaronAA0721.villageragent.ai.BrainLog;
-import com.github.AaronAA0721.villageragent.ai.VillagerAction;
-import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
-import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
+import com.github.AaronAA0721.villageragent.ai.*;
 import net.minecraft.entity.ai.brain.memory.MemoryModuleType;
+import net.minecraft.entity.ai.brain.task.GatherPOITask;
+import net.minecraft.entity.ai.brain.task.AssignProfessionTask;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.merchant.villager.VillagerProfession;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.pathfinding.Path;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.RayTraceContext;
+import net.minecraft.util.math.vector.Vector3d;
 import net.minecraft.village.PointOfInterestManager;
 import net.minecraft.village.PointOfInterestType;
 import net.minecraft.world.server.ServerWorld;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import java.util.Optional;
-import java.util.function.Predicate;
 
-/**
- * "find_job_site" goal: use the vanilla <b>point-of-interest manager</b> to find the nearest
- * unclaimed workstation (48-block sphere, exactly like vanilla {@code AcquirePoi}), walk there,
- * and claim it by writing {@code JOB_SITE} (+ {@code POTENTIAL_JOB_SITE}) memory. Replaces the old
- * hand-rolled 16-radius block scan in {@code VillagerEventHandler.assignNearestJobSite}.
- *
- * <p>Two triggers reach this skill (行为生成器统一重构方案):
- * <ul>
- *   <li><b>Routine</b> (type2): a jobless villager has a REPEATABLE {@code find_job_site} routine
- *       and seeks <em>any</em> job site ({@code PointOfInterestType.ALL_JOBS}); on claim it takes on
- *       the workstation's profession.</li>
- *   <li><b>Recovery</b> (type1): {@code FailureRecoveryPlanner} injects a {@code find_job_site} goal
- *       when a restock/craft fails with {@code NO_JOB_SITE} (an employed villager whose workstation
- *       was destroyed). Here the target profession is already known, so it searches that specific
- *       POI type and only re-establishes {@code JOB_SITE} — no profession change.</li>
- * </ul>
- */
+/** Vanilla POI reservation and profession assignment, driven by our goal scheduler. */
 public class FindJobSiteSkill implements VillagerSkill {
-    private static final Logger LOGGER = LogManager.getLogger();
+    public String id() { return "find_job_site"; }
 
-    /** Search radius in blocks — mirrors vanilla's 48-block job-site acquisition sphere. */
-    private static final int SEARCH_RADIUS = 48;
-
-    @Override public String id() { return "find_job_site"; }
-
-    @Override
-    public boolean canHandle(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {
-        if (!"find_job_site".equals(goal.getGoalType())) return false;
-        if (villager.isBaby()) return false;                 // babies don't work
-        if (villager.getVillagerData().getProfession() == VillagerProfession.NITWIT) return false;
-        // Already claimed one (e.g. another villager's claim synced in) — nothing left to find.
-        if (villager.getBrain().getMemory(MemoryModuleType.JOB_SITE).isPresent()) return false;
-        return true;
+    public boolean canHandle(VillagerAgentData a, AgentGoal g, VillagerEntity v, ServerWorld w) {
+        return id().equals(g.getGoalType()) && !v.isBaby()
+                && v.getVillagerData().getProfession() != VillagerProfession.NITWIT
+                && !v.getBrain().getMemory(MemoryModuleType.JOB_SITE).isPresent();
     }
 
-    @Override
-    public SkillResult execute(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {
-        // Defensive: a JOB_SITE appeared since canHandle ran → done.
-        if (villager.getBrain().getMemory(MemoryModuleType.JOB_SITE).isPresent()) {
-            goal.setCompleted(true);
-            return SkillResult.DELETE;
+    /** Loaded blocks are authoritative. Unloaded sites are retained, never force-loaded. */
+    public static boolean hasValidJobSite(VillagerEntity v, ServerWorld w) {
+        Optional<GlobalPos> memory = v.getBrain().getMemory(MemoryModuleType.JOB_SITE);
+        if (!memory.isPresent()) return false;
+        GlobalPos site = memory.get();
+        ServerWorld owner = w.getServer().getLevel(site.dimension());
+        if (owner == null || !owner.isLoaded(site.pos())) return true;
+        PointOfInterestType expected = v.getVillagerData().getProfession().getJobPoiType();
+        boolean valid = PointOfInterestType.forState(owner.getBlockState(site.pos()))
+                .map(type -> expected.getPredicate().test(type)).orElse(false);
+        if (!valid) {
+            v.releasePoi(MemoryModuleType.JOB_SITE);
+            v.getBrain().eraseMemory(MemoryModuleType.JOB_SITE);
+            if (memory.equals(v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE)))
+                v.getBrain().eraseMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
         }
+        if (valid && memory.equals(v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE)))
+            v.getBrain().eraseMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+        return valid;
+    }
 
-        VillagerAction cur = agent.getCurrentAction();
-        if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
+    /** Cancel a reserved candidate on preemption; JOB_SITE ownership is kept. */
+    public static void releaseCandidate(VillagerEntity v) {
+        Optional<GlobalPos> candidate = v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+        if (!candidate.isPresent()) return;
+        if (!candidate.equals(v.getBrain().getMemory(MemoryModuleType.JOB_SITE)))
+            v.releasePoi(MemoryModuleType.POTENTIAL_JOB_SITE);
+        v.getBrain().eraseMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+    }
 
-        // ── Phase A: walking to the workstation ──
-        if (cur != null && cur.getActionType() == VillagerAction.ActionType.MOVE && cur.isGoalDriven()) {
-            BlockPos target = cur.getTargetBlockPos();
-            if (target == null) { agent.setCurrentAction(null); return SkillResult.RUNNING; }
-            if (villager.blockPosition().distSqr(target) <= VillagerAgentManager.GOAL_ARRIVE_SQ) {
-                if (!claim(villager, agent, world, target)) {
-                    goal.setLastFailure(FailureReason.NO_JOB_SITE.with((String) null));
-                    return SkillResult.FAIL;
-                }
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
-                return SkillResult.DELETE;
+    /** A physically adjacent, visible site needs no MOVE task. Tickets remain atomic. */
+    private static void reserveAdjacent(VillagerAgentData a, VillagerEntity v, ServerWorld w) {
+        java.util.function.Predicate<PointOfInterestType> predicate =
+                v.getVillagerData().getProfession().getJobPoiType().getPredicate();
+        Optional<BlockPos> nearby = w.getPoiManager().findAllClosestFirst(predicate,
+                p -> p.closerThan(v.position(), 2.0) && w.isLoaded(p)
+                        && PointOfInterestType.forState(w.getBlockState(p)).map(predicate::test).orElse(false)
+                        && w.clip(new RayTraceContext(v.getEyePosition(1), Vector3d.atCenterOf(p),
+                            RayTraceContext.BlockMode.COLLIDER, RayTraceContext.FluidMode.NONE, v)).getBlockPos().equals(p),
+                v.blockPosition(), 2, PointOfInterestManager.Status.HAS_SPACE).findFirst();
+        if (!nearby.isPresent()) return;
+        Optional<BlockPos> reserved = w.getPoiManager().take(predicate, nearby.get()::equals, nearby.get(), 1);
+        if (!reserved.isPresent()) return;
+        v.getBrain().setMemory(MemoryModuleType.POTENTIAL_JOB_SITE, GlobalPos.of(w.dimension(), reserved.get()));
+        BrainLog.diagnostic(a, "job-site-adjacent", "reserved=" + reserved.get() + " navigation=unnecessary");
+    }
+
+    private static final class State {
+        GatherPOITask acquire;
+        final AssignProfessionTask assign = new AssignProfessionTask();
+        long started = -1;
+    }
+
+    public SkillResult execute(VillagerAgentData a, AgentGoal g, VillagerEntity v, ServerWorld w) {
+        State state = a.brain().tasks.current().state(State.class, State::new);
+        long now = w.getGameTime();
+        if (state.started < 0) {
+            state.started = now;
+            BrainLog.diagnostic(a, "job-site-start", "mode=vanilla-poi-adjacent-v2 profession="
+                    + v.getVillagerData().getProfession() + " pos=" + v.blockPosition());
+            state.acquire = new GatherPOITask(v.getVillagerData().getProfession().getJobPoiType(),
+                    MemoryModuleType.JOB_SITE, MemoryModuleType.POTENTIAL_JOB_SITE, true, Optional.empty());
+        }
+        Optional<GlobalPos> candidate = v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+        if (!candidate.isPresent()) {
+            // Enclosed villagers can already touch the site even when navigation cannot build a path.
+            reserveAdjacent(a, v, w);
+            candidate = v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+        }
+        if (!candidate.isPresent()) {
+            // Vanilla owns its jitter, retry cache, multi-target path search and ticket reservation.
+            state.acquire.tryStart(w, v, now);
+            state.acquire.doStop(w, v, now);
+            candidate = v.getBrain().getMemory(MemoryModuleType.POTENTIAL_JOB_SITE);
+            if (!candidate.isPresent()) {
+                if (now - state.started < 80) return SkillResult.RUNNING;
+                java.util.function.Predicate<PointOfInterestType> predicate = v.getVillagerData().getProfession().getJobPoiType().getPredicate();
+                long total = w.getPoiManager().getCountInRange(predicate, v.blockPosition(), 48, PointOfInterestManager.Status.ANY);
+                long free = w.getPoiManager().getCountInRange(predicate, v.blockPosition(), 48, PointOfInterestManager.Status.HAS_SPACE);
+                BrainLog.diagnostic(a, "job-site-empty", "mode=vanilla-poi-adjacent-v2 matching=" + total
+                        + " free=" + free + " reason=" + (total == 0 ? "no_matching_poi" : free == 0
+                        ? "all_occupied" : "no_reachable_candidate"));
+                return SkillResult.WAITING;
             }
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() > VillagerAgentManager.GOAL_STUCK_TIMEOUT) {
-                agent.brain().rejectedJobSites.put(target.immutable(), world.getGameTime() + 1200);
-                agent.addMemory("Couldn't reach the job site I found");
-                goal.setLastFailure(FailureReason.UNREACHABLE.with((String) null));
-                goal.setCompleted(true);
-                agent.setCurrentAction(null);
+        }
+        GlobalPos site = candidate.get();
+        if (!site.dimension().equals(w.dimension()) || !w.isLoaded(site.pos())
+                || !PointOfInterestType.forState(w.getBlockState(site.pos()))
+                    .map(t -> v.getVillagerData().getProfession().getJobPoiType().getPredicate().test(t)).orElse(false)) {
+            releaseCandidate(v);
+            return SkillResult.FAIL;
+        }
+        if (state.assign.tryStart(w, v, now)) {
+            state.assign.doStop(w, v, now);
+            String name = v.getVillagerData().getProfession().getRegistryName().getPath();
+            a.updateProfession(Character.toUpperCase(name.charAt(0)) + name.substring(1));
+            v.getNavigation().stop(); a.setCurrentAction(null);
+            BrainLog.diagnostic(a, "job-site-claim", "vanilla assigned " + site);
+            return SkillResult.SUCCESS;
+        }
+        if (now - state.started > 600) {
+            releaseCandidate(v);
+            g.setLastFailure(FailureReason.UNREACHABLE.with(site.pos().toString()));
+            return SkillResult.FAIL;
+        }
+        if (a.getCurrentAction() == null || v.getNavigation().isDone()) {
+            int range = w.getPoiManager().getType(site.pos()).map(PointOfInterestType::getValidRange).orElse(1);
+            Path path = v.getNavigation().createPath(site.pos(), range);
+            if (path == null || path.getNodeCount() == 0 || !path.canReach() || !v.getNavigation().moveTo(path, VillagerNavigationSupport.WALK_SPEED)) {
+                releaseCandidate(v);
+                g.setLastFailure(FailureReason.UNREACHABLE.with(site.pos().toString()));
                 return SkillResult.FAIL;
             }
-            if (cur.getStuckTicks() % 40 == 0) {
-                villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
-            }
-            return SkillResult.RUNNING;
-        }
-
-        // ── Phase B: find the nearest unclaimed job site ──
-        if (cur != null) return SkillResult.RUNNING; // unrelated action in progress
-
-        BlockPos found = findJobSite(agent, villager, world);
-        if (found == null) {
-            BrainLog.diagnostic(agent, "job-site-empty", "no free POI within " + SEARCH_RADIUS
-                    + " blocks of " + villager.blockPosition() + " profession=" + agent.getProfession());
-            // No workstation within range. No failure recorded (lastFailure stays null) so the
-            // recovery planner does NOT re-inject another find_job_site — the REPEATABLE routine
-            // simply cools down and retries later.
-            agent.addMemory("Looked for a job site but found none nearby");
-            goal.setCompleted(true);
-            return SkillResult.FAIL;
-        }
-
-        VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to a job site");
-        move.setTargetBlockPos(found);
-        move.setPhase(VillagerAction.ActionPhase.WALKING);
-        move.setGoalDriven(true);
-        agent.setCurrentAction(move);
-        boolean started = villager.getNavigation().moveTo(found.getX() + 0.5, found.getY(), found.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
-        BrainLog.diagnostic(agent, "job-site-approach", "target=" + found + " pathStarted=" + started);
-        if (!started) {
-            goal.setLastFailure(FailureReason.UNREACHABLE.with(found.toString()));
-            return SkillResult.FAIL;
+            VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to reserved job site");
+            move.setTargetBlockPos(site.pos()); move.setStandCell(path.getNodePos(path.getNodeCount() - 1)); move.setGoalDriven(true);
+            move.setPhase(VillagerAction.ActionPhase.WALKING); a.setCurrentAction(move);
         }
         return SkillResult.RUNNING;
-    }
-
-    /** Find the nearest unclaimed workstation POI, or null. */
-    private BlockPos findJobSite(VillagerAgentData agent, VillagerEntity villager, ServerWorld world) {
-        PointOfInterestManager poi = world.getPoiManager();
-        PointOfInterestType target = villager.getVillagerData().getProfession().getJobPoiType();
-        boolean seekingAny = (target == null || target == PointOfInterestType.UNEMPLOYED);
-
-        Predicate<PointOfInterestType> typePred;
-        if (seekingAny) {
-            typePred = PointOfInterestType.ALL_JOBS;
-        } else {
-            final PointOfInterestType t = target;
-            typePred = po -> po == t;
-        }
-
-        long now = world.getGameTime();
-        agent.brain().rejectedJobSites.entrySet().removeIf(e -> e.getValue() <= now);
-        java.util.List<BlockPos> candidates = poi.findAllClosestFirst(typePred,
-                p -> !agent.brain().rejectedJobSites.containsKey(p), villager.blockPosition(),
-                SEARCH_RADIUS, PointOfInterestManager.Status.HAS_SPACE)
-                .limit(8).collect(java.util.stream.Collectors.toList());
-        for (BlockPos p : candidates) {
-            if (!world.isLoaded(p)) continue;
-            net.minecraft.pathfinding.Path path = villager.getNavigation().createPath(p, 2);
-            if (path != null && path.getNodeCount() > 0
-                    && (path.canReach() || path.getNodePos(path.getNodeCount() - 1).distSqr(p)
-                        < villager.blockPosition().distSqr(p) - 4)) {
-                BrainLog.diagnostic(agent, "job-site-select", "target=" + p + " candidates=" + candidates.size()
-                        + " complete=" + path.canReach() + " rejected=" + agent.brain().rejectedJobSites.size());
-                return p;
-            }
-            agent.brain().rejectedJobSites.put(p.immutable(), now + 1200);
-            BrainLog.diagnostic(agent, "job-site-reject", "target=" + p + " reason=no useful path retryAt=" + (now + 1200));
-        }
-        return null;
-    }
-
-    /** Claim {@code pos} as this villager's job site; adopt its profession if the villager was jobless. */
-    private boolean claim(VillagerEntity villager, VillagerAgentData agent, ServerWorld world, BlockPos pos) {
-        PointOfInterestType expected = villager.getVillagerData().getProfession().getJobPoiType();
-        // Revalidate and reserve atomically: the block may have gone or another villager arrived first.
-        Optional<BlockPos> reserved = world.getPoiManager().take(
-                type -> PointOfInterestType.ALL_JOBS.test(type)
-                        && (expected == null || expected == PointOfInterestType.UNEMPLOYED || type == expected),
-                candidate -> candidate.equals(pos), pos, 1);
-        if (!reserved.isPresent()) return false;
-        GlobalPos gp = GlobalPos.of(world.dimension(), pos);
-        villager.getBrain().setMemory(MemoryModuleType.JOB_SITE, gp);
-        villager.getBrain().setMemory(MemoryModuleType.POTENTIAL_JOB_SITE, gp);
-
-        // If the villager was unemployed, take on the workstation's profession (vanilla behaviour).
-        Optional<PointOfInterestType> typeOpt = world.getPoiManager().getType(pos);
-        if (typeOpt.isPresent()) {
-            VillagerProfession prof = professionForPoi(typeOpt.get());
-            if (prof != null && prof != VillagerProfession.NONE && prof != VillagerProfession.NITWIT
-                    && villager.getVillagerData().getProfession() == VillagerProfession.NONE) {
-                villager.setVillagerData(villager.getVillagerData().setProfession(prof));
-                agent.updateProfession(humanizeProfession(prof));
-            }
-        }
-        agent.addMemory("Claimed my " + agent.getProfession() + " workstation at " + pos);
-        LOGGER.info("{} claimed job site {} ({})", agent.getName(), pos, agent.getProfession());
-        return true;
-    }
-
-    /** Reverse-map a job-site POI type to the profession it grants, or null. */
-    private static VillagerProfession professionForPoi(PointOfInterestType type) {
-        if (type == PointOfInterestType.FARMER)        return VillagerProfession.FARMER;
-        if (type == PointOfInterestType.ARMORER)       return VillagerProfession.ARMORER;
-        if (type == PointOfInterestType.BUTCHER)       return VillagerProfession.BUTCHER;
-        if (type == PointOfInterestType.CARTOGRAPHER)  return VillagerProfession.CARTOGRAPHER;
-        if (type == PointOfInterestType.CLERIC)        return VillagerProfession.CLERIC;
-        if (type == PointOfInterestType.FISHERMAN)     return VillagerProfession.FISHERMAN;
-        if (type == PointOfInterestType.FLETCHER)      return VillagerProfession.FLETCHER;
-        if (type == PointOfInterestType.LEATHERWORKER) return VillagerProfession.LEATHERWORKER;
-        if (type == PointOfInterestType.LIBRARIAN)     return VillagerProfession.LIBRARIAN;
-        if (type == PointOfInterestType.MASON)         return VillagerProfession.MASON;
-        if (type == PointOfInterestType.SHEPHERD)      return VillagerProfession.SHEPHERD;
-        if (type == PointOfInterestType.TOOLSMITH)     return VillagerProfession.TOOLSMITH;
-        if (type == PointOfInterestType.WEAPONSMITH)   return VillagerProfession.WEAPONSMITH;
-        return null;
-    }
-
-    /** "minecraft:farmer" / "farmer" → "Farmer" (matches {@code VillagerEventHandler}'s convention). */
-    private static String humanizeProfession(VillagerProfession prof) {
-        String key = prof == null ? null : prof.toString();
-        if (key != null && key.contains(":")) key = key.substring(key.indexOf(":") + 1);
-        if (key == null || key.isEmpty() || "none".equals(key)) return "Unemployed Villager";
-        return key.substring(0, 1).toUpperCase() + key.substring(1).toLowerCase();
     }
 }

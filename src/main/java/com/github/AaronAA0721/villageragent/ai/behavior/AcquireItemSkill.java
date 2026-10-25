@@ -18,34 +18,11 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.Collections;
 
-/**
- * "acquire_item" goal: get a specific item into the villager's inventory, by any means.
- *
- * <p>This is the execution half of the failure-driven recovery chain
- * ({@code docs/失败驱动重规划.md} §5.3). The <em>planner} ({@link
- * com.github.AaronAA0721.villageragent.ai.FailureRecoveryPlanner}) decides that an item is missing
- * and broadcasts a {@code TRADE_WANT}; this skill is what actually completes the acquisition:
- * <ol>
- *   <li><b>Try to craft</b> — if a recipe resolves and the villager's capability pool unlocks it,
- *       consume materials and produce the item right away (no workstation walk — the villager
- *       "improvises" with what's on hand; workstation-bound production is {@link CraftSkill}'s
- *       job). If materials are short, the planner has already posted TRADE_WANTs for them; this
- *       skill just waits and retries.</li>
- *   <li><b>Wait for a trade</b> — if the item has no recipe or the villager can't craft it, the
- *       TRADE_WANT the planner posted is the only path. Another villager's economy scan or a
- *       player fulfils it; this skill polls the inventory every tick until the item arrives.</li>
- * </ol>
- *
- * <p>On success the skill retires every {@code TRADE_WANT} it (the same villager) posted for this
- * acquisition — both the item itself and its missing materials — so the village board is not left
- * advertising a satisfied demand.
- *
- * <p>The skill is universal (no capability gate): even a villager who can't craft the item
- * themselves can still <em>acquire} it via trade, so the goal must stay runnable while waiting.
- */
+/** Acquire existing stock or delegate known recipes to the same workstation-aware craft skill. */
 public class AcquireItemSkill implements VillagerSkill {
     private static final Logger LOGGER = LogManager.getLogger();
 
+    @Override public boolean isComposite() { return true; }
     @Override public String id() { return "acquire_item"; }
 
     @Override
@@ -84,20 +61,16 @@ public class AcquireItemSkill implements VillagerSkill {
             return SkillResult.SUCCESS;
         }
 
-        // ── Step 2: try to craft it on the spot ──
-        ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, itemId);
-        if (recipe != null
-                && SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(), agent.getProfession(), itemId)) {
-            // consumeAndProduce verifies materials first and consumes only if all present.
-            boolean ok = recipe.consumeAndProduce(agent.getInventory(), qty);
-            if (ok) {
-                agent.addMemory("Crafted " + qty + "x " + itemId + " to fill an order");
-                LOGGER.info("{} crafted {} x{} via acquire_item", agent.getName(), itemId, qty);
-                // Next tick step 1 will detect the item in inventory and retire the trade wants.
-                return SkillResult.RUNNING;
-            }
-            // Yield the body while supplies are being acquired.
-            return SkillResult.WAITING;
+        // Step 2: delegate crafting, including intermediate materials and table travel.
+        if (NativeRecipeResolver.resolveRecipe(world, itemId) != null && (agent.getUnlockedRecipes().contains(itemId)
+                || SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(), agent.getProfession(), itemId))) {
+            SkillResult result = BehaviorExecutor.executeChild(agent, villager, world, () -> {
+                AgentGoal child = new AgentGoal("craft", "Craft missing " + itemId, 6);
+                child.setTargetItem(itemId);
+                child.setTargetQuantity(Math.max(1, qty - agent.getInventory().countItem(new ItemStack(target))));
+                return child;
+            });
+            return result == SkillResult.SUCCESS ? SkillResult.RUNNING : result;
         }
 
         // ── Step 3: no craft path — wait for a trade to fulfil the TRADE_WANT ──

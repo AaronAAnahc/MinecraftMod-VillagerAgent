@@ -39,6 +39,13 @@ public abstract class VillagerEntityMixin {
         // A sleeping villager also counts as "active": SleepSkill drives sleep, and vanilla
         // wandering at night would otherwise drag the lying villager around.
         if (!self.isBaby()) {
+            self.getNavigation().setCanFloat(true);
+            net.minecraft.world.server.ServerWorld world = (net.minecraft.world.server.ServerWorld) self.level;
+            net.minecraft.entity.ai.brain.task.SwimTask swim = agent.brain().swim;
+            if (swim.getStatus() == net.minecraft.entity.ai.brain.task.Task.Status.STOPPED)
+                swim.tryStart(world, self, world.getGameTime());
+            if (swim.getStatus() == net.minecraft.entity.ai.brain.task.Task.Status.RUNNING)
+                swim.tickOrStop(world, self, world.getGameTime());
             ci.cancel();
         }
     }

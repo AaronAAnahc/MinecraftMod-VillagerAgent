@@ -7,6 +7,7 @@ import net.minecraft.world.server.ServerWorld;
 /** One cancellation boundary for navigation, block progress and task reservations. */
 public final class ActionLifecycle {
     public static void cancel(VillagerAgentData agent, VillagerEntity villager, ServerWorld world) {
+        com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.releaseCandidate(villager);
         clearBody(agent, villager, world);
         releaseTree(agent.brain().tasks.root(), agent, world);
         ResourceWorkSystem.release(world, agent, agent.getRunningGoal());

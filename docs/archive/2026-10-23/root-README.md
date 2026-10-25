@@ -1,8 +1,8 @@
 # 🤖 VillagerAgent — AI-Powered Minecraft Villagers
 
-> **Current implementation (2026-10-09):** the rule brain runs without an LLM. Decisions use current opportunities and needs, with no daily activity slots. Persistent lumberjack/miner occupations and material orders are documented in [事件驱动大脑与资源订单](docs/事件驱动大脑与资源订单.md). The older feature list and daily-schedule sections below are historical and have not all been updated.
+> **Current implementation (2026-10-09):** the rule brain runs without an LLM. Decisions use current opportunities and needs, with no daily activity slots. Persistent lumberjack/miner occupations and material orders are documented in [Event-driven brain and resource orders](docs/事件驱动大脑与资源订单.md). The older feature list and daily-schedule sections below are historical and have not all been updated.
 
-文档入口：[系统机制与源码对应](docs/事件驱动大脑与资源订单.md) · [面试讲述与常见追问](docs/村民Agent系统面试讲述.md)
+Documentation: [System mechanisms and source mapping](docs/事件驱动大脑与资源订单.md) · [Interview walkthrough and common questions](docs/村民Agent系统面试讲述.md)
 
 Transform vanilla Minecraft 1.16.5 villagers into autonomous **Generative Agents** (Stanford "AI Town"-style): each villager has a personality, long-term memory, goals, needs, relationships, a daily schedule — and perceives its surroundings through a **layered spatial-perception stack** before acting, all driven by a configurable LLM.
 

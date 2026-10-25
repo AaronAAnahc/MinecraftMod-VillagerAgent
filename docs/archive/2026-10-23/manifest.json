@@ -142,7 +142,9 @@
   {
     "source": "README.md",
     "archive": "docs/archive/2026-10-23/root-README.md",
-    "sha256": "7ff25e23c045ebdd52b5b949e476f63618a515b06f0afcfc6942ecd3252e94db"
+    "sha256": "eee3830e6932285878de7758cd078b7f4f97f8c15a38e65fd4071da27a92d0ca",
+    "original_sha256": "7ff25e23c045ebdd52b5b949e476f63618a515b06f0afcfc6942ecd3252e94db",
+    "note": "README prose translated to English on 2026-10-25; original checksum retained."
   },
   {
     "source": "AI_AGENT_GUIDE.md",

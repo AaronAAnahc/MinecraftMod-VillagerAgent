@@ -11,7 +11,7 @@ import java.util.Map;
  * Static catalog of <em>what a behaviour needs</em>: which capability and minimum level unlock
  * it, how heavy it is, and its default ("amateur") weight.
  *
- * <p>This is the "行为目录" half of the three-layer design (profession pool / capability pool /
+ * <p>This is the "behavior catalog" half of the three-layer design (profession pool / capability pool /
  * behaviour catalog). It is static metadata keyed by a stable behaviour id that matches the goal
  * types used across the mod ({@code "farm_maintain"}, {@code "farm_reclaim"}, {@code "socialize"},
  * …). Capability gating and weighted planning both read from here, so "what does doing X require"

@@ -33,13 +33,15 @@ public class VillageSignalBoard {
     private static final Logger LOGGER = LogManager.getLogger();
 
     /**
-     * The village is assumed to live in a single overworld, so one shared board suffices. If
-     * multi-dimension villages ever matter, key this per {@code ServerWorld} instead.
+     * Shared storage; rally records carry a dimension and listeners/expiry filter by it.
+     * Broadcast membership is spatial, not a persistent village identity.
      */
     private static final VillageSignalBoard INSTANCE = new VillageSignalBoard();
 
-    /** How far (blocks) a rally shout carries — villagers within this radius can hear the call. */
-    public static final double RALLY_RADIUS = 20.0;
+    /** Must have arrived near the threat before contributing to a charge. */
+    public static final double RALLY_READY_RADIUS = 8.0;
+    private static final double RALLY_RETAIN_RADIUS = 16.0;
+    private static final long RESPONSE_EXPIRE_TICKS = 100L;
 
     /** A rally goes quiet (and is forgotten) after this long without anyone answering it. */
     private static final long RALLY_EXPIRE_TICKS = 300L;
@@ -49,15 +51,19 @@ public class VillageSignalBoard {
      */
     public static final class RallyCall {
         public final UUID threatUuid;
+        public final ResourceLocation dimension;
         public BlockPos lastPos;
         public long lastUpdateTick;
         /** villager UUID → that villager's combat power (so combined power can be summed). */
         public final Map<UUID, Double> members = new HashMap<>();
+        private final Map<UUID, Long> responseTicks = new HashMap<>();
         public double groupPower = 0.0;
         public boolean charging = false;
+        private final Set<UUID> arrived = new HashSet<>();
 
-        RallyCall(UUID threatUuid) {
+        RallyCall(UUID threatUuid, ResourceLocation dimension) {
             this.threatUuid = threatUuid;
+            this.dimension = dimension;
         }
 
         public int memberCount() {
@@ -80,49 +86,83 @@ public class VillageSignalBoard {
         UUID key = threat.getUUID();
         RallyCall call = activeRallies.get(key);
         long now = villager.level.getGameTime();
-        if (call == null || expired(call, now)) {
-            call = new RallyCall(key);
+        if (call == null || !call.dimension.equals(threat.level.dimension().location()) || expired(call, now)) {
+            call = new RallyCall(key, threat.level.dimension().location());
             activeRallies.put(key, call);
+            BrainLog.diagnostic(agent, "rally-broadcast", "threat=" + key + " dimension=" + call.dimension
+                    + " radius=" + ModConfig.COMBAT_RALLY_RADIUS.get() + " pos=" + threat.blockPosition());
         }
+        if (!call.members.containsKey(villager.getUUID()))
+            BrainLog.diagnostic(agent, "rally-response", "threat=" + key + " distance=" + villager.distanceTo(threat)
+                    + " fatigue=" + agent.getFatigue() + " health=" + villager.getHealth());
         call.lastUpdateTick = now;
         call.lastPos = threat.blockPosition();
         call.members.put(villager.getUUID(), CombatAction.combatPower(agent, villager));
 
-        double sum = 0.0;
-        for (double d : call.members.values()) sum += d;
-        call.groupPower = sum;
+        call.responseTicks.put(villager.getUUID(), now);
         return call;
     }
 
-    /**
-     * Whether the responders gathered around {@code threat} have enough combined combat power to
-     * charge it: {@code Σ combatPower(responder) >= combat_charge_total_power} (no head-count, no
-     * direct DPS-vs-threat comparison). Bare-handed responders contribute 0, so a group of fists
-     * never triggers a charge. Once a rally starts charging it stays charging until the threat
-     * dies or it expires.
-     */
+    /** Re-evaluate live, arrived responders; merely acknowledging never supplies remote power. */
     public boolean shouldCharge(LivingEntity threat) {
         RallyCall call = activeRallies.get(threat.getUUID());
-        if (call == null || expired(call, threat.level.getGameTime())) return false;
-        if (call.charging) return true;
-        if (call.groupPower >= ModConfig.COMBAT_CHARGE_TOTAL_POWER.get()) {
-            call.charging = true;
-            LOGGER.debug("Rally against {} now charging ({} responders, {} power)",
-                    threat.getType().getRegistryName(), call.memberCount(), call.groupPower);
-            return true;
+        long now = threat.level.getGameTime();
+        if (call == null || !call.dimension.equals(threat.level.dimension().location())
+                || expired(call, now) || !(threat.level instanceof ServerWorld)) return false;
+        ServerWorld world = (ServerWorld) threat.level;
+        double power = 0;
+        int ready = 0;
+        java.util.Iterator<UUID> members = call.members.keySet().iterator();
+        while (members.hasNext()) {
+            UUID id = members.next();
+            net.minecraft.entity.Entity entity = world.getEntity(id);
+            if (!(entity instanceof VillagerEntity) || !entity.isAlive()
+                    || now - call.responseTicks.getOrDefault(id, Long.MIN_VALUE / 2) > RESPONSE_EXPIRE_TICKS) {
+                members.remove(); call.responseTicks.remove(id); call.arrived.remove(id); continue;
+            }
+            VillagerEntity villager = (VillagerEntity) entity;
+            VillagerAgentData agent = VillagerAgentManager.getAgent(id);
+            double contribution = 0;
+            VillagerAction action = agent == null ? null : agent.getCurrentAction();
+            boolean pursuing = call.arrived.contains(id) && action != null
+                    && action.getActionType() == VillagerAction.ActionType.ATTACK
+                    && threat.getUUID().equals(action.getTargetEntityId())
+                    && villager.distanceToSqr(threat) <= RALLY_RETAIN_RADIUS * RALLY_RETAIN_RADIUS;
+            boolean atAssembly = villager.distanceToSqr(threat) <= RALLY_READY_RADIUS * RALLY_READY_RADIUS
+                    && villager.canSee(threat);
+            if (agent != null && !villager.isBaby() && !villager.isNoAi() && !TradeDemo.isActive(id)
+                    && (atAssembly || pursuing) && CombatAction.mayAttack(villager, agent)) {
+                call.arrived.add(id);
+                contribution = CombatAction.combatPower(agent, villager);
+                ready++;
+            } else call.arrived.remove(id);
+            call.members.put(id, contribution);
+            power += contribution;
         }
-        return false;
+        call.groupPower = power;
+        boolean charge = ready >= 2 && power >= ModConfig.COMBAT_CHARGE_TOTAL_POWER.get();
+        if (charge && !call.charging)
+            LOGGER.debug("Rally against {} now charging ({} arrived, {} power)",
+                    threat.getType().getRegistryName(), ready, power);
+        if (!charge && call.charging)
+            LOGGER.info("Rally charge stopped: threat={} ready={} power={} requiredPower={}",
+                    threat.getUUID(), ready, power, ModConfig.COMBAT_CHARGE_TOTAL_POWER.get());
+        call.charging = charge;
+        return charge;
     }
 
-    /** Nearest active rally within {@code radius} of the villager — i.e. can it hear a shout? */
-    public RallyCall nearestRally(VillagerEntity villager, double radius) {
+    /** Nearest active rally inside the configured same-dimension broadcast radius. */
+    public RallyCall nearestRally(VillagerEntity villager) {
+        double radius = ModConfig.COMBAT_RALLY_RADIUS.get();
         double r2 = radius * radius;
         long now = villager.level.getGameTime();
         RallyCall best = null;
         double bestD = r2;
         for (Map.Entry<UUID, RallyCall> e : activeRallies.entrySet()) {
             RallyCall c = e.getValue();
-            if (expired(c, now)) continue;
+            if (!c.dimension.equals(villager.level.dimension().location())
+                    || expired(c, now) || !(villager.level instanceof ServerWorld)
+                    || ((ServerWorld) villager.level).getEntity(c.threatUuid) == null) continue;
             double d = villager.blockPosition().distSqr(c.lastPos);
             if (d <= bestD) {
                 best = c;
@@ -135,7 +175,8 @@ public class VillageSignalBoard {
     /** Forget stale rallies (called once per tick). */
     public void pruneExpired(ServerWorld world) {
         long now = world.getGameTime();
-        activeRallies.entrySet().removeIf(e -> expired(e.getValue(), now));
+        activeRallies.entrySet().removeIf(e -> e.getValue().dimension.equals(world.dimension().location())
+                && expired(e.getValue(), now));
     }
 
     private boolean expired(RallyCall call, long now) {

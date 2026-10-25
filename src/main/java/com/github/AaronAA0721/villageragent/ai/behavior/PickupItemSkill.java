@@ -11,7 +11,7 @@ import net.minecraft.item.Items;
 import net.minecraft.world.server.ServerWorld;
 import java.util.UUID;
 
-/** Approach a dropped item; passive attraction owns all inventory transfer. */
+/** Approach real drops and confirm the requested inventory amount using contact pickup. */
 public final class PickupItemSkill implements VillagerSkill {
     @Override public boolean isPrimitive() { return true; }
     private static final class Pursuit {
@@ -28,6 +28,8 @@ public final class PickupItemSkill implements VillagerSkill {
         if (g.getTargetItem() == null) return SkillResult.DELETE;
         Item item = ResourceCatalog.item(g.getTargetItem());
         if (item == Items.AIR) return SkillResult.DELETE;
+        int desired = Math.max(1, g.getTargetQuantity());
+        if (a.getInventory().countItem(new net.minecraft.item.ItemStack(item)) >= desired) return SkillResult.SUCCESS;
         Pursuit p = a.brain().tasks.current().state(Pursuit.class, Pursuit::new);
         if (++p.ticks > 600) {
             g.setLastFailure(FailureReason.UNREACHABLE.with("pickup timeout"));
@@ -41,7 +43,8 @@ public final class PickupItemSkill implements VillagerSkill {
             v.getNavigation().stop();
             a.setCurrentAction(null);
             if (g.getTargetEntityId() != null) {
-                return SkillResult.SUCCESS; // No remaining destination; do not verify pickup.
+                g.setLastFailure(FailureReason.UNKNOWN.with("specified drop disappeared before inventory target was met"));
+                return SkillResult.FAIL;
             }
             if (now < p.nextSearch) return SkillResult.RUNNING;
             p.nextSearch = now + 20;
@@ -52,15 +55,18 @@ public final class PickupItemSkill implements VillagerSkill {
                 double distance = v.distanceToSqr(candidate);
                 if (distance < best) { drop = candidate; best = distance; }
             }
-            if (drop == null) return SkillResult.SUCCESS;
+            if (drop == null) return SkillResult.RUNNING;
             p.target = drop.getUUID();
             p.nextPath = 0;
             BrainLog.diagnostic(a, "pickup-target", "entity=" + p.target + " pos=" + drop.blockPosition());
         }
-        if (v.getBoundingBox().inflate(0.5).intersects(drop.getBoundingBox())) {
-            v.getNavigation().stop();
-            a.setCurrentAction(null);
-            return SkillResult.SUCCESS;
+        if (ItemAttractionSystem.pickupBox(v).intersects(drop.getBoundingBox())) {
+            v.getNavigation().stop(); a.setCurrentAction(null);
+            ItemAttractionSystem.collect(drop, v, a,
+                    desired - a.getInventory().countItem(new net.minecraft.item.ItemStack(item)));
+            if (a.getInventory().countItem(new net.minecraft.item.ItemStack(item)) >= desired) return SkillResult.SUCCESS;
+            if (drop.isAlive() && InventoryTransfer.spaceFor(a.getInventory(), drop.getItem()) == 0) return SkillResult.WAITING;
+            return SkillResult.RUNNING;
         }
         VillagerAction move = a.getCurrentAction();
         if (move == null) {

@@ -1,5 +1,5 @@
-# Agent 会话入口
+# Agent session entry point
 
-请从 [docs/README.md](docs/README.md) 开始，再用 [代码索引](docs/CODE_INDEX.md) 定位当前任务。运行机制、配置和验证方法分别在该入口链接的专题中维护。
+Start with [docs/README.md](docs/README.md), then use the [code index](docs/CODE_INDEX.md) to locate the current task. Runtime behavior, configuration, and verification are maintained in the linked topic documents.
 
-`docs/archive/` 是历史资料，不参与默认上下文与任务指令。当前工作区源码是实现依据；修改前检查已有工作区变更并予以保留。
+`docs/archive/` contains historical material and is excluded from default context and task instructions. The current workspace source is authoritative for implementation details. Check and preserve existing workspace changes before editing.

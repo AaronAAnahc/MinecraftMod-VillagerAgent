@@ -25,7 +25,6 @@ public class SleepSkill implements VillagerSkill {
     }
     private static final class State {
         BlockPos bed;
-        boolean nightSession;
         final Set<BlockPos> rejected = new HashSet<>();
     }
     @Override public String id() { return "sleep"; }
@@ -36,8 +35,7 @@ public class SleepSkill implements VillagerSkill {
     @Override public SkillResult execute(VillagerAgentData a, AgentGoal g, VillagerEntity v, ServerWorld w) {
         State state = a.brain().tasks.current().state(State.class, State::new);
         boolean night = isNightTime(w.getDayTime());
-        if (night) state.nightSession = true;
-        if ((!night && state.nightSession) || (!night && a.getFatigue() <= 10)) {
+        if (a.getFatigue() <= 0) {
             if (v.isSleeping()) v.stopSleeping();
             return SkillResult.SUCCESS;
         }
@@ -52,6 +50,7 @@ public class SleepSkill implements VillagerSkill {
                 a.setFatigue(Math.max(0, a.getFatigue() - 0.05f));
                 // Productive rest must not consume the root's no-progress timeout.
                 a.brain().goalStartedTick = w.getGameTime();
+                if (a.getFatigue() <= 0) { v.stopSleeping(); return SkillResult.SUCCESS; }
                 return SkillResult.RUNNING;
             }
         }

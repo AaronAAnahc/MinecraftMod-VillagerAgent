@@ -1,20 +1,20 @@
-# 文档档案
+# Documentation archive
 
-本目录用于历史追溯，不参与当前实现说明、agent 上手、任务优先级或操作约束。默认检索排除本目录；仅在用户明确要求追溯历史时按需读取。当前入口是 [docs/README](../README.md)。
+This directory is for historical investigation, not current implementation descriptions, agent onboarding, task priorities, or operational constraints. Exclude it from default searches and read only when the user explicitly requests historical investigation. The current entry is [docs/README](../README.md).
 
-2026-10-23 子目录保存整理前文档的原始字节与根入口快照，`manifest.json` 记录原路径、归档路径和 SHA-256。档案正文可包含当时的计划、更正和相互矛盾的结论，均按历史材料理解。链接保留原始文本语境，不作为当前导航。
+The 2026-10-23 directory stores pre-consolidation documents and root-entry snapshots. `manifest.json` records original paths, archive paths, and SHA-256 hashes. The root README snapshot was subsequently translated to English at the user's request; its original checksum is retained separately in the manifest. Other archived bodies retain their original bytes. Archived plans, corrections, and contradictory conclusions are historical material. Links retain their original textual context and are not current navigation.
 
-## 有效信息的当前去向
+## Where maintained information lives now
 
-| 档案主题 | 当前文档 |
+| Archived topic | Current documentation |
 |---|---|
-| 大脑、管线、行为池、架构审查、统一生成器 | [执行链](../事件驱动大脑与资源订单.md)、[代码索引](../CODE_INDEX.md) |
-| 失败驱动方案与实现记录 | [失败恢复](../失败驱动重规划.md) |
-| 视觉设计、建筑设计、两份建筑实现记录 | [空间感知](../vision_module_implementation.md)、[床与建筑算法](../bed_room_search_implementation.md) |
-| 能力池、职业合成 | [能力制作与经济](../能力制作与经济.md) |
-| 世界总线、八卦、多智能体编排 | [事件与知识传播](../事件与知识传播.md)、[资源订单](../事件驱动大脑与资源订单.md) |
-| Harness、世界交互 | [LLM 与世界交互](../LLM与世界交互.md) |
-| idle 排查、调试说明 | [调试手册](../DEBUG_VERIFICATION.md) |
-| 项目状态、面试讲述 | [实现边界](../项目现状与待办清单.md)、[项目讲述](../村民Agent系统面试讲述.md) |
+| Brain, pipeline, behavior pools, architecture review, unified generator | [Execution pipeline](../execution_pipeline_and_resource_orders.md), [Code index](../CODE_INDEX.md) |
+| Failure-driven design and implementation records | [Failure recovery](../failure_recovery.md) |
+| Vision/building design and both building implementation records | [Spatial perception](../vision_module_implementation.md), [Beds and building algorithms](../bed_room_search_implementation.md) |
+| Capability pools and profession crafting | [Capabilities, crafting, and economy](../capabilities_crafting_and_economy.md) |
+| World bus, gossip, multi-agent orchestration | [Events and knowledge sharing](../events_and_knowledge_sharing.md), [Resource orders](../execution_pipeline_and_resource_orders.md) |
+| Harness and world interaction | [LLM and world interaction](../llm_and_world_interaction.md) |
+| Idle diagnosis and debugging | [Debugging and verification](../DEBUG_VERIFICATION.md) |
+| Project status and interview walkthrough | [Implementation boundaries](../implementation_status.md), [Project walkthrough](../project_walkthrough.md) |
 
-Settlements、原版 Mob AI、能力提升蓝图及尚未实施的检索记忆方案作为完整参考资料保留于档案，不代表 VillagerAgent 当前实现。
+Settlements, vanilla Mob AI, capability roadmaps, and unimplemented retrieval-memory proposals remain complete historical references, not descriptions of current VillagerAgent behavior.

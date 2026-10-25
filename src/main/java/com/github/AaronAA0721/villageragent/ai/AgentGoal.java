@@ -60,6 +60,9 @@ public class AgentGoal {
     /** Cooldown length in ticks applied after a REPEATABLE goal succeeds/fails; it re-enters
      *  the pick pool only once {@code cooldownUntilTick} has passed. 0 = no cooldown. */
     private int cooldownTicks = 0;
+    private int minimumExitCooldownTicks;
+    public int getMinimumExitCooldownTicks() { return minimumExitCooldownTicks; }
+    public void setMinimumExitCooldownTicks(int ticks) { minimumExitCooldownTicks = Math.max(0, ticks); }
     /** Absolute game tick at which a REPEATABLE goal becomes available again. */
     private long cooldownUntilTick = 0;
 
@@ -71,7 +74,7 @@ public class AgentGoal {
     /** Night-phase scheduling weight (see {@link #dayWeight}). */
     private double nightWeight = 0.0;
 
-    // ── Failure-driven re-planning (docs/失败驱动重规划.md) ──
+    // ── Failure-driven re-planning (docs/failure_recovery.md) ──
     /** Items this goal is expected to put into the villager's inventory on success (registry
      *  names, e.g. {@code "minecraft:iron_hoe"}). A {@code restock} goal lists its profession's
      *  starter items; a {@code craft}/{@code acquire_item} goal lists its {@code targetItem}.
