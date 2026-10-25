@@ -6,12 +6,11 @@ import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerEconomySystem;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
-import com.github.AaronAA0721.villageragent.ai.VillagerEquipmentHelper;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.inventory.EquipmentSlotType;
-import net.minecraft.item.ArmorItem;
+import com.github.AaronAA0721.villageragent.ai.TradeInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.PacketBuffer;
 import net.minecraft.world.server.ServerWorld;
@@ -71,6 +70,7 @@ public class TradeRequestPacket {
             VillagerAgentData agent = VillagerAgentManager.getAgent(packet.villagerId);
             if (agent == null) {
                 LOGGER.warn("No agent found for villager: " + packet.villagerId);
+                sendResult(player, packet.villagerId, false, "This villager is no longer available.", null, null);
                 return;
             }
 
@@ -78,6 +78,12 @@ public class TradeRequestPacket {
             ServerWorld serverWorld = (ServerWorld) player.level;
             Entity entity = serverWorld.getEntity(packet.villagerId);
             VillagerEntity villager = (entity instanceof VillagerEntity) ? (VillagerEntity) entity : null;
+            if (villager == null || !villager.isAlive() || !player.isAlive()
+                    || player.distanceToSqr(villager) > 64.0) {
+                sendResult(player, packet.villagerId, false, "The villager is no longer within trading distance.", agent, villager);
+                return;
+            }
+
 
             // Build trade description for logging
             String tradeDescription = buildTradeDescription(packet, agent);
@@ -194,26 +200,25 @@ public class TradeRequestPacket {
         String reason;
         if (accepted) {
             reason = "That's a fair trade.";
-            boolean success = executeTrade(player, agent, packet, villager);
-            if (!success) {
-                reason = "Wait, I don't actually have those items. Sorry!";
+            if (!executeTrade(player, agent, packet, villager)) {
+                reason = "Items changed or there is not enough inventory space. Nothing was taken.";
                 accepted = false;
-                returnItemsToPlayer(player, packet);
             }
         } else {
             reason = "That's not worth it for me.";
-            returnItemsToPlayer(player, packet);
         }
 
         LOGGER.info("Trade " + (accepted ? "ACCEPTED" : "REJECTED")
                 + " (offered " + offered + " >= requested " + requested + "): " + reason);
 
-        // Send result to client, including the post-trade inventory/armor snapshot for immediate refresh.
-        List<ItemStack> updatedInventory = collectInventorySnapshot(agent);
-        List<ItemStack> updatedArmor = collectArmorSnapshot(villager);
-        TradeResultPacket resultPacket = new TradeResultPacket(
-                packet.villagerId, accepted, reason, updatedInventory, updatedArmor);
-        ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), resultPacket);
+        sendResult(player, packet.villagerId, accepted, reason, agent, villager);
+    }
+
+    private static void sendResult(ServerPlayerEntity player, UUID villagerId, boolean accepted,
+                                   String reason, VillagerAgentData agent, VillagerEntity villager) {
+        List<ItemStack> inventory = agent == null ? new ArrayList<>() : collectInventorySnapshot(agent);
+        ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                new TradeResultPacket(villagerId, accepted, reason, inventory, collectArmorSnapshot(villager)));
     }
 
     /** What this villager would pay for the stack, per its personal value table (0.01/unit if it doesn't trade in it). */
@@ -230,73 +235,25 @@ public class TradeRequestPacket {
                 stack.getItem().getRegistryName().toString()) * stack.getCount();
     }
 
-    /**
-     * Return offered items to player when trade is rejected or fails
-     */
-    private static void returnItemsToPlayer(ServerPlayerEntity player, TradeRequestPacket packet) {
-        if (!packet.offerItem1.isEmpty()) {
-            player.addItem(packet.offerItem1.copy());
-            LOGGER.info("Returned to player: " + packet.offerItem1.getCount() + "x " + packet.offerItem1.getItem().getRegistryName());
-        }
-        if (!packet.offerItem2.isEmpty()) {
-            player.addItem(packet.offerItem2.copy());
-            LOGGER.info("Returned to player: " + packet.offerItem2.getCount() + "x " + packet.offerItem2.getItem().getRegistryName());
-        }
-    }
-
-    /**
-     * Execute the trade - transfer items between player and villager.
-     * Items can come from either the {@link com.github.AaronAA0721.villageragent.ai.AgentInventory}
-     * or the entity's equipment slots (equipped armor).
-     * @return true if trade was successful, false if items weren't available
-     */
+    /** Server-thread commit after all stock, NBT and capacity checks succeed on copies. */
     private static boolean executeTrade(ServerPlayerEntity player, VillagerAgentData agent,
-                                         TradeRequestPacket packet, VillagerEntity villager) {
-        // Verify villager has requested items (check inventory + equipped armor)
-        if (!packet.requestItem1.isEmpty()) {
-            if (!villagerHasItem(agent, villager, packet.requestItem1)) {
-                LOGGER.warn("Villager doesn't have: " + packet.requestItem1);
-                return false;
-            }
-        }
-        if (!packet.requestItem2.isEmpty()) {
-            if (!villagerHasItem(agent, villager, packet.requestItem2)) {
-                LOGGER.warn("Villager doesn't have: " + packet.requestItem2);
-                return false;
-            }
-        }
+                                        TradeRequestPacket packet, VillagerEntity villager) {
+        TradeInventory.Plan plan = TradeInventory.plan(player.inventory.items,
+                agent.getInventory().getItems(), collectArmorSnapshot(villager),
+                new ItemStack[]{packet.offerItem1, packet.offerItem2},
+                new ItemStack[]{packet.requestItem1, packet.requestItem2});
+        if (plan == null) return false;
 
-        // Add player's offered items to villager inventory
-        if (!packet.offerItem1.isEmpty()) {
-            agent.getInventory().addItem(packet.offerItem1.copy());
-            LOGGER.info("Villager received: " + packet.offerItem1.getCount() + "x " + packet.offerItem1.getItem().getRegistryName());
-        }
-        if (!packet.offerItem2.isEmpty()) {
-            agent.getInventory().addItem(packet.offerItem2.copy());
-            LOGGER.info("Villager received: " + packet.offerItem2.getCount() + "x " + packet.offerItem2.getItem().getRegistryName());
-        }
-
-        // Remove requested items from villager (inventory first, then equipped armor) and give to player
-        if (!packet.requestItem1.isEmpty()) {
-            removeFromVillager(agent, villager, packet.requestItem1);
-            player.addItem(packet.requestItem1.copy());
-            LOGGER.info("Player received: " + packet.requestItem1.getCount() + "x " + packet.requestItem1.getItem().getRegistryName());
-        }
-        if (!packet.requestItem2.isEmpty()) {
-            removeFromVillager(agent, villager, packet.requestItem2);
-            player.addItem(packet.requestItem2.copy());
-            LOGGER.info("Player received: " + packet.requestItem2.getCount() + "x " + packet.requestItem2.getItem().getRegistryName());
-        }
-
-        // After trade, re-evaluate armor (received items may include armor to equip)
-        if (villager != null) {
-            VillagerEquipmentHelper.refreshEquipment(villager, agent);
-        }
-
-        // If the player just handed over items they owed us, settle the matching DebtAgenda
-        // so the "collect payment" intention is cleared — guaranteed by code, not the LLM.
+        for (int i = 0; i < plan.player.size(); i++) player.inventory.items.set(i, plan.player.get(i));
+        for (int i = 0; i < plan.villager.size(); i++) agent.getInventory().setStackInSlot(i, plan.villager.get(i));
+        EquipmentSlotType[] slots = {EquipmentSlotType.HEAD, EquipmentSlotType.CHEST,
+                EquipmentSlotType.LEGS, EquipmentSlotType.FEET};
+        for (int i = 0; i < slots.length; i++) villager.setItemSlot(slots[i], plan.armor.get(i));
+        player.inventory.setChanged();
+        player.inventoryMenu.broadcastChanges();
+        player.containerMenu.broadcastChanges();
+        // Keep remaining armor where it is; auto-equipping here could overflow a full inventory.
         settleDebts(agent, player, packet);
-
         agent.addMemory("Traded with player " + player.getName().getString());
         return true;
     }
@@ -338,55 +295,6 @@ public class TradeRequestPacket {
             count += packet.offerItem2.getCount();
         }
         return count;
-    }
-
-    /**
-     * Check whether the villager has the requested item — first in inventory, then in equipped armor slots.
-     */
-    private static boolean villagerHasItem(VillagerAgentData agent, VillagerEntity villager, ItemStack requested) {
-        // Check inventory
-        if (agent.getInventory().hasItem(requested, requested.getCount())) {
-            return true;
-        }
-        // Check equipped armor slots
-        if (villager != null) {
-            EquipmentSlotType[] armorSlots = {EquipmentSlotType.HEAD, EquipmentSlotType.CHEST,
-                    EquipmentSlotType.LEGS, EquipmentSlotType.FEET};
-            for (EquipmentSlotType slot : armorSlots) {
-                ItemStack equipped = villager.getItemBySlot(slot);
-                if (!equipped.isEmpty() && ItemStack.isSame(equipped, requested)
-                        && equipped.getCount() >= requested.getCount()) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Remove the requested item from the villager. Tries inventory first, then equipped armor.
-     */
-    private static void removeFromVillager(VillagerAgentData agent, VillagerEntity villager, ItemStack requested) {
-        // Try inventory first
-        if (agent.getInventory().hasItem(requested, requested.getCount())) {
-            agent.getInventory().removeItem(requested, requested.getCount());
-            return;
-        }
-        // Try equipped armor slots
-        if (villager != null) {
-            EquipmentSlotType[] armorSlots = {EquipmentSlotType.HEAD, EquipmentSlotType.CHEST,
-                    EquipmentSlotType.LEGS, EquipmentSlotType.FEET};
-            for (EquipmentSlotType slot : armorSlots) {
-                ItemStack equipped = villager.getItemBySlot(slot);
-                if (!equipped.isEmpty() && ItemStack.isSame(equipped, requested)
-                        && equipped.getCount() >= requested.getCount()) {
-                    villager.setItemSlot(slot, ItemStack.EMPTY);
-                    LOGGER.info("Removed equipped armor from {}: {}", slot.getName(),
-                            requested.getItem().getRegistryName());
-                    return;
-                }
-            }
-        }
     }
 
     /**

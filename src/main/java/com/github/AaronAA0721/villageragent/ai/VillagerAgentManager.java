@@ -136,7 +136,7 @@ public class VillagerAgentManager {
             // Check this dimension before updating shared timestamps.
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
                 agent.setLastThinkTime(currentTime);
-                updateAgent(world, agent);
+                updateAgent(world, loaded, agent);
                 BrainLog.snapshot(agent, loaded, (ServerWorld) world, "after-think");
             }
             processGoals(loaded, agent);
@@ -169,7 +169,10 @@ public class VillagerAgentManager {
         ServerWorld serverWorld = (ServerWorld) world;
 
         for (VillagerAgentData agent : agents.values()) {
-            // Tick attack cooldown every tick
+            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+            if (villager == null) continue;
+
+            // Tick attack cooldown once per tick in the villager's active world
             agent.tickAttackCooldown();
 
             // Check if this villager is already in a combat action
@@ -183,9 +186,6 @@ public class VillagerAgentManager {
                 // Idle scan — run every COMBAT_SCAN_INTERVAL ticks
                 if (currentTime % COMBAT_SCAN_INTERVAL != 0) continue;
             }
-
-            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
-            if (villager == null) continue;
 
             performCombatActions(villager, serverWorld, agent);
         }
@@ -595,9 +595,7 @@ public class VillagerAgentManager {
      * Update a single agent's AI (slow tick — goals, restocking, etc.)
      * Combat is handled separately by tickCombat().
      */
-    private static void updateAgent(World world, VillagerAgentData agent) {
-        // Find the actual villager entity
-        VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+    private static void updateAgent(World world, VillagerEntity villager, VillagerAgentData agent) {
         if (villager == null) {
             return; // Villager not loaded or doesn't exist
         }

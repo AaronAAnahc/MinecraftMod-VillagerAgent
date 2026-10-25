@@ -115,8 +115,8 @@ public class VillagerNeedsSystem {
                     ? item.getRegistryName().getPath().replace("_", " ")
                     : "some food";
             agent.addMemory("Ate " + foodName + " — hunger satisfied");
-            LOGGER.debug("{} ate {} (hunger: {:.0f} → {:.0f})",
-                    agent.getName(), foodName, agent.getHunger() - restored, newHunger);
+            LOGGER.debug("{} ate {} (hunger: {} -> {})",
+                    agent.getName(), foodName, (int) (agent.getHunger() - restored), (int) newHunger);
             return;
         }
 
