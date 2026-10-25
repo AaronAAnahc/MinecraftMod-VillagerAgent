@@ -1,5 +1,6 @@
 package com.github.AaronAA0721.villageragent.client;
 
+import com.github.AaronAA0721.villageragent.ai.TradeInventory;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
 import com.github.AaronAA0721.villageragent.network.TradeRequestPacket;
 import com.mojang.blaze3d.matrix.MatrixStack;
@@ -17,7 +18,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Minecraft-style trade screen with drag-and-drop.
+ * Minecraft-style trade proposal screen. All selections are copies; only the server transfers stock.
  *
  * Layout:
  * - Left side: Player's inventory
@@ -41,7 +42,7 @@ public class VillagerTradeScreen extends Screen {
     private List<ItemStack> villagerArmor;
     private final VillagerChatScreen parentScreen;
 
-    // Trade slots - what player offers to give and wants to receive
+    // Proposal copies, never escrowed items or references into the player's actual inventory.
     private final ItemStack[] sellSlots = new ItemStack[2];  // What player offers TO villager
     private final ItemStack[] buySlots = new ItemStack[2];   // What player wants FROM villager
 
@@ -51,6 +52,7 @@ public class VillagerTradeScreen extends Screen {
     // Trade result
     private String tradeResultMessage = null;
     private boolean tradeAccepted = false;
+    private boolean tradePending = false;
     private long tradeResultTime = 0;
 
     // Layout constants
@@ -112,33 +114,22 @@ public class VillagerTradeScreen extends Screen {
     }
 
     private void goBack() {
-        // Return any held items to player inventory before closing
-        if (!heldItem.isEmpty()) {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.player != null) {
-                mc.player.inventory.add(heldItem);
-            }
-            heldItem = ItemStack.EMPTY;
-        }
-        // Return items in sell slots back to player
-        returnSellSlotsToPlayer();
+        discardSelection();
         Minecraft.getInstance().setScreen(parentScreen);
     }
 
+    private void discardSelection() {
+        heldItem = ItemStack.EMPTY;
+        returnSellSlotsToPlayer();
+        clearBuySlots();
+    }
+
     private void returnSellSlotsToPlayer() {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player != null) {
-            for (int i = 0; i < sellSlots.length; i++) {
-                if (!sellSlots[i].isEmpty()) {
-                    mc.player.inventory.add(sellSlots[i]);
-                    sellSlots[i] = ItemStack.EMPTY;
-                }
-            }
-        }
+        // These are proposal copies. Real items never left the player's inventory.
+        for (int i = 0; i < sellSlots.length; i++) sellSlots[i] = ItemStack.EMPTY;
     }
 
     private void clearSellSlots() {
-        // Return items to player inventory
         returnSellSlotsToPlayer();
     }
 
@@ -148,6 +139,7 @@ public class VillagerTradeScreen extends Screen {
     }
 
     private void proposeTrade() {
+        if (tradePending) return;
         boolean hasSell = !sellSlots[0].isEmpty() || !sellSlots[1].isEmpty();
         boolean hasBuy = !buySlots[0].isEmpty() || !buySlots[1].isEmpty();
 
@@ -158,14 +150,8 @@ public class VillagerTradeScreen extends Screen {
             return;
         }
 
-        // Return held item before proposing
-        if (!heldItem.isEmpty()) {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.player != null) {
-                mc.player.inventory.add(heldItem);
-            }
-            heldItem = ItemStack.EMPTY;
-        }
+        heldItem = ItemStack.EMPTY;
+        tradePending = true;
 
         // Send trade request to server (items in sellSlots will be taken if accepted)
         ModNetworking.CHANNEL.sendToServer(new TradeRequestPacket(
@@ -176,6 +162,8 @@ public class VillagerTradeScreen extends Screen {
             buySlots[1].copy()
         ));
 
+        discardSelection();
+
         // Go back to chat screen to show the response
         if (parentScreen != null) {
             parentScreen.addMessage(villagerName, "Hmm, let me think about this trade...", false);
@@ -184,11 +172,12 @@ public class VillagerTradeScreen extends Screen {
     }
 
     public void showTradeResult(boolean accepted, String message) {
+        this.tradePending = false;
         this.tradeAccepted = accepted;
         this.tradeResultMessage = message;
         this.tradeResultTime = System.currentTimeMillis();
 
-        // Clear trade slots - server handles returning items if rejected
+        // Clear proposal copies; rejection leaves both real inventories unchanged.
         for (int i = 0; i < sellSlots.length; i++) {
             sellSlots[i] = ItemStack.EMPTY;
         }
@@ -269,7 +258,7 @@ public class VillagerTradeScreen extends Screen {
         // Instructions
         String instructions = heldItem.isEmpty()
             ? "Left-click: pick up stack | Right-click: pick up half | Shift+click: quick move"
-            : "Left-click: place all | Right-click: place one";
+            : "Give slots: place all/one | Inventory: release all/one";
         drawCenteredString(matrixStack, this.font, TextFormatting.GRAY + instructions, centerX, this.height - 25, 0xAAAAAA);
         drawCenteredString(matrixStack, this.font, TextFormatting.GRAY + "Click villager items to specify what you want", centerX, this.height - 12, 0xAAAAAA);
 
@@ -302,7 +291,7 @@ public class VillagerTradeScreen extends Screen {
 
         // Render all 36 inventory slots (9 hotbar + 27 main)
         for (int i = 0; i < 36; i++) {
-            ItemStack item = mc.player.inventory.getItem(i);
+            ItemStack item = availablePlayerItem(i);
             int col = i % 9;
             int row = i / 9;
             int slotX = startX + col * (SLOT_SIZE + 1);
@@ -393,6 +382,8 @@ public class VillagerTradeScreen extends Screen {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) return super.mouseClicked(mouseX, mouseY, button);
 
+        if (tradePending) return super.mouseClicked(mouseX, mouseY, button);
+        if (button != 0 && button != 1) return super.mouseClicked(mouseX, mouseY, button);
         int centerX = this.width / 2;
         int tradeY = getTradeAreaY();
         int tradeSlotSize = SLOT_SIZE + 4;
@@ -432,14 +423,12 @@ public class VillagerTradeScreen extends Screen {
 
             if (checkSlotClick(mouseX, mouseY, slotX, slotY, SLOT_SIZE)) {
                 if (isShiftHeld && heldItem.isEmpty()) {
-                    ItemStack invItem = mc.player.inventory.getItem(i);
+                    ItemStack invItem = availablePlayerItem(i);
                     if (!invItem.isEmpty()) {
                         if (sellSlots[0].isEmpty()) {
                             sellSlots[0] = invItem.copy();
-                            mc.player.inventory.setItem(i, ItemStack.EMPTY);
                         } else if (sellSlots[1].isEmpty()) {
                             sellSlots[1] = invItem.copy();
-                            mc.player.inventory.setItem(i, ItemStack.EMPTY);
                         }
                     }
                 } else {
@@ -493,77 +482,55 @@ public class VillagerTradeScreen extends Screen {
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
-    /** Helper to add an item to the first available buy slot. */
+    /** Reserve at most the unselected stock, including armor and both request slots. */
     private void addToBuySlots(ItemStack toAdd) {
-        if (buySlots[0].isEmpty()) {
-            buySlots[0] = toAdd;
-        } else if (buySlots[0].sameItem(toAdd) && buySlots[0].getCount() < buySlots[0].getMaxStackSize()) {
-            buySlots[0].grow(toAdd.getCount());
-        } else if (buySlots[1].isEmpty()) {
-            buySlots[1] = toAdd;
-        } else if (buySlots[1].sameItem(toAdd) && buySlots[1].getCount() < buySlots[1].getMaxStackSize()) {
-            buySlots[1].grow(toAdd.getCount());
+        int remaining = TradeInventory.count(villagerInventory, toAdd)
+                + TradeInventory.count(villagerArmor, toAdd);
+        for (ItemStack stack : buySlots) if (TradeInventory.matches(stack, toAdd)) remaining -= stack.getCount();
+        remaining = Math.min(remaining, toAdd.getCount());
+        for (int i = 0; i < buySlots.length && remaining > 0; i++) {
+            ItemStack stack = buySlots[i];
+            if (!stack.isEmpty() && !TradeInventory.matches(stack, toAdd)) continue;
+            int n = Math.min(remaining, toAdd.getMaxStackSize() - stack.getCount());
+            if (stack.isEmpty()) {
+                stack = toAdd.copy(); stack.setCount(n); buySlots[i] = stack;
+            } else stack.grow(n);
+            remaining -= n;
         }
     }
 
-    private void handlePlayerInventoryClick(int slotIndex, boolean leftClick, boolean rightClick) {
+    private ItemStack availablePlayerItem(int index) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null) return;
-
-        ItemStack slotItem = mc.player.inventory.getItem(slotIndex);
-
-        if (heldItem.isEmpty()) {
-            // Pick up from inventory
-            if (!slotItem.isEmpty()) {
-                if (leftClick) {
-                    // Pick up entire stack
-                    heldItem = slotItem.copy();
-                    mc.player.inventory.setItem(slotIndex, ItemStack.EMPTY);
-                } else if (rightClick) {
-                    // Pick up half
-                    int half = (slotItem.getCount() + 1) / 2;
-                    heldItem = slotItem.copy();
-                    heldItem.setCount(half);
-                    slotItem.shrink(half);
-                    if (slotItem.isEmpty()) {
-                        mc.player.inventory.setItem(slotIndex, ItemStack.EMPTY);
-                    }
-                }
-            }
-        } else {
-            // Place into inventory
-            if (slotItem.isEmpty()) {
-                if (leftClick) {
-                    mc.player.inventory.setItem(slotIndex, heldItem.copy());
-                    heldItem = ItemStack.EMPTY;
-                } else if (rightClick) {
-                    ItemStack toPlace = heldItem.copy();
-                    toPlace.setCount(1);
-                    mc.player.inventory.setItem(slotIndex, toPlace);
-                    heldItem.shrink(1);
-                    if (heldItem.isEmpty()) heldItem = ItemStack.EMPTY;
-                }
-            } else if (slotItem.sameItem(heldItem)) {
-                // Stack items
-                int canAdd = slotItem.getMaxStackSize() - slotItem.getCount();
-                if (leftClick) {
-                    int toAdd = Math.min(canAdd, heldItem.getCount());
-                    slotItem.grow(toAdd);
-                    heldItem.shrink(toAdd);
-                    if (heldItem.isEmpty()) heldItem = ItemStack.EMPTY;
-                } else if (rightClick && canAdd > 0) {
-                    slotItem.grow(1);
-                    heldItem.shrink(1);
-                    if (heldItem.isEmpty()) heldItem = ItemStack.EMPTY;
-                }
-            } else {
-                // Swap items
-                if (leftClick) {
-                    mc.player.inventory.setItem(slotIndex, heldItem.copy());
-                    heldItem = slotItem.copy();
-                }
-            }
+        ItemStack original = mc.player.inventory.getItem(index);
+        if (original.isEmpty()) return ItemStack.EMPTY;
+        int reserved = 0;
+        for (ItemStack stack : sellSlots) if (TradeInventory.matches(stack, original)) reserved += stack.getCount();
+        if (TradeInventory.matches(heldItem, original)) reserved += heldItem.getCount();
+        // Allocate reservations across matching source slots in order, without editing them.
+        for (int i = 0; i < index; i++) {
+            ItemStack stack = mc.player.inventory.getItem(i);
+            if (TradeInventory.matches(stack, original)) reserved = Math.max(0, reserved - stack.getCount());
         }
+        ItemStack available = original.copy();
+        available.setCount(Math.max(0, original.getCount() - reserved));
+        return available;
+    }
+
+    private void handlePlayerInventoryClick(int slotIndex, boolean leftClick, boolean rightClick) {
+        if (!leftClick && !rightClick) return;
+        if (!heldItem.isEmpty()) {
+            // Returning a proposal to the inventory simply releases its reservation.
+            if (leftClick) heldItem = ItemStack.EMPTY;
+            else {
+                heldItem.shrink(1);
+                if (heldItem.isEmpty()) heldItem = ItemStack.EMPTY;
+            }
+            return;
+        }
+        ItemStack available = availablePlayerItem(slotIndex);
+        if (available.isEmpty()) return;
+        heldItem = available.copy();
+        if (rightClick) heldItem.setCount((heldItem.getCount() + 1) / 2);
     }
 
     private void handleSlotInteraction(ItemStack[] slots, int index, boolean leftClick, boolean rightClick, boolean isSellSlot) {
@@ -597,7 +564,7 @@ public class VillagerTradeScreen extends Screen {
                     heldItem.shrink(1);
                     if (heldItem.isEmpty()) heldItem = ItemStack.EMPTY;
                 }
-            } else if (slotItem.sameItem(heldItem)) {
+            } else if (TradeInventory.matches(slotItem, heldItem)) {
                 int canAdd = slotItem.getMaxStackSize() - slotItem.getCount();
                 if (leftClick) {
                     int toAdd = Math.min(canAdd, heldItem.getCount());
@@ -654,16 +621,14 @@ public class VillagerTradeScreen extends Screen {
 
     @Override
     public void onClose() {
-        // Return held item and sell slot items to player
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player != null) {
-            if (!heldItem.isEmpty()) {
-                mc.player.inventory.add(heldItem);
-                heldItem = ItemStack.EMPTY;
-            }
-            returnSellSlotsToPlayer();
-        }
+        discardSelection();
         super.onClose();
+    }
+
+    @Override
+    public void removed() {
+        discardSelection();
+        super.removed();
     }
 
     @Override

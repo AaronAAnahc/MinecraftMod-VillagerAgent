@@ -4,6 +4,8 @@ Reviewed: 2026-10-23. See the [main loop](execution_pipeline_and_resource_orders
 
 ## LLM runtime boundaries
 
+OpenAI, Anthropic, Ollama, and Gemini response readers use try-with-resources for both success and error responses, closing their streams after reading. API-type commands accept case-insensitive provider names, including Gemini.
+
 `LLMService` wraps asynchronous requests. Player chat, identity generation, inner thoughts, memory compression, villager conversations, and structure generation each have call sites. Skills initiate villager social interaction, with local dialogue and request-failure fallbacks. Apply asynchronous results on the server thread after checking entities and context. Player chat enters through `ChatMessagePacket` and the manager's dialogue handling; `GoalParser` and `AgendaParser` parse the corresponding structured instructions.
 
 `AgentGoal` represents schedulable short-term goals. `LongTermAgenda` and its debt/deal/acquire/generic subclasses represent long-term commitments. Track commitment storage separately from executable goal generation; there is no complete generic loop for proactively decomposing agendas.

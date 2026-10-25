@@ -36,6 +36,8 @@ Bed-driven detection determines the building bounds around a bed. `SleepSkill` c
 
 `BuildingRecord` stores id, seedBed, beds, bounds, sealRadius, roomBlocks, and coarseType. It provides coarse geometry; there is no separate parser for relationships among rooms, doors/windows, and furniture.
 
+Classification uses scan-local bounds to index `blockSolid` and `roomBlock`. World-space coordinates are reserved for the returned building bounds; mixing them would skip cells under the classifier's bounds checks and bias the result toward `house`.
+
 ## Blocking rules
 
 Air, fluids, `Material.PLANT`, `REPLACEABLE_PLANT`, and `BlockTags.CLIMBABLE` are traversable. Glass, leaves, stone/wood, chests, and decorations outside the allowlist count as walls. Material/tag rules are not equivalent to collision shapes or visual transparency.
@@ -45,6 +47,7 @@ Air, fluids, `Material.PLANT`, `REPLACEABLE_PLANT`, and `BlockTags.CLIMBABLE` ar
 - `byId` stores buildings and `byChunk` provides spatial reverse lookup. `claimedBeds`, `rejectedBeds`, and `pending/pendingSet` manage assigned beds, negative caching, and pending scans.
 - The current flood budget is one per tick. Neighbor loading uses `getChunkNow`; an unloaded area causes that bed to leave the queue. A later load/sample must offer it again.
 - Beds discovered inside an existing AABB bind to that record. Block changes intersecting a building remove it and requeue its seed; nearby rejected beds can be reconsidered.
+- Removing a building clears `claimedBeds` for every recorded bed, allowing all of its anchors to be considered again.
 - Bed removal matches recorded beds and their other halves. Explicit removal schedules a rescan if beds remain, or removes the record when the last bed disappears.
 - `pruneStaleBeds` checks beds on a 100-tick throttle and retains unloaded beds; no remaining beds removes the record. Inspect explicit removal and periodic checking separately for their exact updates.
 - Piston, explosion, fluid, and `/setblock /fill /clone` handlers call `markDirty`. Invalidation and new-bed discovery are separate operations; discovery of command-created beds needs separate acceptance testing.

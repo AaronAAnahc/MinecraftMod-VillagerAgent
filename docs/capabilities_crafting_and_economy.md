@@ -35,6 +35,9 @@ Custom recipes cover items without vanilla recipes and similar cases. Profession
 ## Trade and supplies
 
 - `TradeRequestPacket` handles player requests; `VillagerTradeScreen` and `TradeResultPacket` provide UI and results. Prices use item values and personal valuations; completion depends on server checks and real inventory transfer.
+- Cursor and trade slots contain proposal copies; they never debit the player's actual inventory. Clearing, canceling, pressing Escape, or replacing the screen releases selections. Rejection leaves real items untouched and does not create refund copies. Closing after submission does not revoke the server request.
+- Requested quantities are capped by the combined inventory/armor snapshot minus selections in both request slots, with per-slot stack limits and exact item/NBT matching. Player offers likewise reserve only available stock. Server checks remain authoritative if either inventory changes after the snapshot.
+- `TradeInventory.plan` first debits both parties on copies, then inserts receipts. It rejects the entire transaction if stock, NBT, or either inventory's capacity fails. Successful plans are applied on the server thread and synchronized to the player. The trade does not immediately reselect equipment, avoiding overflow when displaced armor cannot fit. The villager must be alive in the player's dimension within eight blocks.
 - `VillagerEconomySystem` scans profession essentials and supply/demand, maintaining stock trades and production needs. Stock deliveries enter `deliver_trade`, executed by `TradeDeliverySkill` with emerald settlement.
 - `VillageSignalBoard` publishes immediate `TRADE_WANT/TRADE_HAVE` signals. `WorkOrderBook` maintains resource demand and leases. Cooperative raw-material supply and stock-trade settlement have separate entry points.
 - `InventoryTransfer` transfers only what fits; full inventories and partial deliveries retain untransferred items.

@@ -139,7 +139,7 @@ public class VillagerAgentManager {
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
                 agent.setLastThinkTime(currentTime);
                 WorkbenchMemory.observe(loaded, (ServerWorld) world);
-                updateAgent(world, agent);
+                updateAgent(world, loaded, agent);
                 CraftingPlan.unlockDependencies(agent, (ServerWorld) world);
                 BrainLog.snapshot(agent, loaded, (ServerWorld) world, "after-think");
             }
@@ -175,7 +175,10 @@ public class VillagerAgentManager {
 
         for (VillagerAgentData agent : agents.values()) {
             if (TradeDemo.isActive(agent.getVillagerId())) continue;
-            // Tick attack cooldown every tick
+            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+            if (villager == null) continue;
+
+            // Tick attack cooldown once per tick in the villager's active world
             agent.tickAttackCooldown();
 
             // Check if this villager is already in a combat action
@@ -189,9 +192,6 @@ public class VillagerAgentManager {
                 // Idle scan — run every COMBAT_SCAN_INTERVAL ticks
                 if (currentTime % COMBAT_SCAN_INTERVAL != 0) continue;
             }
-
-            VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
-            if (villager == null) continue;
 
             performCombatActions(villager, serverWorld, agent);
         }
@@ -663,9 +663,7 @@ public class VillagerAgentManager {
      * Update a single agent's AI (slow tick — goals, restocking, etc.)
      * Combat is handled separately by tickCombat().
      */
-    private static void updateAgent(World world, VillagerAgentData agent) {
-        // Find the actual villager entity
-        VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
+    private static void updateAgent(World world, VillagerEntity villager, VillagerAgentData agent) {
         if (villager == null) {
             return; // Villager not loaded or doesn't exist
         }

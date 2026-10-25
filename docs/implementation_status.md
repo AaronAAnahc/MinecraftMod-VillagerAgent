@@ -19,7 +19,7 @@ Reviewed: 2026-10-23. This document lists source-confirmable scope and limits. T
 
 ## Verification status
 
-The documentation review checked workspace source, configuration, and call sites. It did not run Java builds, launch the game, or test scenarios. See [Debugging and verification](DEBUG_VERIFICATION.md) for automated checks and manual acceptance procedures. Repository logs and simulations require confirmation of their generating version and conditions before they can verify current behavior.
+The PR #1 integration with local main passed offline compilation and all four rule-check programs (376 assertions), plus the trade selection/inventory harness using API doubles. No Minecraft session was run for this integration. See [Debugging and verification](DEBUG_VERIFICATION.md) for exact scope and manual acceptance procedures. Repository logs and simulations require confirmation of their generating version and conditions before they can verify current behavior.
 
 ## Interface constraints for extensions
 

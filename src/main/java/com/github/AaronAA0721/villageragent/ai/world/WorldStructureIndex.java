@@ -151,7 +151,9 @@ public class WorldStructureIndex {
                 if (list.isEmpty()) byChunk.remove(ck);
             }
         }
-        claimedBeds.remove(r.seedBed.asLong());
+        for (BlockPos b : r.beds) {
+            claimedBeds.remove(b.asLong());
+        }
         dirty();
     }
 

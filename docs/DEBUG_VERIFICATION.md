@@ -15,6 +15,14 @@ Run from the project root:
 
 `WorkOrderBookChecks` covers pure Java request merging, exclusive claims, lease renewal/expiry, stock satisfaction, and partial deliveries. `GoalExitPolicyChecks` covers retention, failure exits, and cooldowns. `GoalSchedulerChecks` covers wander fallback, preemption, weighted selection, and farmland-anchor NBT round trips; `check` depends on all three. Compilation checks interfaces/mappings; rule checks cover specified logic. In-game actions, navigation, entity loading, and presentation need separate acceptance tests.
 
+### Player trade regression checks
+
+For the PR #1 integration with local main (`788922d`), `gradlew.bat compileJava check --offline --console=plain` passed all four rule-check programs (376 assertions). The trade harness below also passed. No Minecraft session was run for this integration; prior game-scenario verification notes remain bounded to their stated scope.
+
+Run `python scripts/check_trade_ui.py --jdk "C:/Program Files/Java/jdk-11.0.15.1"` (or provide your own JDK directory). The harness extracts the actual selection, clearing, and closing methods from `VillagerTradeScreen` and runs `TradeInventory` with minimal ItemStack/Minecraft API doubles. It reproduced the old repeated-click overflow and passes after the fix. Cases cover combined slot quantities, stack limits, repeated armor selection, proposal-only offers, repeated cancellation/close, insufficient stock, NBT matching, capacity failures, and exchanges using newly freed slots. These checks do not exercise real networking or rendering.
+
+In Minecraft, verify left/right/Shift selections followed by Clear, Back, Escape, or screen replacement preserve item counts and NBT. Rejection must neither debit nor create items; acceptance must conserve both inventories and synchronize the client. Closing after submission does not cancel an already-sent request. Test repeated submissions, two slots requesting the same item, distinct NBT, inventory plus equipped armor, full inventories, stale villager snapshots, and a villager that unloads or moves beyond eight blocks.
+
 ## Logs and idle diagnosis
 
 Enable `brain_log_enabled` and filter `VillagerBrain` in the actual instance's `logs/latest.log` by villager UUID; trace identically named villagers separately. Start with `SNAPSHOT` activity, running goal, action, position, path, fatigue, farming opportunities, and candidate scores, then inspect:

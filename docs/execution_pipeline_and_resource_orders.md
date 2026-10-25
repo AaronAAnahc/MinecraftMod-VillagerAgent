@@ -60,6 +60,8 @@ Rest becomes eligible at fatigue 40: low daytime weight yields to important work
 
 At 20 TPS, 100 ticks is about five seconds; server lag increases wall-clock time. These are execution frequencies, minimum durations, and retry cooldowns, not daily activity slots.
 
+The agent registry is shared, but thought timestamps and attack cooldowns belong to individual villagers. Each world tick resolves a villager in that dimension before advancing its timestamp or cooldown. This prevents another dimension from consuming its update or decrementing its cooldown again. Slow updates reuse the resolved entity, observe workbenches, maintain goals, and unlock recipe dependencies. Trade demonstrations retain their normal-scheduling/combat exclusions.
+
 The system combines periodic perception with limited event integration. Not every opportunity is pushed as an event, and enum presence does not prove complete game-event wiring. Layered spatial perception remains available, but Utility does not use all of its information.
 
 ### Work priorities

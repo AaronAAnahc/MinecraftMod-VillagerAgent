@@ -364,7 +364,7 @@ public class VillagerAgentCommand {
     }
 
     private static int setApiType(CommandContext<CommandSource> context) {
-        String type = StringArgumentType.getString(context, "type");
+        String type = StringArgumentType.getString(context, "type").toLowerCase(java.util.Locale.ROOT);
         CommandSource source = context.getSource();
 
         if (!type.equals("openai") && !type.equals("anthropic") && !type.equals("ollama") && !type.equals("gemini")) {

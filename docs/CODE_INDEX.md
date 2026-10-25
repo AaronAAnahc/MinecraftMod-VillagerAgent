@@ -115,4 +115,6 @@ Explicit item actions: dropping uses [DropItemSkill](../src/main/java/com/github
 
 Recursive crafting-table recipes and exact memory: [CraftingPlan](../src/main/java/com/github/AaronAA0721/villageragent/ai/CraftingPlan.java), [WorkbenchMemory](../src/main/java/com/github/AaronAA0721/villageragent/ai/WorkbenchMemory.java). Profession POI adapter: [FindJobSiteSkill](../src/main/java/com/github/AaronAA0721/villageragent/ai/behavior/FindJobSiteSkill.java). See [Capabilities, crafting, and economy](capabilities_crafting_and_economy.md) for behavior and scope.
 
-Administrator-directed trading and crafting: [VillagerControlCommands](../src/main/java/com/github/AaronAA0721/villageragent/commands/VillagerControlCommands.java), [TradeDemo](../src/main/java/com/github/AaronAA0721/villageragent/ai/TradeDemo.java)。
+Administrator-directed trading and crafting: [VillagerControlCommands](../src/main/java/com/github/AaronAA0721/villageragent/commands/VillagerControlCommands.java), [TradeDemo](../src/main/java/com/github/AaronAA0721/villageragent/ai/TradeDemo.java).
+
+Player barter stock/capacity planning: [TradeInventory](../src/main/java/com/github/AaronAA0721/villageragent/ai/TradeInventory.java). Selection/transfer regression harness: [check_trade_ui.py](../scripts/check_trade_ui.py). Integration and contributor attribution: [PR #1 integration](pr_1_integration.md).
