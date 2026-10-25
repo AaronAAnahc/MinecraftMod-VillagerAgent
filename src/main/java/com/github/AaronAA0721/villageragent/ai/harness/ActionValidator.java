@@ -13,7 +13,7 @@ import net.minecraftforge.registries.ForgeRegistries;
 
 /**
  * Validates and grounds a {@link DecisionSchema} before it is allowed to drive the villager
- * (plan: 技术力提升计划书 §1.2 — {@code ActionValidator}).
+ * (plan: Technical Capability Improvement Plan §1.2 — {@code ActionValidator}).
  *
  * <p>Three gates, in order:
  * <ol>
@@ -30,7 +30,7 @@ import net.minecraftforge.registries.ForgeRegistries;
  *
  * <p>Any rejection returns a {@link ValidationResult#reason} that is also logged to the
  * {@link DecisionJournal}, so a "crazy" LLM decision is recorded but never executed — this is
- * exactly the "LLM 抽风也不会让村民发疯" guarantee.
+ * exactly the "invalid LLM output cannot cause invalid villager behavior" guarantee.
  */
 public final class ActionValidator {
 

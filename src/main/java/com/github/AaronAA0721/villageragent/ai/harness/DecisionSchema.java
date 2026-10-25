@@ -6,7 +6,7 @@ import com.google.gson.JsonParser;
 import java.util.Locale;
 
 /**
- * The structured decision the LLM must emit (plan: 技术力提升计划书 §1.1 — {@code DecisionSchema}).
+ * The structured decision the LLM must emit (plan: Technical Capability Improvement Plan §1.1 — {@code DecisionSchema}).
  *
  * <pre>{@code {"action":"CRAFT", "target":"minecraft:iron_pickaxe", "rationale":"I need a pickaxe to mine"} }</pre>
  *

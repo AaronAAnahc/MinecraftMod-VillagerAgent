@@ -129,14 +129,18 @@ public class VillagerAgentManager {
 
         for (Map.Entry<UUID, VillagerAgentData> entry : agents.entrySet()) {
             VillagerAgentData agent = entry.getValue();
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
 
             VillagerEntity loaded = findVillagerEntity(world, agent.getVillagerId());
             if (loaded == null || !loaded.isAlive() || loaded.isBaby()) continue;
+            VillagerNeedsSystem.tickFatigue((ServerWorld) world, loaded, agent);
             VillagerNavigationSupport.tick(loaded, (ServerWorld) world, agent);
             // Check this dimension before updating shared timestamps.
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
                 agent.setLastThinkTime(currentTime);
+                WorkbenchMemory.observe(loaded, (ServerWorld) world);
                 updateAgent(world, loaded, agent);
+                CraftingPlan.unlockDependencies(agent, (ServerWorld) world);
                 BrainLog.snapshot(agent, loaded, (ServerWorld) world, "after-think");
             }
             processGoals(loaded, agent);
@@ -149,6 +153,7 @@ public class VillagerAgentManager {
      */
     private static void tickSleepHealing(ServerWorld world) {
         for (VillagerAgentData agent : agents.values()) {
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
             VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
             if (villager == null) continue;
             VillagerActivitySystem.applySleepHealing(world, villager);
@@ -169,6 +174,7 @@ public class VillagerAgentManager {
         ServerWorld serverWorld = (ServerWorld) world;
 
         for (VillagerAgentData agent : agents.values()) {
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
             VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
             if (villager == null) continue;
 
@@ -216,27 +222,28 @@ public class VillagerAgentManager {
             return;
         }
 
-        // ── 2. Don't interrupt ANY other active action with combat scanning ──
-        // Only scan for threats when the villager is truly idle (no current action).
-        // This prevents combat from overriding farming, crafting, gathering, etc.
-        if (current != null) return;
+        if (current != null && current.getActionType() == VillagerAction.ActionType.RALLY) {
+            continueRallyAction(villager, world, agent, current);
+            return;
+        }
+
+        // Threats and village alarms may interrupt ordinary work.
 
         // ── 3. Idle — scan for threats ──
             LivingEntity threat = CombatAction.findNearestThreat(villager, world);
         if (threat != null) {
-            // Fight if we can win the exchange AND are allowed to attack; otherwise flee and shout for help.
-            if (CombatAction.wouldWinSolo(villager, agent, threat)
-                    && CombatAction.mayAttack(villager, agent)) {
-                startCombatAction(villager, agent, threat);
-            } else {
-                rallyOrFlee(villager, world, agent, threat);
-            }
+            // Never fight alone: withdraw and wait for a physically assembled group.
+            rallyOrFlee(villager, world, agent, threat);
             return;
         }
 
+        // Distant calls never wake or divert villagers who should rest. Direct threats above
+        // still trigger escape, so an exhausted villager does not sleep beside an attacker.
+        if (!CombatAction.maySupport(villager, agent)) return;
+
         // ── 4. No direct threat — listen for a rally shout and come help ──
         VillageSignalBoard board = VillageSignalBoard.get();
-        VillageSignalBoard.RallyCall rally = board.nearestRally(villager, VillageSignalBoard.RALLY_RADIUS);
+        VillageSignalBoard.RallyCall rally = board.nearestRally(villager);
         if (rally != null) {
             Entity rallyThreat = world.getEntity(rally.threatUuid);
             if (rallyThreat instanceof LivingEntity && rallyThreat.isAlive()) {
@@ -244,15 +251,53 @@ public class VillagerAgentManager {
                 board.respond(villager, agent, target);
                 if (board.shouldCharge(target) && CombatAction.mayAttack(villager, agent)) {
                     startCombatAction(villager, agent, target);
+                } else if (!CombatAction.mayAttack(villager, agent)) {
+                    // Wounded/unarmed listeners must not approach the hostile rally point.
+                    startFleeAction(villager, agent, target);
                 } else {
-                    // Answer the call: armed & healthy enough → charge (handled above); otherwise run
-                    // to the rally point to pin/distract and keep the alarm alive.
-                    if (villager.isSleeping()) villager.stopSleeping();
-                    villager.getNavigation().moveTo(
-                            rally.lastPos.getX() + 0.5, rally.lastPos.getY(), rally.lastPos.getZ() + 0.5, 0.4);
+                    ActionLifecycle.cancel(agent, villager, world);
+                    agent.suspendRunningGoal();
+                    VillagerAction response = new VillagerAction(VillagerAction.ActionType.RALLY, "Answering village alarm");
+                    response.setTargetEntityId(target.getUUID());
+                    response.setPhase(VillagerAction.ActionPhase.WALKING);
+                    agent.setCurrentAction(response);
+                    agent.setCurrentActivity("rallying");
+                    continueRallyAction(villager, world, agent, response);
                 }
             }
         }
+    }
+
+    private static void continueRallyAction(VillagerEntity villager, ServerWorld world,
+                                            VillagerAgentData agent, VillagerAction action) {
+        Entity entity = action.getTargetEntityId() == null ? null : world.getEntity(action.getTargetEntityId());
+        if (!(entity instanceof LivingEntity) || !entity.isAlive()) {
+            disengageCombat(villager, agent); return;
+        }
+        LivingEntity target = (LivingEntity) entity;
+        if (!CombatAction.maySupport(villager, agent)) {
+            if (villager.distanceToSqr(target) < CombatAction.FLEE_HOLD_DIST * CombatAction.FLEE_HOLD_DIST)
+                startFleeAction(villager, agent, target);
+            else disengageCombat(villager, agent);
+            return;
+        }
+        VillageSignalBoard board = VillageSignalBoard.get();
+        board.respond(villager, agent, target);
+        if (!CombatAction.mayAttack(villager, agent)) {
+            startFleeAction(villager, agent, target); return;
+        }
+        if (board.shouldCharge(target)) {
+            startCombatAction(villager, agent, target); return;
+        }
+        if (villager.isSleeping()) villager.stopSleeping();
+        if (villager.distanceToSqr(target) < CombatAction.FLEE_HOLD_DIST * CombatAction.FLEE_HOLD_DIST)
+            CombatAction.flee(villager, target);
+        else if (villager.distanceToSqr(target) > VillageSignalBoard.RALLY_READY_RADIUS * VillageSignalBoard.RALLY_READY_RADIUS
+                || !villager.canSee(target))
+            villager.getNavigation().moveTo(target, CombatAction.PANIC_SPEED);
+        else villager.getNavigation().stop();
+        action.incrementStuckTicks();
+        if (action.getStuckTicks() > 120) disengageCombat(villager, agent);
     }
 
     /**
@@ -337,6 +382,11 @@ public class VillagerAgentManager {
         }
 
         LivingEntity threat = (LivingEntity) raw;
+        if (!CombatAction.maySupport(villager, agent)
+                && villager.distanceToSqr(threat) >= CombatAction.FLEE_HOLD_DIST * CombatAction.FLEE_HOLD_DIST) {
+            disengageCombat(villager, agent);
+            return;
+        }
         VillageSignalBoard board = VillageSignalBoard.get();
         board.respond(villager, agent, threat); // keep the alarm alive while we kite
 
@@ -350,7 +400,8 @@ public class VillagerAgentManager {
         // keep kiting at a safe distance while the alarm stays alive (pin, not charge).
 
         action.incrementStuckTicks(); // +1 per scan (~0.5 s)
-        if (action.getStuckTicks() > FLEE_GIVE_UP_SCANS) {
+        if (action.getStuckTicks() > FLEE_GIVE_UP_SCANS
+                && villager.distanceToSqr(threat) >= CombatAction.FLEE_HOLD_DIST * CombatAction.FLEE_HOLD_DIST) {
             agent.setCurrentAction(null);
             agent.setCurrentActivity("idle");
             villager.getNavigation().stop();
@@ -398,6 +449,22 @@ public class VillagerAgentManager {
 
         LivingEntity target = (LivingEntity) rawTarget;
         double distSq = villager.distanceToSqr(target);
+
+        // Eligibility is continuous, not just an entry check: stop chasing/striking when hurt
+        // or disarmed, and keep calling for help while withdrawing.
+        if (!CombatAction.mayAttack(villager, agent)) {
+            BrainLog.diagnostic(agent, "combat-retreat", "reason=eligibility health=" + villager.getHealth()
+                    + " fatigue=" + agent.getFatigue() + " night=" + SleepSkill.isNightTime(world.getDayTime()));
+            VillageSignalBoard.get().respond(villager, agent, target);
+            startFleeAction(villager, agent, target);
+            return;
+        }
+        VillageSignalBoard.get().respond(villager, agent, target);
+        if (!VillageSignalBoard.get().shouldCharge(target)) {
+            BrainLog.diagnostic(agent, "combat-retreat", "reason=group_not_ready threat=" + target.getUUID());
+            startFleeAction(villager, agent, target);
+            return;
+        }
 
         // Check if target moved out of chase range — disengage
         if (distSq > CombatAction.CHASE_MAX_DIST * CombatAction.CHASE_MAX_DIST) {
@@ -462,6 +529,7 @@ public class VillagerAgentManager {
         long currentTime = world.getGameTime();
 
         for (VillagerAgentData agent : agents.values()) {
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
             VillagerAction cur = agent.getCurrentAction();
 
             if (cur != null && cur.isGoalDriven()) continue;
@@ -600,7 +668,7 @@ public class VillagerAgentManager {
             return; // Villager not loaded or doesn't exist
         }
 
-        // Daily schedule planner removed (行为生成器统一重构方案): no more fixed time-slot plan.
+        // Daily schedule planner removed (Unified Behavior Generator Refactoring Plan): no more fixed time-slot plan.
         if (world instanceof ServerWorld) {
             ServerWorld sw = (ServerWorld) world;
 
@@ -730,6 +798,7 @@ public class VillagerAgentManager {
         ServerWorld serverWorld = (ServerWorld) world;
 
         for (VillagerAgentData agent : agents.values()) {
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
             // Per-villager cooldown
             if (gameTime - agent.getLastThoughtTick() < THOUGHT_COOLDOWN_TICKS) continue;
 
@@ -873,6 +942,7 @@ public class VillagerAgentManager {
         ServerWorld serverWorld = (ServerWorld) world;
 
         for (VillagerAgentData agent : agents.values()) {
+            if (TradeDemo.isActive(agent.getVillagerId())) continue;
             VillagerEntity villager = findVillagerEntity(world, agent.getVillagerId());
             if (villager == null) continue;
 
@@ -1037,7 +1107,7 @@ public class VillagerAgentManager {
         List<AgentGoal> goals = agent.getGoals();
         AgentGoal current = agent.getRunningGoal();
         // Satisfied job searches must disappear even when their handler is no longer eligible.
-        if (villager.getBrain().getMemory(net.minecraft.entity.ai.brain.memory.MemoryModuleType.JOB_SITE).isPresent()
+        if (com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.hasValidJobSite(villager, world)
                 || agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) {
             goals.removeIf(g -> "find_job_site".equals(g.getGoalType()));
         }
@@ -1088,6 +1158,7 @@ public class VillagerAgentManager {
                         + " positiveButUnrunnable=" + rejected);
             }
             boolean boundary = GoalScheduler.canYieldBetweenActions(current)
+                    && !GoalScheduler.isNonUrgentRest(agent, candidate)
                     && agent.getCurrentAction() == null && !villager.isSleeping()
                     && now - agent.brain().goalStartedTick >= 200;
             if (candidate != null && candidate != current
@@ -1095,7 +1166,7 @@ public class VillagerAgentManager {
                 AgentGoal previous = current;
                 if (previous != null) {
                     ActionLifecycle.cancel(agent, villager, world);
-                    previous.setCooldownUntilTick(now + 100);
+                    previous.setCooldownUntilTick(now + Math.max(100, previous.getMinimumExitCooldownTicks()));
                 }
                 current = candidate;
                 current.setSuspended(false);

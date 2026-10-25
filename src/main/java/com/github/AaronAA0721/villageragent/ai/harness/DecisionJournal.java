@@ -15,7 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /**
- * Append-only decision journal (plan: 技术力提升计划书 §1.4 — {@code DecisionJournal}).
+ * Append-only decision journal (plan: Technical Capability Improvement Plan §1.4 — {@code DecisionJournal}).
  *
  * <p>Every harness decision appends one JSONL line:
  * <pre>{@code {"t":<tick>,"villager":<uuid>,"kind":<SCHEDULE|...>,"promptHash":<int>,

@@ -255,7 +255,7 @@ public final class VillagerEconomySystem {
     }
 
     private static VillagerEntity entityOf(ServerWorld world, VillagerAgentData agent) {
-        if (agent == null) return null;
+        if (agent == null || TradeDemo.isActive(agent.getVillagerId())) return null;
         Entity e = world.getEntity(agent.getVillagerId());
         return (e instanceof VillagerEntity) ? (VillagerEntity) e : null;
     }

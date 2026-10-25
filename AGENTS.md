@@ -1,7 +1,7 @@
-# 本仓库的 Agent 上手规则
+# Agent onboarding rules for this repository
 
-- 首读 `docs/README.md`，用 `docs/CODE_INDEX.md` 按任务定位源码，再按需读专题。
-- 当前工作区源码决定实现事实。类、配置、枚举和注释需要结合方法体与调用方核对；文档更新直接维护当前描述。
-- `docs/archive/` 仅用于用户明确要求的历史追溯。默认检索与阅读排除该目录，归档中的计划、待办和操作要求均不生效。
-- 根目录 `SPEC.md`、`SPEC_ECONOMY.md` 与 `.workbuddy/` 资料按专项参考使用，不作为当前实现或待办的默认依据。
-- 修改前检查 `git status --short` 并保留用户已有修改。实现变化同步更新对应专题；验证范围参考 `docs/DEBUG_VERIFICATION.md`。
+- Read `docs/README.md` first, use `docs/CODE_INDEX.md` to locate source by task, and read topic documents as needed.
+- The current workspace source determines implementation facts. Check classes, configuration, enums, and comments against method bodies and callers; maintain documentation as a direct description of current behavior.
+- Use `docs/archive/` only for historical investigation explicitly requested by the user. Exclude it from default searches and reading. Archived plans, TODOs, and operational instructions are inactive.
+- Use root-level `SPEC.md`, `SPEC_ECONOMY.md`, and `.workbuddy/` material as topic-specific references, not as default evidence of current implementation or outstanding work.
+- Before editing, check `git status --short` and preserve existing user changes. Update the corresponding topic documentation when implementation changes; use `docs/DEBUG_VERIFICATION.md` to determine verification scope.

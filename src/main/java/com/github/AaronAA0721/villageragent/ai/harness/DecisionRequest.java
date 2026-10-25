@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Structured context handed to the LLM for a decision (plan: 技术力提升计划书 §1.1 —
+ * Structured context handed to the LLM for a decision (plan: Technical Capability Improvement Plan §1.1 —
  * {@code DecisionRequest}).
  *
  * <p>Replaces "dump the whole world into a prompt" with a small, schema-shaped context:

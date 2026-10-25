@@ -5,7 +5,7 @@ import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
 /**
  * Predefined reasons a todo (goal) failed to start or continue.
  *
- * <p>Per the failure-driven re-planning design ({@code docs/失败驱动重规划.md}): every goal that
+ * <p>Per the failure-driven re-planning design ({@code docs/failure_recovery.md}): every goal that
  * cannot start / continue must record one of these instead of silently skipping or hard-coding a
  * fallback. {@code FailureRecoveryPlanner} then maps a reason to a concrete recovery action.
  *

@@ -7,6 +7,8 @@ import java.util.Set;
 
 /** Transient execution/perception state; all timestamps are server game ticks. */
 public final class BrainRuntime {
+    /** Vanilla fluid jump task survives goal switches; the intercepted Brain no longer ticks it. */
+    public final net.minecraft.entity.ai.brain.task.SwimTask swim = new net.minecraft.entity.ai.brain.task.SwimTask(0.8F);
     public boolean nightRest;
     public long socialUntilTick;
     public long lastNeedsTick = -1;

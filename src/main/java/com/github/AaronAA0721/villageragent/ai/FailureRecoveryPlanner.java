@@ -14,7 +14,7 @@ import java.util.Collections;
 /**
  * The failure-driven re-planner — the half that turns a blocked/failed goal into new sub-goals.
  *
- * <p>Per {@code docs/失败驱动重规划.md} (v2 simplification): <b>missing tool and missing item are
+ * <p>Per {@code docs/failure_recovery.md} (v2 simplification): <b>missing tool and missing item are
  * the same problem</b>. Both surface as a {@link FailureReason#MISSING_ITEM} with the item's
  * registry name in {@link Failure#itemId}, and both run the <em>same</em> three-step recovery
  * chain:
@@ -71,7 +71,7 @@ public final class FailureRecoveryPlanner {
         if (f.reason == FailureReason.NO_JOB_SITE) {
             // The villager's workstation vanished (destroyed) mid-goal. Recovery = find a new one,
             // not "give up". This closes the loop that used to leave an employed villager standing
-            // still with a dead restock/craft goal (行为生成器统一重构方案 §四).
+            // still with a dead restock/craft goal (Unified Behavior Generator Refactoring Plan section 4).
             recoverJobSite(agent, failedGoal, villager, world);
             return;
         }
@@ -94,7 +94,18 @@ public final class FailureRecoveryPlanner {
         }
 
         // MISSING_ITEM — run the unified three-step chain.
-        recoverMissingItem(agent, villager, world, f.itemId, f.quantity, 0);
+        String missingItem = f.itemId;
+        if ("minecraft:iron_hoe".equals(missingItem)
+                && ("farm".equals(failedGoal.getGoalType()) || "till".equals(failedGoal.getGoalType()))) {
+            // Field work accepts any hoe. Prefer a known tool that current stock can actually produce.
+            for (String hoe : new String[] {"minecraft:iron_hoe", "minecraft:stone_hoe", "minecraft:wooden_hoe"}) {
+                if (!agent.getUnlockedRecipes().contains(hoe)
+                        && !SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(), agent.getProfession(), hoe)) continue;
+                net.minecraft.item.Item item = net.minecraftforge.registries.ForgeRegistries.ITEMS.getValue(new ResourceLocation(hoe));
+                if (CraftingPlan.build(world, agent.getInventory(), item, 1).complete) { missingItem = hoe; break; }
+            }
+        }
+        recoverMissingItem(agent, villager, world, missingItem, f.quantity, 0);
     }
 
     /**
@@ -144,12 +155,13 @@ public final class FailureRecoveryPlanner {
                 }
             }
         }
-        if (found) return; // an existing todo will supply the item — just prioritise it
+        // Prefer a known crafting route over a restock goal that only posts demand.
 
         // ── Step 2: can the villager craft it? ──
         ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, itemId);
         boolean craftable = recipe != null
-                && SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(), agent.getProfession(), itemId);
+                && (agent.getUnlockedRecipes().contains(itemId)
+                    || SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(), agent.getProfession(), itemId));
         if (craftable) {
             AgentGoal existing = findGoalByTarget(agent, "craft", itemId);
             if (existing != null) {
@@ -166,6 +178,8 @@ public final class FailureRecoveryPlanner {
             }
             return; // craft goal will produce the item
         }
+
+        if (found) return;
 
         // ── Step 3: trade — broadcast a WANT, and recurse on missing materials ──
         postTradeWant(villager, agent, itemId, qty);

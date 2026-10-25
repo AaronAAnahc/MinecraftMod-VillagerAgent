@@ -309,14 +309,14 @@ public class VillagerAgentData {
     }
 
     /**
-     * 职业主能力基线：旧存档（mod 版本更新前）可能缺能力数据或为 0，低于此值的村民会在
-     * {@link #healProfessionCapability()} 里被补到基线。与原 claim 的 +3 一致。
+     * Primary profession capability baseline: older saves may lack capability data or contain zero. Villagers below it are raised by
+     * {@link #healProfessionCapability()} to this baseline, matching the original claim bonus of +3.
      */
     private static final int PROFESSION_BASELINE_LEVEL = 3;
 
     /**
-     * 能力自愈：若当前职业对应的主能力低于 {@link #PROFESSION_BASELINE_LEVEL}（旧存档缺失/为 0，
-     * 或职业刚领但能力停在 0），补到基线。幂等、只升不降，避免旧村民被所有带能力门控的技能挡掉。
+     * Capability repair: if the current profession's primary capability is below {@link #PROFESSION_BASELINE_LEVEL} (missing/zero in older saves,
+     * or still zero after assignment), raise it to the baseline. Idempotent and increase-only, so older villagers retain access to capability-gated skills.
      */
     public void healProfessionCapability() {
         CapabilityId main = CapabilityId.mainForProfession(profession);
@@ -1521,7 +1521,7 @@ public class VillagerAgentData {
             personalValueTable = pv;
         }
 
-        // 能力自愈：旧存档（mod 版本更新前）可能缺主能力数据，补到职业基线，避免能力门控挡掉所有技能。
+        // Repair missing primary capability data in older saves to the profession baseline so capability gates do not block every skill.
         healProfessionCapability();
     }
 }

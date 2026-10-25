@@ -17,9 +17,15 @@ Trade-screen selections are proposal copies. Clearing, canceling, or closing a p
 
 Both request slots share the villager inventory/armor stock limit; each slot respects its stack limit. Server checks remain authoritative if the client snapshot becomes stale. `TradeInventory.plan` debits both parties on copies before crediting either party, and returns failure without mutation when quantities, NBT, or capacity do not match. Successful plans are applied on the server thread and player inventory changes are synchronized.
 
+## Merge of local main (`788922d`)
+
+The newer local main supplies the English documentation, recursive crafting/workbench memory, trade demonstrations, and later behavior fixes. Its two conflicting manager hunks retain workbench observation and dependency unlocking around `updateAgent(world, loaded, agent)`, and preserve the trade-demo exclusion before the dimension-checked attack cooldown. Main's per-tick fatigue sampling is retained alongside elapsed-time hunger checks; the previous slow-update fatigue integration is superseded. The player trade fixes remain unchanged.
+
 ## Verification
 
 Before merging the newer local main, `gradlew.bat compileJava check --offline --console=plain` passed: 86 goal-exit, 225 scheduling, 44 task-execution, and 21 order assertions. `scripts/check_trade_ui.py` reproduces the old repeated-click stock overflow and checks the fixed selection and transfer logic with lightweight API doubles. Minecraft interaction and network acceptance tests remain necessary.
+
+After merging local main, the same full offline build/check passed again with all 376 assertions, and the trade regression harness passed. Conflict-marker and whitespace checks passed; all 20 active root/docs Markdown files are English and their local Markdown links resolve. Historical archive content is retained from main rather than rewritten as current documentation.
 
 ## Attribution when publishing
 

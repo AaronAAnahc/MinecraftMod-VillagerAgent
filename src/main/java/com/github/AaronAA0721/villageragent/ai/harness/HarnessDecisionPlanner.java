@@ -11,7 +11,7 @@ import net.minecraft.world.server.ServerWorld;
 import java.util.UUID;
 
 /**
- * Drives the harness decision loop end-to-end (plan: 技术力提升计划书 §1 / P1).
+ * Drives the harness decision loop end-to-end (plan: Technical Capability Improvement Plan §1 / P1).
  *
  * <p>{@link #decideDailyGoal} is the concrete "take over one step of the daily decision" hook:
  * build a {@link DecisionRequest} from the villager's live state, ask the LLM through

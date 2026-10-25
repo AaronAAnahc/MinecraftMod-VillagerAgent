@@ -19,7 +19,7 @@ public class ConverseSkill implements VillagerSkill {
 
     @Override public String id() { return "converse"; }
     @Override public CapabilityId requiredCapability() { return CapabilityId.SOCIAL; }
-    @Override public int minLevel() { return 1; } // "基本聊天"
+    @Override public int minLevel() { return 1; } // "basic conversation"
 
     @Override
     public boolean canHandle(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {

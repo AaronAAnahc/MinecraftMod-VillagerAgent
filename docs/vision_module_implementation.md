@@ -1,37 +1,37 @@
-# 空间感知与记忆
+# Spatial perception and memory
 
-核对日期：2026-10-23。总入口为 `VillagerVisionSystem.buildEnvironmentSummary`；建筑几何与索引见 [床与建筑算法](bed_room_search_implementation.md)。
+Reviewed: 2026-10-23. The entry point is `VillagerVisionSystem.buildEnvironmentSummary`; see [Beds and building algorithms](bed_room_search_implementation.md) for geometry and indexing.
 
-## 三层感知
+## Three perception layers
 
-| 层 | 数据与入口 | 消费方式 |
+| Layer | Data and entry point | Consumers |
 |---|---|---|
-| Far | `ChunkContentSampler` → 每村民的 `ChunkMemory` | 标签、资源锚点和访问时间用于环境摘要、知识传播及农田导航 |
-| Mid | 每维度 `WorldStructureIndex` → `BuildingRecord` | `queryNear/getAt` 提供建筑包围盒、类型和床集合 |
-| Near | `FrustumCuller` + `DetailedViewRecorder` | 按朝向/距离过滤显著方块与实体，形成近景描述 |
+| Far | `ChunkContentSampler` → each villager's `ChunkMemory` | Tags, resource anchors, and visit times support environment summaries, sharing, and farm navigation |
+| Mid | Per-dimension `WorldStructureIndex` → `BuildingRecord` | `queryNear/getAt` provide building bounds, types, and bed sets |
+| Near | `FrustumCuller` + `DetailedViewRecorder` | Filter salient blocks and entities by orientation/distance for near-field descriptions |
 
-慢更新维护区块记忆，环境摘要刷新间隔为 1200 ticks。摘要还包含位置、时间、天气、生物群系等信息；玩家对话路径可构造即时感知。Utility 的直接输入还包括 `OpportunitySensor` 的局部农业机会与邻居信息；环境摘要的全部信息并非都会参与评分。
+Slow updates maintain chunk memory; environment summaries refresh every 1200 ticks. Summaries also include position, time, weather, and biome. Player dialogue can build immediate perception. Utility also directly consumes local farming opportunities and neighbors from `OpportunitySensor`; it does not score every piece of summary information.
 
-## 区块数据
+## Chunk data
 
-`ChunkMemory` 存 `ChunkTag` 和 `ChunkFeature` 位掩码、每类特征的一个代表坐标、粗粒度方块分类计数、实体分类计数、访问时间、显著性、已知建筑 ID。实体计数带观察时间。代表位置压缩为 localX(4 位)、localZ(4 位)、Y(8 位)，适配本项目 1.16.5 高度范围。
+`ChunkMemory` stores `ChunkTag` and `ChunkFeature` bitmasks, one representative coordinate per feature type, coarse block-category counts, entity-category counts, visit time, salience, and known building IDs. Entity counts have observation timestamps. Representative positions pack localX (4 bits), localZ (4 bits), and Y (8 bits), matching this project's 1.16.5 height range.
 
-`ChunkContentSampler` 的采样结果折叠成上述摘要。建筑实体记录由共享索引持有，村民记忆引用建筑 ID。`VillagerAgentData` 管理容量与驱逐；维护容量时查看其具体排序和保存实现。
+`ChunkContentSampler` folds samples into these summaries. The shared index owns building records, while villager memories reference IDs. `VillagerAgentData` manages capacity and eviction; inspect its actual sorting and persistence methods when changing capacity handling.
 
-资源情报可在村民间传播，规则见 [事件与知识传播](事件与知识传播.md)。自然语言记忆与会话历史由 `VillagerAgentData` 保存；自然语言记忆具备 LLM 压缩路径。importance/recency/relevance 综合检索尚无完整运行管线。
+Villagers can share resource intelligence; see [Events and knowledge sharing](events_and_knowledge_sharing.md). `VillagerAgentData` stores natural-language memories and conversation history, with an LLM compression path. There is no complete importance/recency/relevance retrieval pipeline.
 
-## 农田记忆与执行
+## Farm memory and execution
 
-`FarmMemory` 在有农业能力的村民感知更新中，每 200 ticks 扫描附近 12 格、上下 3 格的已加载区域，把农田存为 `ChunkFeature.FARMLAND` 锚点（每区块一个，随 ChunkMemory 保存）。未成熟作物下面的农田也会记录。仅被邻区标记为 KNOWN 的区块，第一次进入仍会执行采样。
+During perception updates for villagers with farming capability, `FarmMemory` scans loaded areas within 12 horizontal blocks and three vertically every 200 ticks. It saves farmland as a `ChunkFeature.FARMLAND` anchor, one per chunk, persisted with ChunkMemory. Farmland under immature crops is recorded too. A chunk marked KNOWN only through a neighboring chunk is still sampled on first entry.
 
-农业 Utility 同时考虑本地机会和可重访农田。`FarmSkill` 优先处理附近维护工作；没有本地维护工作时，在开垦前选择 128 格内已加载的记忆农田，进入 `FIELD_TRAVEL` 阶段。到达后固定本轮作业中心，持续检查中心水平 ±12 格、上下 ±3 格内的已加载区域；按捡拾农作物掉落、收割成熟作物、播种、修复翻地、符合水源条件的开垦循环执行。翻地只选择上方为空的地表。收割产生真实掉落，再通过独立捡拾动作入包；不依赖被动拾取开关。每个子动作后间隔 20 ticks 再检查，不以步数结束，也不在子动作之间让普通任务抢占。成功操作刷新无进展计时，持续作业可以超过 2400 ticks；真正无进展仍受超时保护，紧急目标仍能抢占。
+Farming Utility considers local opportunities and revisitable farms. `FarmSkill` prioritizes nearby maintenance. Without local maintenance, it selects loaded remembered farmland within 128 blocks before reclamation and enters `FIELD_TRAVEL`. On arrival it fixes the session center and checks loaded areas within horizontal ±12 and vertical ±3, cycling through crop-drop collection, mature harvesting, planting, repair tilling, and water-qualified reclamation. Tilling requires air above the surface. Harvesting creates real drops collected by a separate action, independently of passive pickup. Ordinary child steps are two ticks apart, with no ordinary preemption between children. Real progress refreshes the inactivity timer, allowing work beyond 2400 ticks, but the entire session, including travel, is capped at 6000 ticks. Genuine stalls still time out, and urgent goals can preempt. See [the execution pipeline](execution_pipeline_and_resource_orders.md) for patch planning, path budgets, and cooldowns.
 
-本轮不可达或操作失败的位置记入临时排除集合，继续处理其他位置。缺种子/工具时先完成其他可执行工作，再以 BLOCKED 退出请求补给；没有可执行工作则 SUCCESS。满背包的掉落物保留在世界中。退出或抢占时清理本轮中心和排除集合；下次会重新检查。不会跨未加载区块强制加载地图，也不会把旧锚点当成成熟作物证据。
+Unreachable or failed positions enter a session-local exclusion set while other work continues. Missing seeds/tools allow remaining feasible work to finish before a `BLOCKED` exit requests supplies; no executable work yields `SUCCESS`. Drops remain in the world when inventory is full. Exit or preemption clears the center and exclusions so the next session checks again. The system neither force-loads chunks nor treats old anchors as evidence of mature crops.
 
-检查过或导航失败的农田锚点暂缓 1200 ticks 重访；到达后发现锚点方块已消失则清除该特征，后续观察可重新记录。重访冷却为运行态，锚点持久化。未知农田仍需通过局部观察或进入区块发现。
+Checked anchors and navigation failures defer revisits for 1200 ticks. If the anchor block is gone on arrival, the feature is removed; later observation can record it again. Revisit cooldown is runtime-only; anchors persist. Unknown farmland still requires local observation or entering its chunk.
 
-## 近景与限制
+## Near-field perception and limitations
 
-视锥测试采用方向、视角和距离计算，墙体遮挡需要独立射线判断，当前不能把“视锥内”直接解释为“无遮挡可见”。远景代表坐标表达资源线索；采集执行仍需现场确认方块、工具、加载状态与路径。粗粒度实体计数也不能当成实体持续位置。
+Frustum checks use direction, angle, and distance. Wall occlusion requires separate ray checks: inside the frustum does not imply unobstructed visibility. Far-field representative positions are resource clues; gathering must confirm blocks, tools, loading, and paths on site. Coarse entity counts are not persistent entity locations.
 
-调试使用 `DebugSync` → `DebugDataPacket` → `DebugOverlay`。建筑盒、种子和距离场是几何观测；行为是否完成应结合 `VillagerBrain` 日志与世界状态验证，见 [调试手册](DEBUG_VERIFICATION.md)。
+Debugging uses `DebugSync` → `DebugDataPacket` → `DebugOverlay`. Building boxes, seeds, and distance fields are geometry observations. Verify completed behavior using `VillagerBrain` logs and world state; see [Debugging and verification](DEBUG_VERIFICATION.md).

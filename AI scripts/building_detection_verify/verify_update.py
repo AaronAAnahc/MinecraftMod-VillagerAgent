@@ -1,15 +1,16 @@
 """
-verify_update.py — 等效验证 WorldStructureIndex 的"更新/失效"机制。
+verify_update.py — model WorldStructureIndex update/invalidation behavior.
 
-目的：复现用户报的两个现象
-  (1) 床拆掉了，房屋检测不更新
-  (2) 房屋内场景变化了，检测不更新
+Reproduce two reported symptoms:
+  (1) removing a bed does not update building detection;
+  (2) changing a building interior does not update detection.
 
-只移植"缓存 + 失效钩子"逻辑（WorldStructureIndex 的 byId/byChunk/claimed/
-rejected/pending 以及 onBlockChanged/onBedRemoved/markDirty/processPending），
-locate_bed 用一个最小化的"从床洪泛空气求 AABB"替身，重点在于看缓存会不会变。
+Only cache/invalidation hooks are ported: byId/byChunk/claimed/rejected/pending
+and onBlockChanged/onBedRemoved/markDirty/processPending. locate_bed is a minimal
+bed-seeded air-flood AABB substitute; the focus is whether the cache changes.
+This diagnostic model does not establish parity with the current Java algorithm.
 
-运行: python verify_update.py
+Run: python verify_update.py
 """
 from collections import deque, defaultdict
 
@@ -18,7 +19,7 @@ MASK = 0x7FFFFFFFFFFFFFFF
 
 
 def maskbed(bed):
-    # BuildingLocator.locateBed 里 id 的计算方式
+    # ID calculation used by BuildingLocator.locateBed
     return bed.as_long() & MASK
 
 
@@ -54,10 +55,10 @@ class BuildingRecord:
 
 
 class World:
-    """极简世界：blocks[(x,y,z)] = type 字符串；'bed' 表示床。"""
+    """Minimal world: blocks[(x,y,z)] = type string; 'bed' denotes a bed."""
     def __init__(self):
         self.blocks = {}
-        self.loaded = set()  # 已加载的 chunk 坐标 (cx,cz)
+        self.loaded = set()  # Loaded chunk coordinates (cx,cz)
     def set_block(self, p, t):
         self.blocks[(p.x, p.y, p.z)] = t
     def get_block(self, p):
@@ -76,10 +77,10 @@ def has_sky_above(world, p):
 
 
 def locate_bed(world, bed):
-    """替身：从床洪泛 6-连通空气，求可达空气的 AABB。
-    返回 BuildingRecord，或 None（床被埋 / 无空气）。
-    若可达空气触到天空，coarseType='open'（与大气连通）。
-    与真实 BuildingLocator 一致，扫描被限制在床周围 ±16 盒内（否则门会漏到无穷远）。
+    """Substitute: flood six-connected air from the bed and bound reachable air.
+    Return BuildingRecord, or None for a buried bed/no air.
+    If reachable air touches the sky, coarseType='open' (connected to atmosphere).
+    This model limits scanning to a box within 16 blocks of the bed to bound leakage through doors.
     """
     if not world.is_bed(bed):
         return None
@@ -178,7 +179,7 @@ class WorldStructureIndex:
             self.pendingSet.discard(k); self.pending.remove(k)
 
     def markDirty(self, region):
-        # 注意：原版这个方法定义了，但全工程没有任何调用点（dead code）
+        # In the version modeled here, this method had no callers (dead code).
         hit = [r for r in self.byId.values()
                if (r.boundsMin.x <= region[0][0] <= r.boundsMax.x or region[0][0] <= r.boundsMin.x <= region[1][0])
                and (r.boundsMin.z <= region[0][1] <= r.boundsMax.z or region[0][1] <= r.boundsMin.z <= region[1][1])]
@@ -192,11 +193,11 @@ class WorldStructureIndex:
             key = self.pending.popleft()
             self.pendingSet.discard(key)
             bed = BlockPos.of(key)
-            # 周边 33x33 盒必须加载，否则直接丢弃（原版行为）
+            # Require the surrounding 33x33 box loaded; otherwise discard, as in the modeled version.
             cx0, cx1 = (bed.x - 16) >> 4, (bed.x + 16) >> 4
             cz0, cz1 = (bed.z - 16) >> 4, (bed.z + 16) >> 4
             if not all((cx, cz) in world.loaded for cx in range(cx0, cx1+1) for cz in range(cz0, cz1+1)):
-                continue  # 丢弃，不再入队 → 建筑保持"已删除/陈旧"
+                continue  # Discard without requeueing, leaving the building removed/stale.
             if not world.is_bed(bed):
                 self.onBedRemoved(bed); continue
             if key in self.claimedBeds or self.getAt(bed) is not None:
@@ -209,7 +210,7 @@ class WorldStructureIndex:
 
 
 def build_house(world, ox, oy, oz, hx, hy, hz, with_bed=True):
-    """造一个长方体封闭房子：墙+地板+天花板，留 1x2 门（默认西侧 z==oz）。"""
+    """Build an enclosed cuboid with walls, floor, ceiling, and a 1x2 doorway at z==oz by default."""
     for x in range(ox, ox+hx+1):
         for y in range(oy, oy+hy+1):
             for z in range(oz, oz+hz+1):
@@ -306,7 +307,7 @@ def E():
         for x in range(2, 7):
             w.set_block(BlockPos(x, y, 8), "air")
             w.set_block(BlockPos(x, y, 9), "wall")
-    # 活塞移动不触发 BlockEvent，且 markDirty() 从未被调用（死代码）
+    # This modeled piston move emits no BlockEvent and never calls markDirty (dead code in that version).
     idx.processPending(w, 1)
     after = find_building(idx)
     same = (after.boundsMax.z == before.boundsMax.z)

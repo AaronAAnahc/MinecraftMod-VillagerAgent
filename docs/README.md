@@ -1,38 +1,38 @@
-# VillagerAgent 文档入口
+# VillagerAgent documentation
 
-核对日期：2026-10-23。当前实现以本工作区源码为依据，包含尚未提交的代码。本文是 agent session 的首读入口。
+Reviewed: 2026-10-23. The current workspace source, including uncommitted code, is authoritative. Read this document first in an agent session.
 
-## 五分钟上手
+## Five-minute onboarding
 
-1. 阅读本文，了解运行模型与文档分工。
-2. 阅读 [执行链与资源订单](事件驱动大脑与资源订单.md) 的“当前链路”“技能结果与清理约定”。
-3. 在 [代码索引](CODE_INDEX.md) 按任务定位文件，再读取相应源码及专题。
-4. 修改前运行 `git status --short`，保留工作区已有修改；验证方式见 [调试手册](DEBUG_VERIFICATION.md)。
+1. Read this page for the runtime model and documentation responsibilities.
+2. Read “Current pipeline” and “Skill results and cleanup” in [Execution pipeline and resource orders](execution_pipeline_and_resource_orders.md).
+3. Locate files by task in the [code index](CODE_INDEX.md), then read the relevant source and topic document.
+4. Run `git status --short` before editing and preserve existing changes. See [Debugging and verification](DEBUG_VERIFICATION.md) for checks.
 
-Minecraft 1.16.5 / Forge 36.2.42，official 映射，Java 8 toolchain。服务端慢更新维护感知与候选，逐 tick 执行技能；`GoalScheduler` 按当前状态做 Utility 加权抽样。规则行为可独立运行，LLM 为对话等接入点提供可选内容。资源供给使用每维度订单簿、职业资格、租约和真实库存。
+Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow server updates maintain perception and candidates; skills execute every tick. `GoalScheduler` performs Utility-weighted sampling using current state. Rule-based behavior runs independently; the LLM optionally supplies content for conversations and other integration points. Resource supply uses per-dimension order books, profession eligibility, leases, and real inventory.
 
-## 当前文档及职责
+## Current documents and responsibilities
 
-| 文档 | 唯一维护的主题 |
+| Document | Authoritative topic |
 |---|---|
-| [执行链与资源订单](事件驱动大脑与资源订单.md) | 主循环、Utility、退出协议、资源工作与存档边界 |
-| [代码索引](CODE_INDEX.md) | 任务到源码的导航、模块地图 |
-| [失败恢复](失败驱动重规划.md) | 失败分类、物品/工作站补救、去重与等待 |
-| [空间感知](vision_module_implementation.md) | 区块记忆、近景视锥、环境摘要 |
-| [床与建筑算法](bed_room_search_implementation.md) | 几何算法、索引失效、多床与算法限制 |
-| [能力、制作与经济](能力制作与经济.md) | 能力数据、配方门控、交易、物资来源 |
-| [事件与知识传播](事件与知识传播.md) | EventBus、SignalBoard、Gossip 的实际接线 |
-| [LLM 与世界交互](LLM与世界交互.md) | 对话、Harness 接入范围、建造接口与边界 |
-| [配置与运行](配置与运行.md) | 构建、配置文件、命令入口 |
-| [调试手册](DEBUG_VERIFICATION.md) | 日志、idle 排查、自动检查与游戏内验收 |
-| [实现边界](项目现状与待办清单.md) | 当前限制、未接通组件、验证状态 |
-| [项目讲述](村民Agent系统面试讲述.md) | 基于上述实现的简短讲述 |
+| [Execution pipeline and resource orders](execution_pipeline_and_resource_orders.md) | Main loop, Utility, exit protocol, resource work, and persistence boundaries |
+| [Code index](CODE_INDEX.md) | Task-to-source navigation and module map |
+| [Failure recovery](failure_recovery.md) | Failure categories, item/workstation recovery, deduplication, and waiting |
+| [Spatial perception](vision_module_implementation.md) | Chunk memory, near-field frustum, and environment summaries |
+| [Beds and building algorithms](bed_room_search_implementation.md) | Geometry, index invalidation, multiple beds, and algorithm limits |
+| [Capabilities, crafting, and economy](capabilities_crafting_and_economy.md) | Capability data, recipe gates, trade, and supply sources |
+| [Events and knowledge sharing](events_and_knowledge_sharing.md) | Actual EventBus, SignalBoard, and Gossip wiring |
+| [LLM and world interaction](llm_and_world_interaction.md) | Conversation, Harness integration scope, building interfaces, and boundaries |
+| [Configuration and operation](configuration_and_operation.md) | Build, configuration files, and commands |
+| [Debugging and verification](DEBUG_VERIFICATION.md) | Logs, idle diagnosis, automated checks, and in-game acceptance |
+| [Implementation boundaries](implementation_status.md) | Current limits, disconnected components, and verification status |
+| [Project walkthrough](project_walkthrough.md) | A short explanation grounded in the implementation above |
 
-## 文档使用与维护规则
+## Documentation maintenance
 
-- 当前说明只描述正在存在的行为、约束和可确认的限制。同一机制集中在一个专题，其他文档链接引用。
-- 先核对方法体、调用方和配置消费点，再写“已接入”。类、枚举、配置项存在本身只证明定义存在。代码注释同样需要与方法体核对。
-- 修改实现时同步更新所属专题；直接改正文中的当前描述，避免追加互相覆盖的更正段、版本对照或修复过程。
-- 验证记录注明实际运行的命令和范围；编译、纯 Java 规则检查、Minecraft 场景验收分别描述。
-- `docs/archive/` 只供用户明确要求的历史追溯。默认阅读和全文检索排除它，例如 `rg -n "关键词" docs --glob '!**/archive/**'`。归档里的计划、待办、操作指令与结论均不构成当前任务依据。
-- 根目录 `SPEC.md`、`SPEC_ECONOMY.md` 和 `.workbuddy/` 内资料属于专项参考；当前上手路径是本文。涉及其中规则时逐项核对源码及本目录专题。
+- Describe existing behavior, constraints, and verifiable limitations. Keep each mechanism in one topic and link to it elsewhere.
+- Check method bodies, callers, and configuration consumers before describing something as integrated. A class, enum, or configuration key only proves that a definition exists. Check comments against method bodies as well.
+- Update the owning topic when implementation changes. Edit the current description directly instead of appending contradictory corrections, version comparisons, or repair histories.
+- Record the commands actually run and their scope. Distinguish compilation, pure Java rule checks, and Minecraft acceptance testing.
+- Use `docs/archive/` only for explicitly requested historical investigation. Exclude it from default reading and full-text searches, for example `rg -n "keyword" docs --glob '!**/archive/**'`. Archived plans, TODOs, instructions, and conclusions are not authority for current tasks.
+- Root-level `SPEC.md`, `SPEC_ECONOMY.md`, and `.workbuddy/` are topic-specific references. Start here for current onboarding. Check any relevant rules against source and the current topic documents.

@@ -16,7 +16,7 @@ import java.util.Map;
  * <p>One instance per villager, stored on {@code VillagerAgentData} (not a Forge capability —
  * only AI villagers need it, and it must sit close to the planner / skill gate). Each
  * {@link CapabilityId} maps to an integer XP, and its level is derived through
- * {@link CapabilityLevelTable} (0 = "完全不会", 11 = Master).
+ * {@link CapabilityLevelTable} (0 = "untrained", 11 = Master).
  *
  * <p>XP grows by <em>doing</em> (practice) and by <em>talking to an expert</em> (chat), and
  * <em>decays</em> if a capability sits unused for a while (see {@link #decayTo}). Levels gate
@@ -34,7 +34,7 @@ public class CapabilityPool implements INBTSerializable<CompoundNBT> {
 
     private final CapabilityLevelTable table = CapabilityLevelTable.instance();
 
-    /** Capability level (0 = 完全不会 … {@code table.maxLevel}). */
+    /** Capability level (0 = untrained … {@code table.maxLevel}). */
     public int levelOf(CapabilityId id) {
         Integer xp = xpByCapability.get(id);
         return xp == null ? 0 : table.levelForXp(xp);

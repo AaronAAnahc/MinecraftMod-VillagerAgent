@@ -15,6 +15,7 @@ public class VillagerAction {
         CRAFT,          // Craft an item at a workstation
         HARVEST,        // Harvest crops or resources
         GROW,           // Plant seeds or grow crops
+        RALLY,          // Travel to a threatened group before joining combat
         ATTACK,         // Attack a hostile entity
         IDLE,           // Do nothing for a time interval
         MOVE,           // Move to a location
