@@ -12,7 +12,7 @@ import java.util.Locale;
  */
 public enum CapabilityId {
     FARMING, FISHING, SMITHING, BREWING, ENCHANTING,
-    CRAFTING, GATHERING, SOCIAL, COMBAT;
+    CRAFTING, GATHERING, SOCIAL, COMBAT, WOODCUTTING, MINING, QUARRYING;
 
     /**
      * The "main" capability for a villager profession, i.e. the capability that profession
@@ -24,6 +24,8 @@ public enum CapabilityId {
     public static CapabilityId mainForProfession(String profession) {
         if (profession == null || profession.isEmpty()) return null;
         switch (profession.toLowerCase(Locale.ROOT)) {
+            case "lumberjack":  return WOODCUTTING;
+            case "miner":       return MINING;
             case "farmer":      return FARMING;
             case "fisherman":   return FISHING;
             case "weaponsmith":

@@ -1,4 +1,6 @@
 {
+  "villageragent:lumberjack": [{"item": "minecraft:wooden_axe", "minQty": 1}],
+  "villageragent:miner": [{"item": "minecraft:stone_pickaxe", "minQty": 1}],
   "minecraft:farmer": [
     {"item": "minecraft:wooden_hoe", "minQty": 1},
     {"item": "minecraft:wheat_seeds", "minQty": 12},

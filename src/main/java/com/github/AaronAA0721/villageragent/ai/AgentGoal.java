@@ -85,6 +85,13 @@ public class AgentGoal {
     /** Most recent failure recorded by the executing skill (runtime only; not NBT-persisted).
      *  Read by {@code FailureRecoveryPlanner} after a BLOCKED/FAIL return. */
     private Failure lastFailure = null;
+    /** Runtime progress evidence, independent of frame rebuilds and goal creation wall time. */
+    private long progressVersion;
+    public long getProgressVersion() { return progressVersion; }
+    public void markProgress() { progressVersion++; }
+    private UUID methodAttempt;
+    public UUID getMethodAttempt() { return methodAttempt; }
+    public void setMethodAttempt(UUID owner) { methodAttempt = owner; }
     private UUID workOrderId;
     private UUID tradeMessageId;
     public UUID getTradeMessageId() { return tradeMessageId; }

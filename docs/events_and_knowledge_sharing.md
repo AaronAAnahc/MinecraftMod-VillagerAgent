@@ -5,7 +5,7 @@ Reviewed: 2026-10-23.
 | Component | Data meaning | Current behavior |
 |---|---|---|
 | `WorldEventBus` | Environmental events at a time and place | Per-dimension ring buffer consumed by cursor and distance |
-| `VillageSignalBoard` | Immediate rally and trade requests | Expiring signals and their business consumers |
+| `VillageSignalBoard` | Immediate rally and trade requests | Combat retains dimension/radius filtering; trade boards are owned by individual runtime `VillageMarkets` |
 | `GossipChannel` | Shareable resource locations | Probabilistically transfers at most one feature anchor in one direction per call |
 
 ## WorldEventBus
@@ -26,7 +26,7 @@ The model supports differing villager knowledge. Actual gathering site selection
 
 ## Calls for help, rallying, and retreat
 
-The help board uses shared storage; records carry dimensions, and queries and expiry cleanup filter by dimension. `Combat.combat_rally_radius` controls hearing range, default 64 blocks around the enemy, allowed range 8–512. Only loaded managed villagers in the same dimension and range participate; no extra chunks load. There is no per-village membership/boundary pipeline, so neighboring villages inside the radius may respond.
+The help board uses shared storage; records carry dimensions, and queries and expiry cleanup filter by dimension. `Combat.combat_rally_radius` controls hearing range, default 64 blocks around the enemy, allowed range 8–512. Only loaded managed villagers in the same dimension and range participate; no extra chunks load. Combat does not use the trade-market membership index, so neighboring villages inside the radius may respond. Trade orders instead enumerate only the resident's market board; see [runtime village detection](capabilities_crafting_and_economy.md#runtime-village-detection).
 
 On detecting an enemy, villagers call for help and flee instead of immediately dueling. Healthy armed responders enter RALLY and suspend ordinary work; ineligible villagers retreat. Charging requires at least two eligible responders within eight blocks with line of sight, adequate weapons/health, and total power reaching `combat_charge_total_power`. Responders who have only acknowledged, not arrived, died, unloaded, have NoAI, are demo-occupied, or have not updated for over 100 ticks contribute no power. Combat refreshes responses and checks the team; insufficient numbers/power trigger retreat.
 

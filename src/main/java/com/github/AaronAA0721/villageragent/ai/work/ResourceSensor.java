@@ -13,6 +13,24 @@ import java.util.*;
 /** Bounded exposed-resource sensor. A worker may walk around an obstacle to an exposed block,
  * but fully buried ore is never proposed. Only loaded chunks are inspected. */
 public final class ResourceSensor {
+    private static final Map<VillagerEntity, Map<ResourceCatalog.Source, Probe>> PROBES = new WeakHashMap<>();
+    private static final class Probe {
+        final long tick;
+        final BlockPos origin;
+        final boolean available;
+        Probe(long tick, BlockPos origin, boolean available) { this.tick = tick; this.origin = origin; this.available = available; }
+    }
+    /** Cost estimation may inspect reachability, but never starts navigation or breaks a block. */
+    public static boolean available(ServerWorld world, VillagerEntity self, VillagerAgentData agent, ResourceCatalog.Source source) {
+        Map<ResourceCatalog.Source, Probe> cached = PROBES.computeIfAbsent(self, ignored -> new HashMap<>());
+        Probe previous = cached.get(source);
+        long now = world.getGameTime();
+        if (previous != null && now >= previous.tick && now - previous.tick < 40
+                && previous.origin.distSqr(self.blockPosition()) <= 4) return previous.available;
+        boolean available = find(world, self, agent, source, Collections.emptySet()) != null;
+        cached.put(source, new Probe(now, self.blockPosition(), available));
+        return available;
+    }
     public static final class Target {
         public final BlockPos block, stand;
         private Target(BlockPos block, BlockPos stand) { this.block = block; this.stand = stand; }
@@ -24,7 +42,7 @@ public final class ResourceSensor {
         List<BlockPos> candidates = new ArrayList<>();
         int matching = 0, natural = 0, exposed = 0, standable = 0, pathProbes = 0;
         for (BlockPos p : BlockPos.betweenClosed(origin.offset(-10, -4, -10), origin.offset(10, 5, 10))) {
-            if (p.equals(origin.below()) || !world.isLoaded(p) || rejected.contains(p) || world.getBlockState(p).getBlock() != source.block) continue;
+            if (p.equals(origin.below()) || !world.isLoaded(p) || rejected.contains(p) || !source.matches(world.getBlockState(p))) continue;
             matching++;
             if (source.profession == ResourceProfession.LUMBERJACK && !nearLeaves(world, p)) continue;
             natural++;

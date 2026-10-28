@@ -1,0 +1,258 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="3220" viewBox="0 0 2400 3220">
+<title>通用任务执行、复杂任务分解与失败恢复</title>
+<desc>依据当前工作区 Java 方法体核对。上部是所有目标任务共用的执行骨架，下部展开农务与物品获取的具体实现。</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10" fill="context-stroke"/></marker></defs>
+<style>text{font-family:'Microsoft YaHei','Noto Sans CJK SC',sans-serif;fill:#18324b} .title{font-size:42px;font-weight:700}.sub{font-size:22px;fill:#52677d}.heading{font-size:27px;font-weight:700}.body{font-size:21px}.code{font-family:Consolas,'Microsoft YaHei',monospace;font-size:20px;fill:#e5eefc}.label{font-size:19px;font-weight:600;paint-order:stroke;stroke:#f4f7fb;stroke-width:7px;stroke-linejoin:round}</style>
+<rect width="2400" height="3220" fill="#f4f7fb"/>
+<text x="60" y="70" class="title">任务如何落地：根任务 → Skill → 策略／分解 → 执行 → 恢复与退出</text>
+<text x="60" y="112" class="sub">源码快照：2026-10-28 当前工作区（含未提交修改） · 实线＝调用／结果流；虚线＝重试／递归回路</text>
+<text x="60" y="155" class="heading">01  通用执行骨架</text>
+<rect x="60" y="185" width="690" height="205" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="202" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="224" class="heading">A  根任务与调度</text>
+<text x="82" y="251" class="body">候选保存为 AgentGoal；只有根任务进入调度。</text>
+<text x="82" y="278" class="body">先过滤可执行项，再按 Utility 选择／决定抢占。</text>
+<rect x="76" y="305" width="658" height="66" rx="9" fill="#14283f"/>
+<text x="89" y="330" class="code">VillagerAgentManager.processGoals(...)</text>
+<text x="89" y="355" class="code">  → GoalScheduler.pickNextGoal(...)</text>
+<rect x="60" y="435" width="690" height="245" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="452" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="474" class="heading">B  找运行器：Skill 分派</text>
+<text x="82" y="501" class="body">按注册顺序，选择首个 canHandle(...) 为真的 Skill。</text>
+<text x="82" y="528" class="body">canHandle 负责类型／能力等门槛；未找到则诊断失败。</text>
+<rect x="76" y="555" width="658" height="91" rx="9" fill="#14283f"/>
+<text x="89" y="580" class="code">BehaviorExecutor.findHandler(...)</text>
+<text x="89" y="605" class="code">  → VillagerSkill.canHandle(...)</text>
+<text x="89" y="630" class="code">executeRoot(...) → TaskExecution.tick(...)</text>
+<rect x="60" y="725" width="690" height="215" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="742" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="764" class="heading">C  执行一个节点</text>
+<text x="82" y="791" class="body">根节点和子节点使用相同的分派与执行逻辑。</text>
+<text x="82" y="818" class="body">RUNNING 叶节点还检查导航失败；节点可返回 BLOCKED。</text>
+<rect x="76" y="845" width="658" height="66" rx="9" fill="#14283f"/>
+<text x="89" y="870" class="code">BehaviorExecutor.executeNode(...)</text>
+<text x="89" y="895" class="code">  → skill.execute(agent, goal, villager, world)</text>
+<rect x="60" y="985" width="690" height="280" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="1002" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="1024" class="heading">D  任务实际内容：具体 Skill 的 execute</text>
+<text x="82" y="1051" class="body">这里写“怎么做”：直接动作，或策略选择后逐步分解。</text>
+<text x="82" y="1078" class="body">复杂任务自己调用 executeChild；框架不会自动分解。</text>
+<text x="82" y="1105" class="body">isComposite() 是声明；不是自动展开任务图的解释器。</text>
+<rect x="76" y="1132" width="658" height="116" rx="9" fill="#14283f"/>
+<text x="89" y="1157" class="code">interface VillagerSkill {</text>
+<text x="89" y="1182" class="code">  canHandle(...); execute(...);</text>
+<text x="89" y="1207" class="code">  isComposite(); isPrimitive();</text>
+<text x="89" y="1232" class="code">}</text>
+<rect x="850" y="185" width="690" height="260" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="850" y="202" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="872" y="224" class="heading">E  策略／方法判断：两种现有实现</text>
+<text x="872" y="251" class="body">① 手写规则：在 Skill 内观察状态并选下一步。</text>
+<text x="872" y="278" class="body">② 可替换方法：TaskMethodExecution 评分并保留尝试。</text>
+<text x="872" y="305" class="body">② 当前接入物品获取；不是所有 Skill 的必经步骤。</text>
+<rect x="866" y="332" width="658" height="91" rx="9" fill="#14283f"/>
+<text x="879" y="357" class="code">// 规则例：FarmSkill.scan / choose</text>
+<text x="879" y="382" class="code">// 方法例：AcquisitionTasks.execute</text>
+<text x="879" y="407" class="code">//        → TaskMethodExecution.tick</text>
+<rect x="850" y="500" width="690" height="275" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="850" y="517" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="872" y="539" class="heading">F  复杂任务分解与递归</text>
+<text x="872" y="566" class="body">父任务构造 AgentGoal 子任务；每帧只有一个活动子节点。</text>
+<text x="872" y="593" class="body">子节点重新找 Skill，可继续分解为更深的子任务。</text>
+<text x="872" y="620" class="body">Frame.state(...) 保存这次执行的局部状态。</text>
+<rect x="866" y="647" width="658" height="116" rx="9" fill="#14283f"/>
+<text x="879" y="672" class="code">BehaviorExecutor.executeChild(..., factory)</text>
+<text x="879" y="697" class="code">  → TaskExecution.child(factory, runner)</text>
+<text x="879" y="722" class="code">  → BehaviorExecutor.executeNode(child)</text>
+<text x="879" y="747" class="code">  → childSkill.execute(...)</text>
+<rect x="850" y="830" width="690" height="220" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="850" y="847" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="872" y="869" class="heading">G  叶任务／动作执行</text>
+<text x="872" y="896" class="body">具体 Skill 驱动导航、方块操作、库存操作或外部请求。</text>
+<text x="872" y="923" class="body">完成条件由任务实现核对；“到达”并不等于获得物品。</text>
+<rect x="866" y="950" width="658" height="66" rx="9" fill="#14283f"/>
+<text x="879" y="975" class="code">SkillResult: RUNNING | SUCCESS | WAITING</text>
+<text x="879" y="1000" class="code">             BLOCKED | FAIL | DELETE</text>
+<rect x="850" y="1105" width="690" height="250" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="850" y="1122" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="872" y="1144" class="heading">H  子任务返回：父任务决定下一步</text>
+<text x="872" y="1171" class="body">RUNNING：保留子帧，下 tick 再执行。</text>
+<text x="872" y="1198" class="body">其他结果：清身体动作／释放资源，丢弃子帧。</text>
+<text x="872" y="1225" class="body">复制 child.lastFailure 给父任务；父任务可消化或上抛。</text>
+<rect x="866" y="1252" width="658" height="91" rx="9" fill="#14283f"/>
+<text x="879" y="1277" class="code">executeChild → clearBody / releaseTree</text>
+<text x="879" y="1302" class="code">TaskExecution.child → parent.child = null</text>
+<text x="879" y="1327" class="code">// 子任务成功不会自动完成父任务</text>
+<rect x="1640" y="185" width="700" height="240" rx="16" fill="white" stroke="#cc6b43" stroke-width="2"/>
+<rect x="1640" y="202" width="6" height="32" rx="3" fill="#cc6b43"/>
+<text x="1662" y="224" class="heading">I  根任务结果汇总</text>
+<text x="1662" y="251" class="body">processGoals 接收根结果；RUNNING 保持本轮执行。</text>
+<text x="1662" y="278" class="body">BLOCKED／FAIL 才调用全局恢复；无 handler 也走此路。</text>
+<text x="1662" y="305" class="body">普通执行超时可转为 FAIL；无 Failure 信息则不恢复。</text>
+<rect x="1656" y="332" width="668" height="66" rx="9" fill="#14283f"/>
+<text x="1669" y="357" class="code">VillagerAgentManager.processGoals(...)</text>
+<text x="1669" y="382" class="code">  → FailureRecoveryPlanner.handle(...)</text>
+<rect x="1640" y="480" width="700" height="340" rx="16" fill="white" stroke="#cc6b43" stroke-width="2"/>
+<rect x="1640" y="497" width="6" height="32" rx="3" fill="#cc6b43"/>
+<text x="1662" y="519" class="heading">J  全局恢复：补充目标，不直接替原任务执行</text>
+<text x="1662" y="546" class="body">MISSING_ITEM → 新建／复用 acquire_item。</text>
+<text x="1662" y="573" class="body">NO_RECIPE + 目标物品 → 同样转物品获取。</text>
+<text x="1662" y="600" class="body">NO_JOB_SITE → 新建／复用 find_job_site。</text>
+<text x="1662" y="627" class="body">能力不足／其他原因 → 记录记忆，没有自动练级分解。</text>
+<text x="1662" y="654" class="body">目标去重、必要时提高库存目标量并清除恢复任务冷却。</text>
+<rect x="1656" y="681" width="668" height="116" rx="9" fill="#14283f"/>
+<text x="1669" y="706" class="code">FailureRecoveryPlanner.handle(...)</text>
+<text x="1669" y="731" class="code">  → recoverMissingItem(...)</text>
+<text x="1669" y="756" class="code">  → recoverJobSite(...)</text>
+<text x="1669" y="781" class="code">  → agent.getGoals().add(goal)</text>
+<rect x="1640" y="875" width="700" height="240" rx="16" fill="white" stroke="#348c75" stroke-width="2"/>
+<rect x="1640" y="892" width="6" height="32" rx="3" fill="#348c75"/>
+<text x="1662" y="914" class="heading">K  清理当前执行，再执行退出策略</text>
+<text x="1662" y="941" class="body">根结果不是 RUNNING 时，释放动作、导航与执行树。</text>
+<text x="1662" y="968" class="body">获取会话独立保存，WAITING／抢占不等于取消方法。</text>
+<rect x="1656" y="995" width="668" height="91" rx="9" fill="#14283f"/>
+<text x="1669" y="1020" class="code">ActionLifecycle.cancel(...)</text>
+<text x="1669" y="1045" class="code">agent.setRunningGoal(null)</text>
+<text x="1669" y="1070" class="code">GoalExitPolicy.retain(goal, result, now)</text>
+<rect x="1640" y="1170" width="700" height="295" rx="16" fill="white" stroke="#348c75" stroke-width="2"/>
+<rect x="1640" y="1187" width="6" height="32" rx="3" fill="#348c75"/>
+<text x="1662" y="1209" class="heading">L  在哪里结束？</text>
+<text x="1662" y="1236" class="body">SUCCESS：一次性目标移除；可重复目标冷却后保留。</text>
+<text x="1662" y="1263" class="body">DELETE：移除目标。</text>
+<text x="1662" y="1290" class="body">WAITING／可恢复物品 BLOCKED：保留，冷却至少 200 tick。</text>
+<text x="1662" y="1317" class="body">其余失败：累计 3 次后移除；未达上限则冷却重试。</text>
+<text x="1662" y="1344" class="body">最后应用任务自己的最小退出冷却。</text>
+<rect x="1656" y="1371" width="668" height="66" rx="9" fill="#14283f"/>
+<text x="1669" y="1396" class="code">retain == false → goals.remove(current)</text>
+<text x="1669" y="1421" class="code">retain == true  → cooldown → 再次调度</text>
+<path d="M405,390 L405,435" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M405,680 L405,725" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M405,940 L405,985" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M750,1100 L800,1100 L800,310 L850,310" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="787" y="293" class="label" style="fill:#57738e">选择策略</text>
+<path d="M1195,445 L1195,500" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="1210" y="479" class="label" style="fill:#57738e">需要子任务</text>
+<path d="M1195,775 L1195,830" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M1195,1050 L1195,1105" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M850,1235 L820,1235 L820,638 L850,638" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)" stroke-dasharray="9 7"/>
+<text x="855" y="1385" class="label" style="fill:#57738e">父任务继续／下一子任务</text>
+<path d="M850,575 L780,575 L780,815 L750,815" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)" stroke-dasharray="9 7"/>
+<text x="785" y="700" class="label" style="fill:#57738e">递归分派</text>
+<path d="M1540,1235 L1590,1235 L1590,305 L1640,305" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="1552" y="1450" class="label" style="fill:#57738e">根结果向上返回</text>
+<path d="M750,535 L770,535 L770,170 L1990,170 L1990,185" fill="none" stroke="#cc6b43" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="855" y="165" class="label" style="fill:#cc6b43">无 handler：诊断 Failure → BLOCKED</text>
+<path d="M1990,425 L1990,480" fill="none" stroke="#cc6b43" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="2010" y="458" class="label" style="fill:#cc6b43">BLOCKED / FAIL</text>
+<path d="M1990,820 L1990,875" fill="none" stroke="#cc6b43" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M2340,315 L2370,315 L2370,995 L2340,995" fill="none" stroke="#348c75" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="2135" y="850" class="label" style="fill:#348c75">其他非 RUNNING</text>
+<path d="M1990,1115 L1990,1170" fill="none" stroke="#348c75" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M1640,720 L1565,720 L1565,130 L405,130 L405,185" fill="none" stroke="#cc6b43" stroke-width="3" marker-end="url(#arrow)" stroke-dasharray="9 7"/>
+<text x="1680" y="128" class="label" style="fill:#cc6b43">恢复目标重新入队</text>
+<text x="60" y="1310" class="heading">通用抽象：目标 → 分派 → 策略</text>
+<text x="60" y="1348" class="heading">→ 子任务递归／叶操作 → 父验收 → 根退出</text>
+<text x="60" y="1390" class="body">直接 Skill 可由 D 进入 G，无需创建方法或子任务。</text>
+<text x="60" y="1426" class="body">普通帧取消后重建；获取会话独立保存。</text>
+<text x="60" y="1462" class="body">非目标驱动的战斗／显式建造占用身体时暂停此链。</text>
+<path d="M60 1510 H2340" stroke="#ced9e6" stroke-width="2"/>
+<text x="60" y="1570" class="heading">02  两种具体展开｜都嵌入上面的 D → E → F → G → H，不是两套调度器</text>
+<rect x="60" y="1610" width="1090" height="325" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="1627" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="1649" class="heading">实例 A · 日常农务 farm：规则分解的内容就在这里</text>
+<text x="82" y="1676" class="body">FarmSkill implements VillagerSkill；isComposite() 返回 true。</text>
+<text x="82" y="1703" class="body">execute 管理整场农务会话；scan 生成候选，choose 选择当前局部步骤。</text>
+<text x="82" y="1730" class="body">候选先判有效／可达；不是一次性生成固定的全量子任务队列。</text>
+<rect x="76" y="1757" width="1058" height="141" rx="9" fill="#14283f"/>
+<text x="89" y="1782" class="code">FarmSkill.execute(...)</text>
+<text x="89" y="1807" class="code">  → refresh(...) → scan(...)  // 生成 List&lt;Plan&gt;</text>
+<text x="89" y="1832" class="code">  → choose(...)               // 选下一步</text>
+<text x="89" y="1857" class="code">  → BehaviorExecutor.executeChild(..., () -&gt; new AgentGoal(type,...))</text>
+<text x="89" y="1882" class="code">// State: pending / plan / rejected / completed / field</text>
+<rect x="60" y="1985" width="1090" height="310" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="2002" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="2024" class="heading">农务子任务清单与实际执行函数</text>
+<text x="82" y="2051" class="body">远处田地：move → MoveSkill；到达后 FarmMemory.validateArrival。</text>
+<text x="82" y="2078" class="body">HARVEST → harvest；PLANT → plant；COLLECT → collect_crops。</text>
+<text x="82" y="2105" class="body">TILL_REVERTED／TILL_RECLAIM → till（恢复耕地／开垦，后者要求等级 2）。</text>
+<rect x="76" y="2132" width="1058" height="116" rx="9" fill="#14283f"/>
+<text x="89" y="2157" class="code">FarmActionSkill.execute(...) → FarmSkill.valid(...)</text>
+<text x="89" y="2182" class="code">  → FarmingAction.approachTarget(...)</text>
+<text x="89" y="2207" class="code">  → FarmSkill.perform(...)</text>
+<text x="89" y="2232" class="code">    → harvestBlockAt / plantSpecificCropAt / plantSmartAt / tillBlockAt</text>
+<rect x="60" y="2345" width="1090" height="280" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="60" y="2362" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="82" y="2384" class="heading">农务的循环、局部失败与结束</text>
+<text x="82" y="2411" class="body">choose 优先：HARVEST → PLANT → COLLECT → TILL_REVERTED → TILL_RECLAIM。</text>
+<text x="82" y="2438" class="body">采收会尝试立即补种；成功后也可追加 PLANT；随后继续挑选／刷新。</text>
+<text x="82" y="2465" class="body">某个作业点失败：加入 rejected，清当前失败，再试其他点。</text>
+<text x="82" y="2492" class="body">前往田地失败：向上返回；扫描耗尽且缺种子／锄头：BLOCKED。</text>
+<text x="82" y="2519" class="body">无工作且无缺项：SUCCESS；会话达到 6000 tick：SUCCESS。</text>
+<rect x="76" y="2546" width="1058" height="66" rx="9" fill="#14283f"/>
+<text x="89" y="2571" class="code">// collect_crops 的 perform 返回 true；接近掉落物后由拾取机制收集</text>
+<text x="89" y="2596" class="code">// 农务根 BLOCKED / FAIL → I → J；不会每个坏地块都创建恢复根</text>
+<rect x="1250" y="1610" width="1090" height="325" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="1250" y="1627" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="1272" y="1649" class="heading">实例 B · 获取物品 acquire_item：先选方法，再分解</text>
+<text x="1272" y="1676" class="body">AcquireItemSkill → AcquisitionTasks：先核对真实库存是否达到绝对目标量。</text>
+<text x="1272" y="1703" class="body">未满足才运行方法会话；按目标产出发现候选并检查契约能力要求。</text>
+<text x="1272" y="1730" class="body">TaskContract 描述物品前提／产出／等级；具体操作仍在实现函数内。</text>
+<rect x="1266" y="1757" width="1058" height="141" rx="9" fill="#14283f"/>
+<text x="1279" y="1782" class="code">AcquireItemSkill.execute(...) → AcquisitionTasks.execute(...)</text>
+<text x="1279" y="1807" class="code">  → TaskMethodExecution.tick(...)</text>
+<text x="1279" y="1832" class="code">  → AcquisitionMethods.candidates(...) → ItemTaskCatalog.discover(...)</text>
+<text x="1279" y="1857" class="code">interface TaskMethod&lt;C&gt; { id(); estimate(C); start(C, UUID);</text>
+<text x="1279" y="1882" class="code">                          tick(C); close(C); }</text>
+<rect x="1250" y="1985" width="1090" height="310" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="1250" y="2002" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="1272" y="2024" class="heading">可选方法与“真正分解子任务”的位置</text>
+<text x="1272" y="2051" class="body">craft → Craft.tick：采购缺料后执行 craft 子任务。</text>
+<text x="1272" y="2078" class="body">craft_inputs／资源生产 → Produce.tick：先前提，再生产。</text>
+<text x="1272" y="2105" class="body">buy_product → Buy.tick：购买；cooperative_supply → Supply.tick：请求外援。</text>
+<rect x="1266" y="2132" width="1058" height="141" rx="9" fill="#14283f"/>
+<text x="1279" y="2157" class="code">AcquisitionMethods.Produce.tick(Context c)</text>
+<text x="1279" y="2182" class="code">  → contract(c).items → 缺项创建 acquire_item 子任务（递归选方法）</text>
+<text x="1279" y="2207" class="code">  → 前提满足 → 创建 craft 或 extract_item 子任务</text>
+<text x="1279" y="2232" class="code">  → BehaviorExecutor.executeChild(...)</text>
+<text x="1279" y="2257" class="code">// 资源方法 ID：woodcutting / mining / quarrying / farming</text>
+<rect x="1250" y="2345" width="1090" height="280" rx="16" fill="white" stroke="#3975c6" stroke-width="2"/>
+<rect x="1250" y="2362" width="6" height="32" rx="3" fill="#3975c6"/>
+<text x="1272" y="2384" class="heading">方法的局部失败、切换与最终验收</text>
+<text x="1272" y="2411" class="body">score = 剩余成本 + 失败惩罚 + 停滞时间惩罚；仅选有限且可行的候选。</text>
+<text x="1272" y="2438" class="body">FAILED／安全边界超时：close 旧尝试，冷却并重新选方法。</text>
+<text x="1272" y="2465" class="body">DONE 只结束方法；AcquisitionTasks 返回 RUNNING，之后再次核对库存。</text>
+<text x="1272" y="2492" class="body">实际库存满足才把目标设为 completed 并返回 SUCCESS。</text>
+<text x="1272" y="2519" class="body">无可用方法／外援等待通常映射为 WAITING，不直接触发全局恢复。</text>
+<rect x="1266" y="2546" width="1058" height="66" rx="9" fill="#14283f"/>
+<text x="1279" y="2571" class="code">TaskMethodExecution.tick → active.tick / estimate / close / start</text>
+<text x="1279" y="2596" class="code">AcquisitionTasks.execute: count(target) &gt;= desired → SUCCESS</text>
+<path d="M605,1935 L605,1985" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M605,2295 L605,2345" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M1795,1935 L1795,1985" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M1795,2295 L1795,2345" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M1150,2490 L1195,2490 L1195,1760 L1150,1760" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)" stroke-dasharray="9 7"/>
+<text x="1165" y="2315" class="label" style="fill:#57738e">循环</text>
+<path d="M2340,2500 L2370,2500 L2370,1760 L2340,1760" fill="none" stroke="#57738e" stroke-width="3" marker-end="url(#arrow)" stroke-dasharray="9 7"/>
+<rect x="60" y="2690" width="1090" height="220" rx="16" fill="white" stroke="#8365b0" stroke-width="2"/>
+<rect x="60" y="2707" width="6" height="32" rx="3" fill="#8365b0"/>
+<text x="82" y="2729" class="heading">不要混淆两个 farming</text>
+<text x="82" y="2756" class="body">farm 是日常复杂任务：旅行、采收、收集、种植、翻地／开垦。</text>
+<text x="82" y="2783" class="body">获取方法 farming 是采收成熟作物：走 extract_item，不调用整场 farm。</text>
+<rect x="76" y="2810" width="1058" height="66" rx="9" fill="#14283f"/>
+<text x="89" y="2835" class="code">Produce(true).tick → ExtractItemSkill.execute(...)</text>
+<text x="89" y="2860" class="code">  → ResourceExtraction.tick(...)  // 与供货任务共用真实采集逻辑</text>
+<rect x="1250" y="2690" width="1090" height="220" rx="16" fill="white" stroke="#8365b0" stroke-width="2"/>
+<rect x="1250" y="2707" width="6" height="32" rx="3" fill="#8365b0"/>
+<text x="1272" y="2729" class="heading">方法生命周期不等于执行帧生命周期</text>
+<text x="1272" y="2756" class="body">AcquisitionTasks 按根目标保存会话，可跨 WAITING／帧重建继续。</text>
+<text x="1272" y="2783" class="body">换方法时按 attempt UUID 清理所属子会话／交易需求／资源订单。</text>
+<rect x="1266" y="2810" width="1058" height="91" rx="9" fill="#14283f"/>
+<text x="1279" y="2835" class="code">AcquisitionMethods.Owned.close → cancelChildren / removeOwned</text>
+<text x="1279" y="2860" class="code">  / cancelOwned / discardChild</text>
+<text x="1279" y="2885" class="code">AcquisitionTasks.maintain → 清理已移除、过期、满足或跨维度目标</text>
+<text x="60" y="2970" class="heading">源码导航（均位于 src/main/java/com/github/AaronAA0721/villageragent/）</text>
+<text x="60" y="3010" class="body">ai/：VillagerAgentManager · GoalScheduler · TaskExecution · TaskMethodExecution · AcquisitionTasks · FailureRecoveryPlanner · GoalExitPolicy</text>
+<text x="60" y="3046" class="body">ai/behavior/：BehaviorExecutor · VillagerSkill · FarmSkill · FarmActionSkill · AcquireItemSkill · ExtractItemSkill</text>
+<text x="60" y="3082" class="body">ai/：AcquisitionMethods · ItemTaskCatalog · TaskContract · ActionLifecycle；ai/work/：ResourceExtraction</text>
+<text x="60" y="3138" class="sub">阅读顺序：上部 A–L 看通用结构 → 下部定位任务内容 → 沿橙色分支追失败恢复 → 沿绿色分支找结束点。</text>
+<text x="60" y="3176" class="sub">本图描述当前实现，不代表任意任务已统一接入方法目录；未修改 Java 实现，也未运行 Minecraft 验收。</text>
+</svg>

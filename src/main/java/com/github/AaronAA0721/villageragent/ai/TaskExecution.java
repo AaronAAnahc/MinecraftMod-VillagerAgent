@@ -31,6 +31,8 @@ public final class TaskExecution {
         if (current == null) throw new IllegalStateException("No executing task");
         return current;
     }
+    /** Caller must release the child action/resources before discarding its frame. */
+    public void discardChild() { current().child = null; }
     public void reset() { root = null; current = null; }
     public SkillResult tick(AgentGoal goal, Function<AgentGoal, SkillResult> runner) {
         if (current != null) throw new IllegalStateException("Use child() for nested execution");

@@ -1,0 +1,8 @@
+{
+  "parent": "minecraft:block/cube_bottom_top",
+  "textures": {
+    "top": "villageragent:block/carpenter_table_top",
+    "side": "villageragent:block/carpenter_table_side",
+    "bottom": "villageragent:block/carpenter_table_bottom"
+  }
+}

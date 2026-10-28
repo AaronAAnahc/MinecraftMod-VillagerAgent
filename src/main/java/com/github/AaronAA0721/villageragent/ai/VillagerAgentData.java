@@ -268,6 +268,8 @@ public class VillagerAgentData {
                 this.personalValueTable = null;
             }
             this.profession = newProfession;
+            com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.assign(this,
+                    com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.parse(newProfession));
 
             // Routine goals are now generated deterministically at dawn (DeterministicPlanGenerator)
             // and by the LLM/harness; the old static per-profession if-else (ProfessionGoalGenerator)
@@ -319,6 +321,8 @@ public class VillagerAgentData {
      * or still zero after assignment), raise it to the baseline. Idempotent and increase-only, so older villagers retain access to capability-gated skills.
      */
     public void healProfessionCapability() {
+        if ("miner".equalsIgnoreCase(profession) && capabilityPool.levelOf(CapabilityId.QUARRYING) < PROFESSION_BASELINE_LEVEL)
+            capabilityPool.setLevel(CapabilityId.QUARRYING, PROFESSION_BASELINE_LEVEL);
         CapabilityId main = CapabilityId.mainForProfession(profession);
         if (main == null) return;
         int current = capabilityPool.levelOf(main);

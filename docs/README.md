@@ -1,6 +1,6 @@
 # VillagerAgent documentation
 
-Reviewed: 2026-10-23. The current workspace source, including uncommitted code, is authoritative. Read this document first in an agent session.
+Reviewed: 2026-10-27. The current workspace source, including uncommitted code, is authoritative. Read this document first in an agent session.
 
 ## Five-minute onboarding
 
@@ -17,6 +17,8 @@ Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow serv
 |---|---|
 | [Execution pipeline and resource orders](execution_pipeline_and_resource_orders.md) | Main loop, Utility, exit protocol, resource work, and persistence boundaries |
 | [Code index](CODE_INDEX.md) | Task-to-source navigation and module map |
+| [Resource workstations](workstations.md) | Block assets, POIs, lumberjack/miner professions and skill baselines |
+| [Task methods](task_methods.md) | Method interface, cost/time scoring, stable execution, ownership and cleanup |
 | [Failure recovery](failure_recovery.md) | Failure categories, item/workstation recovery, deduplication, and waiting |
 | [Spatial perception](vision_module_implementation.md) | Chunk memory, near-field frustum, and environment summaries |
 | [Beds and building algorithms](bed_room_search_implementation.md) | Geometry, index invalidation, multiple beds, and algorithm limits |
@@ -25,10 +27,15 @@ Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow serv
 | [LLM and world interaction](llm_and_world_interaction.md) | Conversation, Harness integration scope, building interfaces, and boundaries |
 | [Configuration and operation](configuration_and_operation.md) | Build, configuration files, and commands |
 | [Debugging and verification](DEBUG_VERIFICATION.md) | Logs, idle diagnosis, automated checks, and in-game acceptance |
+| [Documentation audit](documentation_audit.md) | Source-backed corrections, unimplemented boundaries, and verification scope |
 | [Implementation boundaries](implementation_status.md) | Current limits, disconnected components, and verification status |
 | [Project walkthrough](project_walkthrough.md) | A short explanation grounded in the implementation above |
 
 ## Documentation maintenance
+
+For source-backed Chinese defense slides, code excerpts, development environment, model boundaries, and a recording script, see [NPC technical walkthrough](defense-layouts/TECHNICAL_NOTES.md). The four technical SVGs supplement the overview slides; they do not constitute runtime acceptance evidence.
+
+For personality's actual effects, class dependencies, and rule/Utility/LLM code slides 13–16, see [class architecture and code walkthrough](defense-layouts/CODE_WALKTHROUGH.md).
 
 - Describe existing behavior, constraints, and verifiable limitations. Keep each mechanism in one topic and link to it elsewhere.
 - Check method bodies, callers, and configuration consumers before describing something as integrated. A class, enum, or configuration key only proves that a definition exists. Check comments against method bodies as well.

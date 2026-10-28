@@ -100,7 +100,8 @@ public class VillagerAgentManager {
      * Remove agent data (when villager dies or is removed)
      */
     public static void removeAgent(UUID villagerId) {
-        agents.remove(villagerId);
+        VillagerAgentData removed = agents.remove(villagerId);
+        if (removed != null) removed.brain().acquisitions.closeWorld(null);
         LOGGER.info("Removed AI agent: " + villagerId);
     }
 
@@ -1098,6 +1099,7 @@ public class VillagerAgentManager {
      */
     private static void processGoals(VillagerEntity villager, VillagerAgentData agent) {
         ServerWorld world = (ServerWorld) villager.level;
+        agent.brain().acquisitions.maintain(agent, villager, world);
         long now = world.getGameTime();
         VillagerAction action = agent.getCurrentAction();
         // Reactive combat and explicit construction own the body until they yield it.
@@ -1107,8 +1109,7 @@ public class VillagerAgentManager {
         List<AgentGoal> goals = agent.getGoals();
         AgentGoal current = agent.getRunningGoal();
         // Satisfied job searches must disappear even when their handler is no longer eligible.
-        if (com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.hasValidJobSite(villager, world)
-                || agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) {
+        if (com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.hasValidJobSite(villager, world)) {
             goals.removeIf(g -> "find_job_site".equals(g.getGoalType()));
         }
         agent.brain().nightRest = SleepSkill.isNightTime(world.getDayTime());
@@ -1127,6 +1128,8 @@ public class VillagerAgentManager {
             // task are reported below, never confused with an unavailable handler.
             List<AgentGoal> runnable = new ArrayList<>();
             for (AgentGoal g : new ArrayList<>(goals)) {
+                // Meetings only enter at a natural root boundary, never displace ongoing work.
+                if (current != null && g != current && "meet_trade".equals(g.getGoalType())) continue;
                 if (BehaviorExecutor.findHandler(agent, g, villager, world) != null) {
                     runnable.add(g);
                 } else if (g != current && !g.isOnCooldown(now)) {
@@ -1436,7 +1439,7 @@ public class VillagerAgentManager {
         UUID entityId = goal.getTargetEntityId();
         if (entityId != null) {
             VillagerAgentData a = getAgent(entityId);
-            if (a != null && !a.getVillagerId().equals(agent.getVillagerId())) return a;
+            if (a != null && !TradeCoordinator.busy(a.getVillagerId()) && !a.getVillagerId().equals(agent.getVillagerId())) return a;
             return null;
         }
         String profession = goal.getTargetProfession();
@@ -1444,7 +1447,7 @@ public class VillagerAgentManager {
         double bestD = Double.MAX_VALUE;
         for (VillagerAgentData other : getAllAgents()) {
             if (other.getVillagerId().equals(agent.getVillagerId())) continue;
-            if (other.isSocializing() || other.getCurrentAction() != null) continue; // busy
+            if (TradeCoordinator.busy(other.getVillagerId()) || other.isSocializing() || other.getCurrentAction() != null) continue; // busy
             if (profession != null && !profession.isEmpty()
                     && !profession.equalsIgnoreCase(other.getProfession())) continue;
             Entity e = sw.getEntity(other.getVillagerId());

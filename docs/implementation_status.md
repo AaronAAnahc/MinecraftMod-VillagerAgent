@@ -1,11 +1,12 @@
 # Current implementation boundaries and verification status
 
-Reviewed: 2026-10-23. This document lists source-confirmable scope and limits. The user specifies actual development tasks; topic documents explain current mechanisms.
+Reviewed: 2026-10-27. This document lists source-confirmable scope and limits. The user specifies actual development tasks; topic documents explain current mechanisms.
 
 | Topic | Current scope | Limits or checks still needed |
 |---|---|---|
 | Main loop | Slow perception, Utility sampling, per-tick skills, unified exits | Continuous execution and exceptional cases need in-game tests |
-| Resource work | Logging/mining roles, order leases, partial delivery, inventory checks | Local exposed resources; no complete methods for tunneling, whole trees, high scaffolding, or regional exploration |
+| Resource work | Workstation professions; independent woodcutting/mining/quarrying; shared personal/order extraction, leases and inventory checks | Local exposed resources; no complete methods for tunneling, whole trees, high scaffolding, or regional exploration |
+| Item method discovery | Contracts, output providers, recursive prerequisites, cost/stall scoring and scoped cancellation | Bounded recipe/tag/cost search; no global optimum or automatic skill-training planner |
 | Goal lifecycle | Cooldowns, waits, exit after at most three failures, delayed routine recreation | Check source eligibility against handlers |
 | Spatial perception | Chunk summaries, bed-anchored buildings, near-field frustum | Budget clipping, narrow-opening merges, thin decorations, wall occlusion |
 | Building index | Bed/chunk seeding, event invalidation, per-dimension persistence | Unloaded beds await another offer; command-created bed discovery needs testing |
@@ -19,7 +20,7 @@ Reviewed: 2026-10-23. This document lists source-confirmable scope and limits. T
 
 ## Verification status
 
-The PR #1 integration with local main passed offline compilation and all four rule-check programs (376 assertions), plus the trade selection/inventory harness using API doubles. No Minecraft session was run for this integration. See [Debugging and verification](DEBUG_VERIFICATION.md) for exact scope and manual acceptance procedures. Repository logs and simulations require confirmation of their generating version and conditions before they can verify current behavior.
+The latest recorded workstation/method implementation passed offline compilation, 442 assertions across seven check programs, and eight acquisition-search cases. Packaged JSON and workstation asset references were validated. These checks do not exercise live Forge POI claiming, recipe integration, rendering, harvesting or navigation. No Minecraft acceptance session was run for these changes. Earlier PR/trade-harness results remain scoped to their recorded revisions. See [Debugging and verification](DEBUG_VERIFICATION.md) for exact scope and manual acceptance procedures. Repository logs and simulations require confirmation of their generating version and conditions before they can verify current behavior.
 
 ## Interface constraints for extensions
 

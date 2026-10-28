@@ -30,6 +30,7 @@ public class TradeSkill implements VillagerSkill {
 
     @Override
     public SkillResult execute(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {
+        if (com.github.AaronAA0721.villageragent.ai.TradeCoordinator.busy(agent.getVillagerId())) return SkillResult.WAITING;
         VillagerAction cur = agent.getCurrentAction();
         if (cur != null && !cur.isGoalDriven()) { agent.setCurrentAction(null); cur = null; }
 

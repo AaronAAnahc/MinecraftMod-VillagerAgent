@@ -110,7 +110,6 @@ public final class RoutineScheduler {
                 if (com.github.AaronAA0721.villageragent.ai.behavior.FindJobSiteSkill.hasValidJobSite(
                         (net.minecraft.entity.merchant.villager.VillagerEntity) worker, world)) return null;
                 if (isNitwit(agent.getProfession())) return null;
-                if (agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) return null;
                 g = new AgentGoal("find_job_site", "Find a job site to work at (routine)", 4);
                 apply(g, 100, 4.0, 0.0, 4);   // retry after five seconds
                 break;
@@ -126,11 +125,8 @@ public final class RoutineScheduler {
                 apply(g, 2000, 5.0, 0.0, 5);
                 break;
             case "trade":
-                // GATE: only professions whose pool lists trade as a main duty (fisherman).
-                if (!DeterministicPlanGenerator.isPoolType(agent, "trade")) return null;
-                g = new AgentGoal("trade", "Trade with another villager (routine)", 3);
-                apply(g, 2000, 2.0, 0.0, 3);
-                break;
+                // Market listings are inventory-driven; explicit LLM/player barter remains available.
+                return null;
             case "socialize":
                 if (!com.github.AaronAA0721.villageragent.config.ModConfig.ENABLE_VILLAGER_SOCIAL.get()) return null;
                 g = new AgentGoal("socialize", "Chat with a nearby neighbour", 3);

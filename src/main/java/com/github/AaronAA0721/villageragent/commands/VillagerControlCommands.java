@@ -19,6 +19,41 @@ import net.minecraft.util.text.StringTextComponent;
 
 /** Explicit operator requests, backed by agent inventory and the normal skill executor. */
 final class VillagerControlCommands {
+    static LiteralArgumentBuilder<CommandSource> markets() {
+        return Commands.literal("markets").executes(c -> {
+            java.util.List<VillageMarkets.Market> markets=VillageMarkets.loaded(c.getSource().getLevel());
+            for(VillageMarkets.Market m:markets) {
+                c.getSource().sendSuccess(new StringTextComponent("市场 " + m.id + " 中心=" + m.center
+                    + " 来源=" + (m.meetingPoint?"集合点":"家/工作站/位置归组")
+                    + " 已加载成员=" + m.members().size()
+                    + " 卖单=" + m.board.messagesOfType(VillageSignalBoard.MsgType.TRADE_HAVE).size()
+                    + " 买单=" + m.board.messagesOfType(VillageSignalBoard.MsgType.TRADE_WANT).size()),false);
+            }
+            c.getSource().sendSuccess(new StringTextComponent("当前维度活跃市场：" + markets.size()
+                + "；未加载实体不参与，索引最多缓存 100 ticks。"),false);
+            return markets.size();
+        });
+    }
+    static LiteralArgumentBuilder<CommandSource> resetValues() {
+        return Commands.literal("reset_values")
+            .then(Commands.argument("villagers", EntityArgument.entities()).executes(c -> {
+                int reset = 0, skipped = 0;
+                for (Entity entity : EntityArgument.getEntities(c, "villagers")) {
+                    if (!(entity instanceof VillagerEntity) || !entity.isAlive()) {
+                        skipped++;
+                        continue;
+                    }
+                    VillagerAgentData agent = VillagerAgentManager.getOrCreateAgent((VillagerEntity) entity);
+                    VillagerEconomySystem.resetPersonalValueTable(agent);
+                    reset++;
+                }
+                if (reset == 0) return fail(c, "没有选中存活的村民，价值表未修改。");
+                c.getSource().sendSuccess(new StringTextComponent("已重置 " + reset
+                    + " 个村民的价值表（共享默认值 + 当前职业价格），跳过 " + skipped + " 个实体。"), false);
+                return reset;
+            }));
+    }
+
     static LiteralArgumentBuilder<CommandSource> trade() {
         return Commands.literal("trade")
             .then(Commands.argument("first", EntityArgument.entity())

@@ -46,6 +46,7 @@ public final class VillagerTradeSystem {
     /** Called by {@code TradeSkill} after the initiator reaches the target villager. */
     public static void initiate(ServerWorld world, VillagerEntity a, VillagerAgentData agentA,
                                 VillagerEntity b, VillagerAgentData agentB) {
+        if (TradeCoordinator.busy(a.getUUID()) || TradeCoordinator.busy(b.getUUID())) return;
         agentA.setSocializing(true);
         agentB.setSocializing(true);
         agentA.setLastSocialTick(world.getGameTime());

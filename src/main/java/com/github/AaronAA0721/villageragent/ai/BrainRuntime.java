@@ -29,6 +29,7 @@ public final class BrainRuntime {
     public long walkStartedTick;
     public long goalStartedTick;
     public final TaskExecution tasks = new TaskExecution();
+    public final AcquisitionTasks acquisitions = new AcquisitionTasks();
     public int farmOpportunities;
     public BlockPos rememberedFarm;
     public final java.util.Map<BlockPos, Long> farmRevisitAfter = new java.util.HashMap<>();

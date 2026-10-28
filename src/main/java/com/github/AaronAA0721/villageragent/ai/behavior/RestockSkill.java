@@ -26,17 +26,11 @@ public final class RestockSkill implements VillagerSkill {
             if (have >= desired) continue;
             missing = true;
             String id = supply.item.getRegistryName().toString();
-            if (CraftingPlan.supports(world, supply.item) && (a.getUnlockedRecipes().contains(id)
-                    || SkillCraftCatalog.isUnlockedFor(a.getCapabilityPool(), a.getProfession(), id))) {
-                SkillResult result = BehaviorExecutor.executeChild(a, v, world, () -> {
-                    AgentGoal child = new AgentGoal("craft", "Make missing supply " + id, 6);
-                    child.setTargetItem(id); child.setTargetQuantity(desired - have); return child;
-                });
-                return result == SkillResult.SUCCESS ? SkillResult.RUNNING : result;
-            }
-            ResourceWorkSystem.request(world, a, id, desired);
-            VillageSignalBoard.get().post(a.getVillagerId(), v.blockPosition(), VillageSignalBoard.MsgType.TRADE_WANT,
-                    supply.item.getRegistryName(), desired - have, world.getGameTime());
+            SkillResult result = BehaviorExecutor.executeChild(a, v, world, () -> {
+                AgentGoal child = new AgentGoal("acquire_item", "Acquire missing supply " + id, 6);
+                child.setTargetItem(id); child.setTargetQuantity(desired); return child;
+            });
+            if (result != SkillResult.WAITING) return result == SkillResult.SUCCESS ? SkillResult.RUNNING : result;
         }
         return missing ? SkillResult.WAITING : SkillResult.SUCCESS;
     }

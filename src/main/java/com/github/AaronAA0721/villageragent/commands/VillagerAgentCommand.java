@@ -103,6 +103,8 @@ public class VillagerAgentCommand {
                     .then(Commands.argument("quantity", IntegerArgumentType.integer(1, 256))
                         .executes(VillagerAgentCommand::requestMaterial))))
             .then(VillagerControlCommands.trade())
+            .then(VillagerControlCommands.markets())
+            .then(VillagerControlCommands.resetValues())
             .then(VillagerControlCommands.items("craft"))
             .then(VillagerControlCommands.items("give"))
             .then(VillagerControlCommands.wearHoe())
@@ -133,8 +135,15 @@ public class VillagerAgentCommand {
         com.github.AaronAA0721.villageragent.ai.ActionLifecycle.cancel(agent, villager, world);
         agent.setRunningGoal(null);
         agent.getGoals().removeIf(g -> "fulfill_order".equals(g.getGoalType()));
-        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.assign(agent,
-                com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.parse(role));
+        villager.releasePoi(net.minecraft.entity.ai.brain.memory.MemoryModuleType.JOB_SITE);
+        villager.getBrain().eraseMemory(net.minecraft.entity.ai.brain.memory.MemoryModuleType.JOB_SITE);
+        villager.getBrain().eraseMemory(net.minecraft.entity.ai.brain.memory.MemoryModuleType.POTENTIAL_JOB_SITE);
+        net.minecraft.entity.merchant.villager.VillagerProfession profession = "lumberjack".equals(role)
+                ? com.github.AaronAA0721.villageragent.content.Workstations.LUMBERJACK.get()
+                : "miner".equals(role) ? com.github.AaronAA0721.villageragent.content.Workstations.MINER.get()
+                : net.minecraft.entity.merchant.villager.VillagerProfession.NONE;
+        villager.setVillagerData(villager.getVillagerData().setProfession(profession));
+        agent.updateProfession("none".equals(role) ? "Unemployed Villager" : role);
         context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " occupation: " + role), false);
         return 1;
     }

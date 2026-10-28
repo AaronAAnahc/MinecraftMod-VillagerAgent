@@ -1,6 +1,6 @@
 # Configuration and operation
 
-Reviewed: 2026-10-23. Versions come from `gradle.properties`, commands from `VillagerAgentCommand`, and defaults from `ModConfig`.
+Reviewed: 2026-10-27. Versions come from `gradle.properties`, commands from `VillagerAgentCommand`, and defaults from `ModConfig`.
 
 ## Build and launch
 
@@ -13,7 +13,7 @@ Minecraft 1.16.5, Forge 36.2.42, official 1.16.5 mappings; `build.gradle` uses a
 .\gradlew.bat runClient
 ```
 
-Artifacts are in `build/libs/`; install them in the matching Forge instance's `mods/` directory. Add `--offline` when dependencies are cached. `check` includes order and goal-exit rule checks; see [Debugging and verification](DEBUG_VERIFICATION.md) for scope.
+Artifacts are in `build/libs/`; install them in the matching Forge instance's `mods/` directory on the server and participating clients. Custom blocks/items and client presentation are part of the mod. Add `--offline` when dependencies are cached. `check` includes order, goal-exit, scheduler, task-frame, acquisition-search, method-executor, request-ownership and task-contract checks; see [Debugging and verification](DEBUG_VERIFICATION.md) for scope.
 
 ## Configuration files
 
@@ -94,7 +94,10 @@ These disable all debug visualization, only the status/mental HUD, and automatic
 
 Administrator commands also accept `/villageragent`:
 
-- `/va trade <first villager> <second villager> <first item> <quantity 1–64> <return item> <quantity 1–64>`: one meeting, with return delivery only after the first transfer is fully received. Each AgentInventory supplies its own items with exact NBT matching. Swap participants and corresponding items to reverse order. Both need stock and receiving capacity beforehand. The demo_trade adult, range, AI, timeout, and occupancy restrictions apply.
+- `/va reset_values <villagers>`: resets selected living villagers' personal prices to shared defaults plus their current profession template, removing personal overrides. Accepts one UUID or a multi-entity selector; skips non-villagers and dead entities and returns the reset count. Requires permission level 2. Example: `/va reset_values @e[type=minecraft:villager,distance=..16]`; add `sort=nearest,limit=1` to reset only the nearest villager. Uses packaged price data; it does not reload files or change inventory.
+
+- `/va trade <first villager> <second villager> <first item> <quantity 1–64> <return item> <quantity 1–64>`: reserves both residents in the same runtime village market. They finish or yield current roots, independently select `meet_trade`, then start one shared meeting once both are ready. Inventory exchange commits atomically; no generated items or sequential dropped-item payment. Both must be loaded adults with AI, in the command's dimension, within 128 blocks and free of other trade/demo/social sessions. Stock and receiving space are checked before booking and again before settlement. Pending appointments expire after 2400 ticks; the first-ready wait/approach limit is 600 ticks.
+- `/va markets`: lists runtime markets in the current dimension, including center coordinates, meeting-point/fallback origin, cached loaded residents and offer/demand counts. Membership cache refreshes every 100 ticks; this does not discover unloaded villages.
 - `/va give <villager> <item with optional NBT> <quantity 1–64>`: spawns demo supplies directly into AgentInventory. Vanilla `/give` cannot stock this custom inventory.
 - `/va craft <villager> <item ID> <quantity 1–64>`: creates a one-shot crafting goal for additional output; batch yields may exceed it. Requires an unlocked standard shaped/shapeless recipe and reuses recursive planning, real consumption, and workbench memory. It neither supplies missing ingredients nor bypasses unlocks. NBT restrictions only inspect explicitly entered `{...}`; automatically generated default durability NBT does not invalidate a plain item-ID command. A reachable table is required for 3×3 steps; 2×2 steps are handheld. Missing ingredients request supply; missing tables cause waiting. AI and worldinteraction must be enabled.
 - `/va wear_hoe <villager> <remaining durability>`: adjusts the first inventory hoe for filming actual breakage. Unbreaking may delay it; use a farmer with one unenchanted hoe.
@@ -151,3 +154,10 @@ combat_rally_radius = 64.0
 Default 64 blocks, allowed range 8–512, measured in three dimensions around the enemy. Only loaded managed villagers in the same dimension respond; distant chunks are not force-loaded. Use 256.0 for a larger settlement. Stop the game/server, edit, and restart. `/va config set` boolean options do not change this numeric setting. A large broadcast radius does not provide per-village membership isolation.
 
 The radius does not change charging conditions: at least two eligible responders must arrive within eight blocks with line of sight and sufficient power; low-health villagers retreat. Demo-occupied villagers remain excluded. Distant responders navigate toward the enemy but may fail to arrive on unreachable terrain.
+
+
+## Resource workstations
+
+`/give @p villageragent:carpenter_table` and `/give @p villageragent:miner_workbench` provide the new profession blocks. Both are noninteractive blocks with ordinary crafting recipes and creative entries. Placement lets eligible villagers claim the corresponding lumberjack/miner profession through POIs. See [Workstations](workstations.md) for textures, skills, starter tools and administrative occupation behavior; [Task methods](task_methods.md) describes automatic item-method discovery.
+
+New default `craft_unlocks.json` keys are `woodcutting`, `mining` and `quarrying`. Existing external overrides remain in control and are not overwritten. Saved personal prices are likewise retained; use the existing `/va reset_values <targets>` command when intentionally adopting the updated default axe/pickaxe values.

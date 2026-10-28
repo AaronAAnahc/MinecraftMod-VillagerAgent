@@ -14,7 +14,7 @@ public final class OpportunitySensor {
             VillagerAgentData data = VillagerAgentManager.getAgent(other.getUUID());
             // Match SocializeSkill's live partner predicate, so a busy neighbour does not
             // produce a positive social goal that immediately returns WAITING.
-            if (data == null || data.isSocializing() || data.getCurrentAction() != null
+            if (data == null || TradeCoordinator.busy(data.getVillagerId()) || data.isSocializing() || data.getCurrentAction() != null
                     || world.getGameTime() - data.getLastSocialTick() < 400) continue;
             double d = self.distanceToSqr(other);
             if (d < best) { best = d; b.socialPartner = other.getUUID(); }

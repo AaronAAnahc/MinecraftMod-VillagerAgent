@@ -107,7 +107,8 @@ public class SocializeSkill implements VillagerSkill {
         double bestD = Double.MAX_VALUE;
         for (VillagerAgentData other : VillagerAgentManager.getAllAgents()) {
             if (other.getVillagerId().equals(selfData.getVillagerId())) continue;
-            if (other.isSocializing() || world.getGameTime() - other.getLastSocialTick() < 400
+            if (com.github.AaronAA0721.villageragent.ai.TradeCoordinator.busy(other.getVillagerId())
+                    || other.isSocializing() || world.getGameTime() - other.getLastSocialTick() < 400
                     || other.getCurrentAction() != null) continue; // busy
             Entity e = world.getEntity(other.getVillagerId());
             if (e instanceof VillagerEntity && !((VillagerEntity) e).isSleeping()) {

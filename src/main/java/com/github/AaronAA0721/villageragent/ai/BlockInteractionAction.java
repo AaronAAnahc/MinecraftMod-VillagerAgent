@@ -230,7 +230,9 @@ public class BlockInteractionAction {
         }
         // Initialise break timing on first ACTING tick
         if (action.getBreakTargetTicks() <= 0) {
-            ItemStack tool = VillagerEquipmentHelper.equipBestToolForBlock(villager, agent, state);
+            ItemStack tool = action.getBreakTool();
+            if (tool == null || tool.isEmpty() || !agent.getInventory().getItems().contains(tool))
+                tool = VillagerEquipmentHelper.equipBestToolForBlock(villager, agent, state);
             if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return StepResult.ABANDONED;
             action.setBreakingState(state);
             action.setBreakTool(tool);

@@ -1,0 +1,6 @@
+{
+  "block.villageragent.carpenter_table": "木工台",
+  "block.villageragent.miner_workbench": "矿工工作台",
+  "entity.minecraft.villager.villageragent.lumberjack": "伐木工",
+  "entity.minecraft.villager.villageragent.miner": "矿工"
+}

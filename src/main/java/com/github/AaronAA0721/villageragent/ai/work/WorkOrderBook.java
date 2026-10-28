@@ -15,6 +15,8 @@ public final class WorkOrderBook {
         public int targetStock, remaining;
         public long expiresAt, leaseUntil;
         public UUID worker;
+        /** Null for ordinary shared orders; owned demand is transient and separately cancellable. */
+        public UUID ownerAttempt;
         public Status status = Status.OPEN;
 
         public Order(UUID id, UUID requester, String item, ResourceProfession profession,
@@ -32,19 +34,30 @@ public final class WorkOrderBook {
     public void restore(Order order) { orders.put(order.id, order); }
     public Order request(UUID requester, String item, ResourceProfession profession,
                          int desiredStock, int currentStock, long now) {
+        return requestOwned(null, requester, item, profession, desiredStock, currentStock, now);
+    }
+    public Order requestOwned(UUID owner, UUID requester, String item, ResourceProfession profession,
+                              int desiredStock, int currentStock, long now) {
         if (desiredStock <= currentStock || desiredStock <= 0) return null;
         for (Order o : orders.values()) {
-            if (o.active() && o.requester.equals(requester) && o.item.equals(item)) {
+            if (o.active() && Objects.equals(owner, o.ownerAttempt) && o.requester.equals(requester) && o.item.equals(item)) {
                 o.targetStock = Math.max(o.targetStock, desiredStock);
                 o.remaining = Math.max(0, o.targetStock - currentStock);
-                o.expiresAt = now + ORDER_TICKS;
+                o.expiresAt = now + (owner == null ? ORDER_TICKS : LEASE_TICKS);
                 return o;
             }
         }
         Order o = new Order(UUID.randomUUID(), requester, item, profession,
-                desiredStock, desiredStock - currentStock, now + ORDER_TICKS);
+                desiredStock, desiredStock - currentStock, now + (owner == null ? ORDER_TICKS : LEASE_TICKS));
+        o.ownerAttempt = owner;
         orders.put(o.id, o);
         return o;
+    }
+    public void cancelOwned(UUID owner) {
+        if (owner == null) return;
+        for (Order order : orders.values()) if (owner.equals(order.ownerAttempt) && order.active()) {
+            order.status = Status.CANCELLED; order.worker = null; order.leaseUntil = 0;
+        }
     }
     public boolean claim(UUID orderId, UUID worker, long now) {
         Order o = get(orderId);

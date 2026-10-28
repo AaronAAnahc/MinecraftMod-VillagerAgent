@@ -47,7 +47,9 @@ public final class BehaviorExecutor {
         register(new AcquireItemSkill());
         register(new FindJobSiteSkill());
         register(new ResourceWorkSkill());
+        register(new ExtractItemSkill());
         register(new TradeDeliverySkill());
+        register(new TradeMeetingSkill());
     }
 
     /**
@@ -78,6 +80,7 @@ public final class BehaviorExecutor {
         TYPE_TO_SKILL.put("acquire_item", "acquire_item");
         TYPE_TO_SKILL.put("find_job_site", "find_job_site");
         TYPE_TO_SKILL.put("fulfill_order", "fulfill_order");
+        TYPE_TO_SKILL.put("extract_item", "extract_item");
         TYPE_TO_SKILL.put("deliver_trade", "deliver_trade");
     }
 

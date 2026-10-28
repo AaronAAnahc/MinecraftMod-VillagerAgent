@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 1060" font-family="'Segoe UI','PingFang SC',sans-serif">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#4fc3f7"/>
+    </marker>
+    <marker id="arwd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#7ba7bf"/>
+    </marker>
+    <marker id="arwr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#ff5252"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box{fill:#0d151d;stroke:#1d3d52;stroke-width:1.5;rx:8;}
+    .cls{fill:#6fd0ff;font-size:14px;font-weight:700;}
+    .code{fill:#a9c9dc;font-size:11px;font-family:ui-monospace,Consolas,monospace;}
+    .warn{fill:#ffb74d;font-size:11px;font-family:ui-monospace,Consolas,monospace;}
+    .edge{fill:none;stroke:#4fc3f7;stroke-width:1.6;}
+    .edged{fill:none;stroke:#7ba7bf;stroke-width:1.4;stroke-dasharray:5 4;}
+    .edger{fill:none;stroke:#ff5252;stroke-width:1.8;}
+    .lbl{fill:#8fd8f7;font-size:9.5px;font-family:ui-monospace,Consolas,monospace;}
+    .lane{fill:#4a7d99;font-size:12px;font-weight:700;letter-spacing:2px;}
+    .sep{stroke:#1d3d52;stroke-width:1;}
+  </style>
+
+  <rect width="1560" height="1060" fill="#070b0f"/>
+
+  <text x="20" y="40" fill="#e8f4fa" font-size="20" font-weight="700">VillagerAgent 任务管线 · 类交互与通信图</text>
+  <text x="20" y="62" fill="#7a9ab0" font-size="11">依 1.16.5 源码核实绘制 · 原截图无可提取文字，按框图拓扑重建 · 2026-10-27</text>
+  <text x="1120" y="40" fill="#7a9ab0" font-size="10.5">── 方法调用&#160;&#160;&#160;┄┄ goal 注入 / 状态写入&#160;&#160;&#160;&#x2717; 失败路径&#160;&#160;&#160;&#x26A0; 已知设计问题</text>
+
+  <text class="lane" x="20" y="82">&#9312; 调度层</text>
+  <text class="lane" x="390" y="82">&#9313; 执行层</text>
+  <text class="lane" x="760" y="82">&#9314; 方法选择层</text>
+  <text class="lane" x="1130" y="82">&#9315; 世界通道 · 通信</text>
+
+  <!-- ═══ Lane 1 调度层 ═══ -->
+  <rect class="box" x="20" y="90" width="330" height="120" rx="8"/>
+  <text class="cls" x="32" y="112">VillagerAgentManager</text>
+  <line class="sep" x1="20" y1="120" x2="350" y2="120"/>
+  <text class="code" x="32" y="138">tick(world) 每 tick 总入口</text>
+  <text class="code" x="32" y="157">&#183; offerWork(v, agent) 扫订单簿</text>
+  <text class="code" x="32" y="176">&#183; 遍历 goals &#8594; BehaviorExecutor</text>
+  <text class="code" x="32" y="195">&#183; BLOCKED &#8594; 恢复管线 (L1229)</text>
+
+  <rect class="box" x="20" y="250" width="330" height="140" rx="8"/>
+  <text class="cls" x="32" y="272">GoalScheduler</text>
+  <line class="sep" x1="20" y1="280" x2="350" y2="280"/>
+  <text class="code" x="32" y="298">pickNextGoal(agent, world)</text>
+  <text class="code" x="32" y="317">utility = max(1,priority)&#215;weight</text>
+  <text class="code" x="32" y="336">priority&#8805;9 硬抢占; 其余轮盘采样</text>
+  <text class="code" x="32" y="355">同类完成 600t 内 &#215;0.3</text>
+  <text class="code" x="32" y="374">restock/craft 库存够 &#8594; 权重 0</text>
+
+  <rect class="box" x="20" y="430" width="330" height="100" rx="8"/>
+  <text class="cls" x="32" y="452">RoutineScheduler</text>
+  <line class="sep" x1="20" y1="460" x2="350" y2="460"/>
+  <text class="code" x="32" y="478">ensureRepeatableGoals(agent, world)</text>
+  <text class="code" x="32" y="497">seed rest/farm/restock/craft/trade&#8230;</text>
+  <text class="code" x="32" y="516">KNOWN_TYPES 门控(就业/能力/冷却)</text>
+
+  <rect class="box" x="20" y="570" width="330" height="150" rx="8"/>
+  <text class="cls" x="32" y="592">AgentGoal（扁平 POJO）</text>
+  <line class="sep" x1="20" y1="600" x2="350" y2="600"/>
+  <text class="code" x="32" y="618">goalType(字符串) &#183; priority 1-10</text>
+  <text class="code" x="32" y="637">targetItem/Qty &#183; outcomeItems</text>
+  <text class="code" x="32" y="656">methodAttempt &#183; lastFailure</text>
+  <text class="code" x="32" y="675">suspended &#183; cooldownUntilTick</text>
+  <text class="warn" x="32" y="694">&#9888; 新增任务需在 5 处登记字符串</text>
+
+  <!-- ═══ Lane 2 执行层 ═══ -->
+  <rect class="box" x="390" y="90" width="330" height="120" rx="8"/>
+  <text class="cls" x="402" y="112">BehaviorExecutor</text>
+  <line class="sep" x1="390" y1="120" x2="720" y2="120"/>
+  <text class="code" x="402" y="138">findHandler(): 遍历 SKILLS 列表</text>
+  <text class="code" x="402" y="157">首个 canHandle==true 即胜出</text>
+  <text class="warn" x="402" y="176">注册顺序 = 隐式优先级 &#9888;</text>
+  <text class="code" x="402" y="195">executeChild() &#8594; Frame.child</text>
+
+  <rect class="box" x="390" y="250" width="330" height="130" rx="8"/>
+  <text class="cls" x="402" y="272">VillagerSkill（接口）</text>
+  <line class="sep" x1="390" y1="280" x2="720" y2="280"/>
+  <text class="code" x="402" y="298">canHandle / execute / isPrimitive</text>
+  <text class="code" x="402" y="317">passesCapabilityGate() 能力门控</text>
+  <text class="code" x="402" y="336">单例注册 &#8594; 状态必须外置到 agent</text>
+  <text class="code" x="402" y="355">实现: Farm/Craft/Acquire/Trade&#8230;</text>
+
+  <rect class="box" x="390" y="420" width="330" height="130" rx="8"/>
+  <text class="cls" x="402" y="442">TaskExecution.Frame</text>
+  <line class="sep" x1="390" y1="450" x2="720" y2="450"/>
+  <text class="code" x="402" y="468">child: 单子槽(无 siblings)</text>
+  <text class="code" x="402" y="487">state(Class&lt;T&gt;, factory) 状态袋</text>
+  <text class="code" x="402" y="506">tick(root) / child(factory, runner)</text>
+  <text class="warn" x="402" y="525">仅运行时 &#183; 不进 NBT 重启即失</text>
+
+  <rect class="box" x="390" y="590" width="330" height="130" rx="8"/>
+  <text class="cls" x="402" y="612">VillagerAction（agent 单一槽位）</text>
+  <line class="sep" x1="390" y1="620" x2="720" y2="620"/>
+  <text class="code" x="402" y="638">当前动作: MOVE/BREAK/CRAFT/HARVEST</text>
+  <text class="code" x="402" y="657">Phase: SEARCH&#8594;WALK&#8594;ACT&#8594;WAIT</text>
+  <text class="code" x="402" y="676">stuckTicks &#183; breakProgress</text>
+  <text class="code" x="402" y="695">farmMove/restMove 标记认领在途行走</text>
+
+  <!-- ═══ Lane 3 方法选择层 ═══ -->
+  <rect class="box" x="760" y="90" width="330" height="90" rx="8"/>
+  <text class="cls" x="772" y="112">AcquireItemSkill</text>
+  <line class="sep" x1="760" y1="120" x2="1090" y2="120"/>
+  <text class="code" x="772" y="138">缺货 &#8594; postDemand(TRADE_WANT)</text>
+  <text class="code" x="772" y="157">会话: brain().tasks.current()</text>
+
+  <rect class="box" x="760" y="220" width="330" height="160" rx="8"/>
+  <text class="cls" x="772" y="242">TaskMethodExecution</text>
+  <line class="sep" x1="760" y1="250" x2="1090" y2="250"/>
+  <text class="code" x="772" y="268">Policy(reconsider=100 minRun=100)</text>
+  <text class="code" x="772" y="287">&#160;&#160;grace=200 stall=1200 cd=400</text>
+  <text class="code" x="772" y="306">score = estimate + fail&#215;1.0</text>
+  <text class="code" x="772" y="325">&#160;&#160;&#160;&#160;&#160;&#160;+ stall&#215;0.0025</text>
+  <text class="code" x="772" y="344">切换需便宜 &#8805; switchMargin 0.5</text>
+  <text class="code" x="772" y="363">safeToSwitch 边界重评估</text>
+
+  <rect class="box" x="760" y="420" width="330" height="120" rx="8"/>
+  <text class="cls" x="772" y="442">ItemTaskCatalog</text>
+  <line class="sep" x1="760" y1="450" x2="1090" y2="450"/>
+  <text class="code" x="772" y="468">discover(ctx) &#8594; 候选方法集</text>
+  <text class="code" x="772" y="487">minimumCost(item) 递归成本下界</text>
+  <text class="code" x="772" y="506">DependencyPath(6,64) 限深防环</text>
+  <text class="code" x="772" y="525">能力门槛在 discover 阶段淘汰</text>
+
+  <rect class="box" x="760" y="580" width="330" height="170" rx="8"/>
+  <text class="cls" x="772" y="602">TaskMethod&lt;C&gt;（接口 + 4 实现）</text>
+  <line class="sep" x1="760" y1="610" x2="1090" y2="610"/>
+  <text class="code" x="772" y="628">estimate | start | tick | close</text>
+  <text class="code" x="772" y="647">BuyProduct &#8212; 现货市价</text>
+  <text class="code" x="772" y="666">Produce &#8212; craft 原料+合成模拟</text>
+  <text class="code" x="772" y="685">Extract &#8212; 采集(含工具前置递归)</text>
+  <text class="warn" x="772" y="704">Supply &#8212; cooperative = 0 &#9888;</text>
+  <text class="code" x="772" y="723">estimate 契约: 纯查询禁副作用</text>
+
+  <!-- ═══ Lane 4 世界通道 ═══ -->
+  <rect class="box" x="1130" y="90" width="410" height="140" rx="8"/>
+  <text class="cls" x="1142" y="112">VillagerEconomySystem</text>
+  <line class="sep" x1="1130" y1="120" x2="1540" y2="120"/>
+  <text class="code" x="1142" y="138">postDemand / postOffer 发布 want/have</text>
+  <text class="code" x="1142" y="157">runMatching(): price&#215;qty&#215;资金 撮合</text>
+  <text class="code" x="1142" y="176">quoteCost &#183; emeraldCost(锚点 10)</text>
+  <text class="warn" x="1142" y="195">&#9888; advertiseAcquisitionStock 在 estimate</text>
+  <text class="warn" x="1142" y="214">&#160;&#160;内发广告 &#8212; 违反纯查询契约</text>
+
+  <rect class="box" x="1130" y="270" width="410" height="130" rx="8"/>
+  <text class="cls" x="1142" y="292">VillageSignalBoard（市场信号板）</text>
+  <line class="sep" x1="1130" y1="300" x2="1540" y2="300"/>
+  <text class="code" x="1142" y="318">TRADE_WANT / TRADE_HAVE &#183; TTL 到期清</text>
+  <text class="code" x="1142" y="337">ownerAttempt&#8800;null &#8594; 跳过市场撮合</text>
+  <text class="code" x="1142" y="356">matchTrade + APPOINTMENTS 预约</text>
+  <text class="code" x="1142" y="375">hear(48 格) &#183; resolveTrade</text>
+
+  <rect class="box" x="1250" y="440" width="290" height="100" rx="8"/>
+  <text class="cls" x="1262" y="462">TradeCoordinator</text>
+  <line class="sep" x1="1250" y1="470" x2="1540" y2="470"/>
+  <text class="code" x="1262" y="488">enqueue &#8594; advance 走向对方</text>
+  <text class="code" x="1262" y="507">completeMatchedExchange</text>
+  <text class="code" x="1262" y="526">双方 &#8804;9 格才结算划转</text>
+
+  <rect class="box" x="1130" y="580" width="410" height="170" rx="8"/>
+  <text class="cls" x="1142" y="602">ResourceWorkSystem / WorkOrderBook</text>
+  <line class="sep" x1="1130" y1="610" x2="1540" y2="610"/>
+  <text class="code" x="1142" y="628">request / requestOwned(ownerAttempt)</text>
+  <text class="code" x="1142" y="647">offerWork(): 扫单 claim 租约 600t</text>
+  <text class="code" x="1142" y="666">renew / release &#183; 禁止一人租两单</text>
+  <text class="code" x="1142" y="685">reconcile(实际库存) &#8594; DELIVERED</text>
+  <text class="code" x="1142" y="704">clearSatisfiedWant &#8594; 删 TRADE_WANT</text>
+  <text class="code" x="1142" y="723">货怎么来的不管(库存即真相)</text>
+
+  <!-- ═══ 底部: 失败恢复 + 记录层 ═══ -->
+  <text class="lane" x="20" y="788">&#9316; 失败恢复</text>
+  <rect class="box" x="20" y="800" width="330" height="150" rx="8"/>
+  <text class="cls" x="32" y="822">FailureRecoveryPlanner</text>
+  <line class="sep" x1="20" y1="830" x2="350" y2="830"/>
+  <text class="code" x="32" y="848">handle(FailureReason) 分派矩阵:</text>
+  <text class="code" x="32" y="867">MISSING_ITEM &#8594; 注入 acquire_item p6</text>
+  <text class="code" x="32" y="886">NO_JOB_SITE &#8594; 注入 find_job_site</text>
+  <text class="code" x="32" y="905">NO_RECIPE &#8594; 回落 postTradeWant</text>
+  <text class="code" x="32" y="924">CAPABILITY_TOO_LOW &#8594; 记忆</text>
+
+  <rect class="box" x="390" y="800" width="330" height="150" rx="8"/>
+  <text class="cls" x="402" y="822">GoalExitPolicy</text>
+  <line class="sep" x1="390" y1="830" x2="720" y2="830"/>
+  <text class="code" x="402" y="848">retain(goal, result, now):</text>
+  <text class="code" x="402" y="867">MISSING_ITEM 的 BLOCKED &#8594;</text>
+  <text class="code" x="402" y="886">&#160;&#160;留列表 + 200t 冷却</text>
+  <text class="code" x="402" y="905">&#160;&#160;不计 recordFailure()</text>
+  <text class="code" x="402" y="924">其他 FAIL 累计 3 次 &#8594; 删除</text>
+
+  <text class="lane" x="760" y="788">&#9317; 记录层 &#8212; 状态存续在哪</text>
+  <rect class="box" x="760" y="800" width="780" height="170" rx="8"/>
+  <rect x="775" y="845" width="370" height="55" rx="6" fill="#101c26" stroke="#1d3d52"/>
+  <text class="cls" x="787" y="866" font-size="12">WorkOrderSavedData</text>
+  <text class="code" x="787" y="888">NBT 持久化 &#183; setDirty() 订单/租约跨重启</text>
+  <rect x="1165" y="845" width="370" height="55" rx="6" fill="#101c26" stroke="#1d3d52"/>
+  <text class="cls" x="1177" y="866" font-size="12">VillageSignalBoard</text>
+  <text class="code" x="1177" y="888">内存 &#183; TTL 到期蒸发 &#183; 不跨重启</text>
+  <rect x="775" y="905" width="370" height="55" rx="6" fill="#101c26" stroke="#1d3d52"/>
+  <text class="cls" x="787" y="926" font-size="12">AgentGoal.lastFailure / methodAttempt</text>
+  <text class="code" x="787" y="948">runtime only &#183; goal 删除即丢</text>
+  <rect x="1165" y="905" width="370" height="55" rx="6" fill="#101c26" stroke="#1d3d52"/>
+  <text class="cls" x="1177" y="926" font-size="12">Frame.state（类型袋）</text>
+  <text class="warn" x="1177" y="948">易失 &#183; 重启即失 &#9888; 同类状态会静默共享</text>
+
+  <!-- ═══ 边 ═══ -->
+  <path class="edge" d="M185 210 V 250" marker-end="url(#arw)"/>
+  <text class="lbl" x="193" y="238">pickNextGoal()</text>
+
+  <path class="edge" d="M350 140 H 390" marker-end="url(#arw)"/>
+  <rect x="351" y="116" width="126" height="15" fill="#070b0f"/>
+  <text class="lbl" x="353" y="128">execute(runningGoal)</text>
+
+  <path class="edge" d="M720 135 H 760" marker-end="url(#arw)"/>
+  <rect x="721" y="110" width="92" height="15" fill="#070b0f"/>
+  <text class="lbl" x="723" y="122">goalType 匹配</text>
+
+  <path class="edged" d="M185 530 V 570" marker-end="url(#arwd)"/>
+  <text class="lbl" x="193" y="558">seed REPEATABLE</text>
+
+  <path class="edged" d="M350 320 H 368 V 620 H 352" marker-end="url(#arwd)"/>
+  <text class="lbl" transform="rotate(90 376 470)" x="376" y="470" text-anchor="middle">选中 &#8594; getGoals()</text>
+
+  <path class="edge" d="M555 210 V 250" marker-end="url(#arw)"/>
+  <text class="lbl" x="563" y="238">首个 canHandle==true</text>
+
+  <path class="edge" d="M555 380 V 420" marker-end="url(#arw)"/>
+  <text class="lbl" x="563" y="408">executeChild(new AgentGoal)</text>
+
+  <path class="edge" d="M470 550 V 590" marker-end="url(#arw)"/>
+  <text class="lbl" x="478" y="578">setCurrentAction(&#8230;)</text>
+
+  <path class="edge" d="M925 180 V 220" marker-end="url(#arw)"/>
+  <text class="lbl" x="933" y="206">开会话</text>
+
+  <path class="edge" d="M925 380 V 420" marker-end="url(#arw)"/>
+  <text class="lbl" x="933" y="408">discover() / 每 100t 重评估</text>
+
+  <path class="edge" d="M925 540 V 580" marker-end="url(#arw)"/>
+  <text class="lbl" x="933" y="568">estimate()&#215;候选</text>
+
+  <path class="edge" d="M1090 610 H 1110 V 160 H 1130" marker-end="url(#arw)"/>
+  <text class="lbl" transform="rotate(-90 1102 390)" x="1102" y="390" text-anchor="middle">postDemand / quoteCost / advertiseStock &#9888;</text>
+
+  <path class="edge" d="M1335 230 V 270" marker-end="url(#arw)"/>
+  <text class="lbl" x="1343" y="258">post / matchTrade / resolve</text>
+
+  <path class="edge" d="M1395 400 V 440" marker-end="url(#arw)"/>
+  <text class="lbl" x="1403" y="428">matched pair</text>
+
+  <path class="edge" d="M1090 644 H 1130" marker-end="url(#arw)"/>
+  <text class="lbl" x="1093" y="638">requestOwned &#8594; claim(600t)</text>
+
+  <path class="edged" d="M1130 672 H 1102 V 774 H 368 V 706 H 352" marker-end="url(#arwd)"/>
+  <text class="lbl" x="640" y="768">offerWork &#8594; 注入 fulfill_order(p7)</text>
+
+  <path class="edge" d="M1160 580 V 400" marker-end="url(#arw)"/>
+  <text class="lbl" x="1168" y="424">clearSatisfiedWant 删 want</text>
+
+  <path class="edge" d="M1335 750 V 845" marker-end="url(#arw)"/>
+  <text class="lbl" x="1343" y="802">setDirty() NBT</text>
+
+  <path class="edger" d="M720 530 H 732 V 758 H 185 V 800" marker-end="url(#arwr)"/>
+  <text x="718" y="646" fill="#ff5252" font-size="22" font-weight="700">&#10007;</text>
+  <text x="200" y="752" fill="#ff8a80" font-size="10" font-family="ui-monospace,Consolas,monospace">FAIL / BLOCKED &#183; FailureReason</text>
+
+  <path class="edged" d="M60 800 V 720" marker-end="url(#arwd)"/>
+  <text class="lbl" x="68" y="766">注入 acquire_item(p6)</text>
+
+  <path class="edge" d="M350 870 H 390" marker-end="url(#arw)"/>
+  <rect x="351" y="846" width="104" height="15" fill="#070b0f"/>
+  <text class="lbl" x="353" y="858">retain(g, result)</text>
+
+  <path class="edged" d="M555 800 V 720" marker-end="url(#arwd)"/>
+  <text class="lbl" x="563" y="764">cooldown +200t</text>
+</svg>

@@ -12,6 +12,18 @@ OpenAI, Anthropic, Ollama, and Gemini response readers use try-with-resources fo
 
 ## Harness components
 
+### Thought generation and persona representation
+
+`VillagerEventHandler.onWorldTick` calls `VillagerAgentManager.tickThoughts`. This optional path defaults off, scans every 40 ticks, and uses a per-villager 6000-tick cooldown plus a nearby-player squared-distance check of 400. `requestThought` uses a fixed instruction template, current identity/mood/needs/activity/environment, and only the most recent memory. It does not select questions from a question bank. Its callback schedules goal parsing, memory writes, and broadcasts on the server thread. A parsed `GOAL:` directive still needs an executable handler and valid world conditions.
+
+`VillagerAgentData.personality` is text, with eight local fallback descriptions and optional LLM identity generation. Hunger/fatigue are floats clamped to 0–100; mood is a five-value enum derived from needs and relationships. `GoalScheduler.utility` also reads personality text: English `friendly` or `cheerful` multiplies social utility by 1.5. This is keyword matching, not a continuous personality vector.
+
+The social multiplier changes the score, not probability by a fixed percentage: ordinary selection normalizes against other feasible scores, and cooldown/partner/urgency rules still apply. Substring matching also matches `unfriendly`; Chinese synonyms do not match. Personality enters player dialogue, thoughts/greetings, villager conversation, and the `TradeSkill`-initiated negotiation prompts. It does not directly set the economic price table or implement a general risk/combat personality model. Relationship gains after dialogue use existing relationship thresholds, not LLM sentiment analysis. See the [class architecture and code walkthrough](defense-layouts/CODE_WALKTHROUGH.md) for the exact dependency map and excerpts.
+
+Although `llm_temperature` is defined, the current OpenAI-compatible request body does not send it; the Gemini request does. Inspect each protocol's request construction before claiming a configuration value is effective.
+
+`ModConfig` defaults to the `deepseek-chat` model identifier and DeepSeek's OpenAI-compatible endpoint. Defaults do not establish a running instance's effective model or the version behind an alias. Changing models can change identity text and proposed goals as well as language; unchanged rule execution therefore does not guarantee identical behavior. No cross-model quality measurements are established here. See [technical defense materials](defense-layouts/TECHNICAL_NOTES.md) for source excerpts and an explicitly unexecuted comparison/recording plan.
+
 | Component | Existing responsibility |
 |---|---|
 | `LLMGuard` | Future wrapping, timeouts, failure counts, and circuit breaking |
@@ -33,7 +45,7 @@ Passing action-schema validation still requires skill eligibility, current world
 
 Ordering starts with candidates touching world blocks and expands through 26 neighbors. It prefers the lowest Y, then distance to the anchor, finds a standing position for each step, and maintains a simulated placed set. Blocks without standing positions or an ordering position become errors. Static standing checks and actual navigation cover different conditions; dynamic reachability of arbitrary connected structures requires in-game verification.
 
-Validation can be returned to the LLM for bounded repair, controlled by `build_max_retries`. `BuildJob` stores steps, anchor, and cursor and provides NBT/world reconciliation methods; `tickBuilding` advances execution. Recovery differs from temporary resource-gathering plans: building data can be saved, while resource orders save demand and require a new claim.
+Validation can be returned to the LLM for bounded repair, controlled by `build_max_retries`. `BuildJob` stores steps, anchor, and cursor and provides NBT/world reconciliation methods; `tickBuilding` advances execution. Recovery differs from temporary resource-gathering plans: building data can be saved, while ordinary resource orders save demand and require a new claim; method-owned orders are transient and are recreated by acquisition.
 
 `/va build place`, `/va build break`, and `/va build structure` are explicit entry points. See command completion and `VillagerAgentCommand` for arguments. `processGoals` yields the body to non-goal-driven actions; combat and explicit building have their own update paths.
 

@@ -1,18 +1,18 @@
 # Event- and need-driven brain and resource orders
 
-Reviewed: 2026-10-23. This document describes the current workspace's main loop, goal exits, and resource orders.
+Reviewed: 2026-10-27. This document describes the current workspace's main loop, goal exits, and resource orders.
 
 This is implementation and maintenance documentation. See [Project walkthrough](project_walkthrough.md) for interview presentation. The runtime is Minecraft 1.16.5 / Forge; core scheduling and world operations run on the game server thread.
 
 ## Architecture
 
-The system combines Utility intent selection, rule-based task decomposition, and continuous action execution. Resource orders use HTN-inspired handwritten conditional decomposition and state progression within a bounded domain. There is no general HTN search engine or GOAP implementation.
+The system combines Utility intent selection, rule-based task decomposition, and continuous action execution. Item acquisition uses registered output-matched methods, recursive prerequisites, and cost/stall scoring. Resource-order execution uses handwritten supply steps and shares extraction with personal acquisition. This is a bounded HTN-style implementation, not a general planner over arbitrary world-state effects or a GOAP search engine. See [Task methods](task_methods.md).
 
 | Concept | Responsibility | Timber example |
 |---|---|---|
 | Utility AI | Choose what to do now | Compare supplying orders, harvesting, chatting, wandering, and resting; sample feasible options by weight |
-| HTN (Hierarchical Task Network) | Decompose tasks through predefined methods | Supply → check inventory → prepare tools → find tree → approach → chop → collect → deliver |
-| GOAP (Goal-Oriented Action Planning) | Search using action preconditions, effects, and costs | Need timber → search feasible combinations of chopping, buying, and exchanging |
+| Implemented task methods | Discover item producers, choose one method, and execute prerequisites | Acquire logs → choose extraction, purchase or cooperative supply; extraction may first acquire an axe |
+| GOAP (comparison only; not implemented) | Search arbitrary modeled world states through action effects | A general action-state search would need additional state/effect modeling |
 
 HTN defines methods for completing tasks, not a time schedule. GOAP still depends on correctly modeled actions and world state, rather than unrestricted random behavior. Both can run without an LLM. Task methods explicitly control tools, harvest results, navigation, and delivery; skill method bodies determine coverage.
 
@@ -121,27 +121,27 @@ Skill success and order completion are distinct. A batch delivery may return `SU
 
 ## Professions and orders
 
-`LUMBERJACK` and `MINER` are persisted agent roles. They do not replace the vanilla VillagerProfession registry or add textures/workstations. Roles and vanilla professions save separately and do not depend on vanilla schedules or POI switching.
+`LUMBERJACK` and `MINER` are cached resource-order roles synchronized from the registered `villageragent:lumberjack` and `villageragent:miner` professions. They claim the carpenter table and miner workbench through the normal POI path. See [Workstations](workstations.md). Older independent role data is reconciled to the actual entity profession on update.
 
-- Nearby unemployed adults can automatically adopt resource roles when matching demand exists; commands can assign them too.
+- Nearby unemployed adults obtain these professions by claiming their workstations. Orders do not assign jobs. The occupation command sets the actual profession and clears its previous job-site reservation.
 - First resource assignment provides one basic tool under the starter-supply convention; switching roles cannot grant it again.
-- Daily `restock` submits real supply requests. First vanilla profession assignment provides starter supplies.
+- Daily `restock` delegates shortages to acquisition, whose method executor compares crafting, paid product purchases and cooperative supply using remaining cost and stall penalties. See [Task methods](task_methods.md). First vanilla profession assignment provides starter supplies.
 - Profession controls claim eligibility; Utility controls when execution starts.
 - Each dimension has its own `WorkOrderSavedData`.
-- Active requests for the same requester/item merge and complete against target stock.
+- Active requests merge only when requester, item and `ownerAttempt` all match. Ordinary requests have a null owner; separate method attempts keep independent demand.
 - One valid claimant per order and one valid lease per worker.
-- Active work renews leases; interruption releases them; absence expires them. Reload preserves demand but clears leases and rebuilds plans from world/inventory state.
+- Active work renews leases; interruption releases them; absence expires them. Reload preserves active ordinary demand but excludes method-owned orders, clears leases, and rebuilds execution from world/inventory state.
 - Partial batches are allowed; only actual requester stock reaching the target closes the order.
 - Transfers use actual capacity, preserving items when inventories are full.
 - Expired orders stop occupying workers; persistent real shortages generate new requests.
 
-Demand comes from profession essentials in the economy system, failure recovery, item-acquisition tasks, and debug commands. The economy creates production goals for villagers with unlocked recipes; stock delivery enters the unified executor as `deliver_trade`.
+Demand comes from profession essentials in the economy system, failure recovery, item-acquisition tasks, and debug commands. The economy creates production goals for villagers with unlocked recipes; stock trades reserve both participants and enter the unified executor as paired `meet_trade` roots after natural task boundaries. See [Trade and supplies](capabilities_crafting_and_economy.md#trade-and-supplies) for the readiness barrier and per-market scope.
 
 Raw-material orders directly deliver cooperative supply to requesters. Orders cover demand/supply without quotes, advance payments, or breach penalties; stock trading settles in emeralds.
 
 ### Order data and state machine
 
-An order records id, requester, item, required profession, target stock, remaining shortage, expiry, claimant, and lease expiry.
+An order records id, requester, item, required profession, target stock, remaining shortage, expiry, claimant, lease expiry, and optional `ownerAttempt`. Request bridges cap desired stock at 256.
 
 ```text
 remaining = max(0, targetStock - requesterActualStock)
@@ -158,17 +158,19 @@ stateDiagram-v2
     CLAIMED --> DELIVERED: Stock satisfied
     OPEN --> EXPIRED: Order expires
     CLAIMED --> EXPIRED: Order expires
+    OPEN --> CANCELLED: Owning method closes
+    CLAIMED --> CANCELLED: Owning method closes
 ```
 
-`CANCELLED` also exists in the enum, but no complete explicit cancellation command/workflow is wired, so it is not shown as an integrated transition.
+`cancelOwned` is wired into method cleanup: it cancels active orders for that attempt and releases their workers. There is no separate user-facing order-cancellation command.
 
 Required invariants:
 
-1. Only active orders for the same requester/item merge; consumption after completion can create a new order.
+1. Only active orders with the same requester/item/owner merge; consumption after completion can create a new order.
 2. Workers cannot claim their own requests and must match the profession.
 3. At most one valid claimant per order and one valid lease per worker.
 4. A candidate expresses intent; execution ownership requires a claim. Multiple villagers observing an opportunity does not grant them simultaneous execution rights.
-5. Leases last 600 ticks and renew during active execution; orders last 24000 ticks. At 20 TPS these are about 30 seconds and 20 minutes. Maintenance handles expiry.
+5. Worker leases last 600 ticks and renew during execution. Ordinary demand expires after 24000 ticks; method-owned demand expires after 600 ticks and must be refreshed by its requester. Worker renewal does not refresh demand expiry. At 20 TPS these durations are 30 seconds and 20 minutes.
 6. Repeated requests can refresh expiry. Timeouts provide recovery, not delivery deadlines or commercial promises.
 7. Gifts and ordinary trades can satisfy stock too. `DELIVERED` means demand is satisfied, not that every item came from the original claimant.
 
@@ -179,8 +181,8 @@ Required invariants:
 Suppose A has two oak logs and wants ten; nearby B is a lumberjack:
 
 1. A requests `targetStock=10`, leaving eight. Repeated shortage checks merge into the active order.
-2. B's slow update sees the order and adds a `fulfill_order` candidate. Eligible nearby unemployed villagers may first receive a resource role.
-3. Candidate allocation reserves the order before creating the supply goal and assigning the role. When Utility selects supply, B renews or reacquires the lease at execution entry. If another worker owns it, B removes the stale goal and yields.
+2. B's slow update sees the order and adds a `fulfill_order` candidate. The worker must already have the appropriate profession and extraction skill.
+3. Candidate allocation reserves the order before creating the supply goal. When Utility selects supply, B renews or reacquires the lease at execution entry. If another worker owns it, B removes the stale goal and yields.
 4. B checks inventory: enough stock means delivery; otherwise check tools and find locally exposed reachable natural-tree candidates.
 5. Approach and break one block over ticks, collect real drops during a collection window, then inspect inventory to confirm the yield.
 6. Travel to A after reaching the batch amount. Normal batches are capped at eight; limited resources can result in a smaller partial batch.
@@ -191,7 +193,7 @@ Missing tools trigger recovery; missing resources trigger waiting and potentiall
 
 ## Gathering methods and limits
 
-`ResourceCatalog` supports oak, spruce, birch, jungle, acacia, and dark-oak logs; coal, iron ore, gold ore, diamonds, redstone, lapis lazuli, and cobblestone.
+`ResourceCatalog` supports oak, spruce, birch, jungle, acacia, and dark-oak logs; coal, iron ore, gold ore, diamonds, redstone, lapis lazuli, and cobblestone. It also registers mature wheat, carrot, potato and beetroot crops for personal acquisition. Crop entries have no resource-order profession and cannot create cooperative resource orders.
 
 In Minecraft 1.16.5, iron mining yields iron ore. Ingot processing uses crafting/recipe systems; recipe resolution and material conversion do not establish complete furnace input, fuel, and output interaction, which needs separate verification.
 
@@ -218,13 +220,14 @@ Server-thread conversation callbacks check entities, distance, and context befor
 | Data | Current policy |
 |---|---|
 | Resource role and starter-tool receipt flag | Saved with villager data; switching roles does not grant tools again |
-| Active-order demand fields | Per-dimension `WorldSavedData` |
+| Active ordinary-order demand fields | Per-dimension `WorldSavedData`; only active orders with null owner are saved |
+| Method-owned orders and acquisition attempts | Runtime only; canceled on owner cleanup and excluded from saves |
 | Claimants and execution leases | Not restored; reopened after loading |
 | Breaking progress, current actions, temporary skill plans | No exact checkpoint persistence; rebuild from current world/inventory |
 
-Recovery preserves demand and re-evaluates execution rather than resuming an exact instruction. Game world/entity saves are not atomic across files.
+Recovery preserves ordinary demand and re-evaluates execution rather than resuming an exact instruction. Method-owned requests are transient and must be recreated from surviving objectives. Game world/entity saves are not atomic across files.
 
-New gathering resources generally extend `ResourceCatalog` with outputs, sources, tools, and eligibility; different operations require new skill methods. New behaviors need candidate producers, scoring, execution, completion evidence, and cleanup, beyond an LLM prompt.
+New extraction resources extend `ResourceCatalog` with outputs, source predicates, tools, capability and supply eligibility; `ItemTaskCatalog` discovers them for personal acquisition. Different operations register a provider/contract/executor once, rather than per-villager method lists. New behaviors need candidate producers, scoring, execution, completion evidence, and cleanup, beyond an LLM prompt.
 
 ## Source entry points
 
@@ -268,7 +271,7 @@ Test-world scenarios:
 3. An unsuitable pickaxe must cause tool requests/waiting rather than fabricated ore.
 4. Full requester inventory and partial supplier stock must preserve quantities and leave unmet orders open.
 5. Remove ore, block routes, or separate participants during work; timeout/waiting must release execution.
-6. Save/reload: demand and roles persist; leases are reacquired.
+6. Save/reload: ordinary demand persists and leases are reacquired; owned demand is replanned. Cached resource roles reconcile with actual entity professions.
 7. High fatigue permits daytime rest; at night, seek sleep after current work. Fatigue 80 can preempt ordinary tasks. Farming and chatting need no LLM.
 
 `gradlew workOrderChecks` or `gradlew check` runs pure Java order checks covering deduplication, exclusive claims, lease renewal/expiry, partial delivery, external stock satisfaction, renewed demand, and dimension isolation. Compilation and rule checks do not replace Minecraft scenarios. See [Debugging and verification](DEBUG_VERIFICATION.md).
@@ -322,3 +325,5 @@ Every till, including maintenance and explicit commands, requires at least one s
 Reclamation requires FARMING ≥ 2, an inventory hoe, dirt/grass/path/coarse dirt, and air directly above. Water must be `Blocks.WATER` within horizontal ±4 at the target's height or one below; flowing water counts, waterlogged blocks do not. Maintenance requires at least three farmland blocks in the eight-neighbor ring plus the cardinal connection, needs only FARMING ≥ 1, and retains its rule without an extra water check. Both need loaded, approachable targets. Automatic scans use center ±12 horizontally and ±3 vertically, prioritizing existing work before reclamation. Seeds are not required to till; a hoe is, with one durability consumed on success and initial moisture seven.
 
 While owning the vanilla Brain, the mod separately runs vanilla `SwimTask(0.8F)` and enables `setCanFloat(true)` on ground navigation to retain floating/jumping control. Work goals remain under custom scheduling.
+
+Acquisition method sessions are retained separately from the transient execution tree across WAITING and preemption. Method-owned trade/resource requests are isolated and canceled by attempt UUID; ordinary resource-order persistence is unchanged, while transient owned orders are excluded from saves. See [Task methods](task_methods.md).

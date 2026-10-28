@@ -1,6 +1,6 @@
 package com.github.AaronAA0721.villageragent.ai.work;
 
-/** Persistent agent occupations, independent of vanilla POI schedules. */
+/** Cached resource-order role, synchronized from the entity's workstation profession. */
 public enum ResourceProfession {
     NONE, LUMBERJACK, MINER;
 

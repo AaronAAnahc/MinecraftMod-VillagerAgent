@@ -27,7 +27,7 @@ public final class WorkOrderSavedData extends WorldSavedData {
     @Override public CompoundNBT save(CompoundNBT nbt) {
         ListNBT list = new ListNBT();
         for (WorkOrderBook.Order o : book.all()) {
-            if (!o.active()) continue;
+            if (!o.active() || o.ownerAttempt != null) continue;
             CompoundNBT t = new CompoundNBT();
             t.putUUID("Id", o.id); t.putUUID("Requester", o.requester); t.putString("Item", o.item);
             t.putString("Profession", o.profession.name()); t.putInt("TargetStock", o.targetStock);

@@ -349,7 +349,14 @@ public class VillagerEventHandler {
 
     @SubscribeEvent
     public void onWorldUnload(WorldEvent.Unload event) {
-        if (event.getWorld() instanceof ServerWorld) TradeDemo.clear((ServerWorld) event.getWorld());
+        if (event.getWorld() instanceof ServerWorld) {
+            ServerWorld world = (ServerWorld) event.getWorld();
+            TradeDemo.clear(world);
+            com.github.AaronAA0721.villageragent.ai.TradeCoordinator.unload(world);
+            com.github.AaronAA0721.villageragent.ai.VillageMarkets.unload(world);
+            for (VillagerAgentData agent : VillagerAgentManager.getAllAgents())
+                agent.brain().acquisitions.closeWorld(world);
+        }
     }
 
     /**

@@ -12,7 +12,7 @@ import net.minecraft.world.server.ServerWorld;
 public final class ResourceWorkSystem {
     public static WorkOrderBook.Order request(ServerWorld world, VillagerAgentData requester, String item, int desiredStock) {
         ResourceCatalog.Source source = ResourceCatalog.get(item);
-        if (source == null || !ModConfig.ENABLE_ECONOMY.get()) return null;
+        if (source == null || source.profession == ResourceProfession.NONE || !ModConfig.ENABLE_ECONOMY.get()) return null;
         WorkOrderSavedData data = WorkOrderSavedData.get(world);
         WorkOrderBook.Order o = data.book.request(requester.getVillagerId(), item, source.profession,
                 Math.min(256, desiredStock), count(requester, item), world.getGameTime());
@@ -20,6 +20,15 @@ public final class ResourceWorkSystem {
     }
     public static int count(VillagerAgentData agent, String item) {
         return agent.getInventory().countItem(new ItemStack(ResourceCatalog.item(item)));
+    }
+    public static WorkOrderBook.Order requestOwned(ServerWorld world, VillagerAgentData requester,
+                                                   java.util.UUID owner, String item, int desired) {
+        ResourceCatalog.Source source = ResourceCatalog.get(item);
+        if (source == null || source.profession == ResourceProfession.NONE || !ModConfig.ENABLE_ECONOMY.get() || !ModConfig.ENABLE_WORLD_INTERACTION.get()) return null;
+        WorkOrderSavedData data = WorkOrderSavedData.get(world);
+        WorkOrderBook.Order order = data.book.requestOwned(owner, requester.getVillagerId(), item, source.profession,
+                Math.min(256, desired), count(requester, item), world.getGameTime());
+        data.setDirty(); return order;
     }
     public static void assign(VillagerAgentData agent, ResourceProfession role) {
         agent.setResourceProfession(role);
@@ -55,8 +64,9 @@ public final class ResourceWorkSystem {
             Entity requester = world.getEntity(o.requester);
             if (!(requester instanceof VillagerEntity) || !requester.isAlive()) { requesterUnavailable++; continue; }
             ResourceProfession role = agent.getResourceProfession();
-            if (role != ResourceProfession.NONE && role != o.profession) { wrongRole++; continue; }
-            if (role == ResourceProfession.NONE && !jobless(agent)) { wrongRole++; continue; }
+            ResourceCatalog.Source source = ResourceCatalog.get(o.item);
+            if (role == ResourceProfession.NONE || role != o.profession || source == null
+                    || agent.getCapabilityPool().levelOf(source.capability) < 1) { wrongRole++; continue; }
             double d = self.distanceToSqr(requester);
             if (d < nearest) { nearest = d; best = o; }
             else if (d >= 64 * 64) outOfRange++;
@@ -75,17 +85,26 @@ public final class ResourceWorkSystem {
         BrainLog.diagnostic(agent, "order-offer", "id=" + best.id + " item=" + best.item
                 + " remaining=" + best.remaining + " distanceSq=" + nearest
                 + " currentRole=" + agent.getResourceProfession());
-        // Reserve before assigning a profession or creating a goal. Otherwise every idle
-        // villager becomes a lumberjack for the same unclaimed order on this perception tick.
+        // Workstation professions are established before accepting an order.
         if (!data.book.claim(best.id, agent.getVillagerId(), now)) return;
         data.setDirty();
-        if (agent.getResourceProfession() == ResourceProfession.NONE) assign(agent, best.profession);
         AgentGoal goal = new AgentGoal("fulfill_order", "Supply " + best.remaining + " " + best.item, 7);
         goal.setWorkOrderId(best.id); goal.setTargetItem(best.item); goal.setTargetQuantity(best.remaining);
         goal.setTargetEntityId(best.requester); goal.setLifecycle(AgentGoal.Lifecycle.EXPIRING);
         goal.setDeadlineTick(best.expiresAt);
         agent.getGoals().add(goal);
         BrainLog.goalAdded(agent, goal, "material-demand");
+    }
+    public static boolean hasSupplier(ServerWorld world, VillagerEntity buyer, String item) {
+        ResourceCatalog.Source source = ResourceCatalog.get(item);
+        if (source == null || source.profession == ResourceProfession.NONE) return false;
+        for (VillagerAgentData worker : VillagerAgentManager.getAllAgents()) {
+            if (worker.getVillagerId().equals(buyer.getUUID()) || worker.getResourceProfession() != source.profession
+                    || !source.skilled(worker) || !source.hasTool(worker)) continue;
+            Entity entity = world.getEntity(worker.getVillagerId());
+            if (entity instanceof VillagerEntity && entity.isAlive() && buyer.distanceToSqr(entity) <= 4096) return true;
+        }
+        return false;
     }
     public static void clearSatisfiedWant(WorkOrderBook.Order order) {
         if (order.status == WorkOrderBook.Status.DELIVERED)

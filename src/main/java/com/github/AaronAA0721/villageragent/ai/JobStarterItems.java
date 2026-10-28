@@ -32,6 +32,8 @@ public class JobStarterItems {
     }
     
     private static void initializeStarterItems() {
+        jobStarterItems.put("lumberjack", Collections.singletonList(new StarterItem(Items.WOODEN_AXE, 1)));
+        jobStarterItems.put("miner", Collections.singletonList(new StarterItem(Items.STONE_PICKAXE, 1)));
         // Farmer: seeds, hoe, bone meal
         List<StarterItem> farmerItems = new ArrayList<>();
         farmerItems.add(new StarterItem(Items.WHEAT_SEEDS, 32));
@@ -99,6 +101,8 @@ public class JobStarterItems {
      * For example: if farmer has 20 seeds and max is 64, only give 44 more (total 64)
      */
     public static void giveStarterItems(VillagerAgentData agent) {
+        // ResourceWorkSystem owns their lifetime-once starter flag, including older saves.
+        if (agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) return;
         List<StarterItem> items = getStarterItems(agent.getProfession());
 
         for (StarterItem starterItem : items) {

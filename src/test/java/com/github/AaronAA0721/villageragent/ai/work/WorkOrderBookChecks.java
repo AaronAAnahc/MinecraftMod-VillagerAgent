@@ -44,6 +44,21 @@ public final class WorkOrderBookChecks {
         check(book.request(customer, "minecraft:coal", ResourceProfession.MINER, 4, 4, 0) == null, "no deficit means no order");
         WorkOrderBook isolated = new WorkOrderBook();
         check(isolated.get(o.id) == null, "dimension-local ledgers do not share claims");
+        UUID ownerA = UUID.randomUUID(), ownerB = UUID.randomUUID();
+        WorkOrderBook.Order shared = isolated.request(customer, "minecraft:oak_log", ResourceProfession.LUMBERJACK, 3, 0, 0);
+        WorkOrderBook.Order ownedA = isolated.requestOwned(ownerA, customer, "minecraft:oak_log", ResourceProfession.LUMBERJACK, 4, 0, 0);
+        WorkOrderBook.Order ownedB = isolated.requestOwned(ownerB, customer, "minecraft:oak_log", ResourceProfession.LUMBERJACK, 5, 0, 0);
+        check(isolated.all().size() == 3, "method requests do not overwrite another root or shared demand");
+        check(isolated.requestOwned(ownerA, customer, "minecraft:oak_log", ResourceProfession.LUMBERJACK, 4, 0, 20) == ownedA,
+                "one attempt renews its own order");
+        check(isolated.claim(ownedA.id, a, 20), "owned request can be fulfilled by an ordinary worker");
+        isolated.cancelOwned(ownerA);
+        check(ownedA.status == WorkOrderBook.Status.CANCELLED && ownedA.worker == null, "switch releases request and worker claim");
+        check(shared.active() && ownedB.active(), "cancel affects only owning attempt");
+        isolated.cancelOwned(null); isolated.cancelOwned(ownerA);
+        check(shared.active() && ownedB.active(), "null and repeated cancellation preserve other demand");
+        isolated.tick(600);
+        check(ownedB.status == WorkOrderBook.Status.EXPIRED && shared.active(), "orphaned owned demand expires without erasing persistent shared demand");
         System.out.println("WorkOrderBook: " + assertions + " assertions passed");
     }
 }

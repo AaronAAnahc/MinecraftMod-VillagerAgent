@@ -27,6 +27,7 @@ public final class GoalScheduler {
     }
 
     public static boolean shouldPreempt(AgentGoal current, AgentGoal candidate) {
+        if (current != null && candidate != null && "meet_trade".equals(candidate.getGoalType())) return false;
         return candidate != null && (current == null
                 || (isFallback(current) && !isFallback(candidate))
                 || (candidate.getPriority() >= 9 && candidate.getPriority() > current.getPriority()));
@@ -60,7 +61,6 @@ public final class GoalScheduler {
                 if (personality.contains("friendly") || personality.contains("cheerful")) u *= 1.5;
                 break;
             case "find_job_site":
-                if (a.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) return 0;
                 break;
             case "craft":
                 if (g.getLifecycle() == AgentGoal.Lifecycle.REPEATABLE && g.getTargetItem() != null
@@ -73,7 +73,7 @@ public final class GoalScheduler {
                 }
                 if (!missing) return 0;
                 break;
-            case "fulfill_order": case "deliver_trade": u *= 2.5; break;
+            case "fulfill_order": case "deliver_trade": case "meet_trade": u *= 2.5; break;
             case "wander": u *= a.getFatigue() > 60 ? 0.25 : 1; break;
             default: break;
         }

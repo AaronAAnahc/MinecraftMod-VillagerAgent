@@ -11,7 +11,7 @@ import net.minecraft.util.text.StringTextComponent;
 import net.minecraft.world.server.ServerWorld;
 import java.util.*;
 
-/** Operator-directed meeting: generated gift or two sequential real-inventory deliveries. */
+/** Generated-gift demonstration; real inventory exchanges delegate to TradeCoordinator. */
 public final class TradeDemo {
     private static final Map<ServerWorld, List<Session>> SESSIONS = new IdentityHashMap<>();
 
@@ -27,7 +27,7 @@ public final class TradeDemo {
 
     public static int startExchange(CommandSource source, Entity from, Entity to, ItemStack first, ItemStack second) {
         if (second.isEmpty()) return 0;
-        return start(source, from, to, first, second);
+        return TradeCoordinator.requestExchange(source, from, to, first, second);
     }
 
     private static int start(CommandSource source, Entity from, Entity to, ItemStack stack, ItemStack payment) {
@@ -37,7 +37,8 @@ public final class TradeDemo {
                 || ((VillagerEntity) from).isBaby() || ((VillagerEntity) to).isBaby()
                 || ((VillagerEntity) from).isNoAi() || ((VillagerEntity) to).isNoAi()
                 || from.distanceToSqr(to) > 128 * 128 || stack.isEmpty()
-                || isActive(from.getUUID()) || isActive(to.getUUID())) {
+                || isActive(from.getUUID()) || isActive(to.getUUID())
+                || TradeCoordinator.busy(from.getUUID()) || TradeCoordinator.busy(to.getUUID())) {
             source.sendFailure(new StringTextComponent("演示需要 AI 开启、同维度 128 格内两个不同的成年村民（无 NoAI，且未参与演示）。"));
             return 0;
         }

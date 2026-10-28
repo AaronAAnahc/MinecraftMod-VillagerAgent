@@ -32,7 +32,6 @@ public class GatherSkill implements VillagerSkill {
         int wanted = Math.max(1, goal.getTargetQuantity());
         if (com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, item) >= wanted)
             return SkillResult.SUCCESS;
-        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, item, wanted);
         BlockPos t = goal.getTargetLocation();
         if (t == null) return SkillResult.WAITING;
         SkillResult moved = VillagerAgentManager.driveMoveGoal(villager, agent, goal, t, "Visited gathering site");

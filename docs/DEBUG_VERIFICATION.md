@@ -4,6 +4,45 @@ Reviewed: 2026-10-23. This document describes executable checks and observation 
 
 ## Automated checks
 
+2026-10-27 per-village paired trading: `gradlew.bat compileJava check --offline --console=plain` passed with JDK 11, including 25 new `TradeCoordinationChecks` assertions and all existing checks. New coverage: shared participant exclusivity across roles/requests, two-party readiness, stale cleanup, per-board enumeration, cross-market rejection, fixed matched quantity, resident removal/expiry cleanup, ordinary-task non-preemption and emergency preemption. These are Java rule checks, not an executed Minecraft simulation.
+
+Pending live acceptance for this change:
+
+1. Give A funds and B/C sellable stock. Post two A requests: exactly one appointment may own A; the other remains unpaired until cancellation/completion. Repeat with A as seller in one request and buyer in the other.
+2. Keep both parties crafting/farming. Accept an order: their running roots and movement must continue; after natural completion/WAITING each selects `meet_trade`. The first ready participant waits and only the second ready flag starts both approaches. Check `trade-meeting-start/end` logs and single inventory commit.
+3. Interrupt a ready participant with danger, remove a meeting goal, unload one participant or consume booked stock/funds. Verify no partial exchange and release of both slots. Test full receiving inventories and unreachable meeting points/600-tick timeout.
+4. Create two separated bell markets A/B and run `/va markets`. Publish goods only in B: an A resident must not enumerate or match them. Repeat across dimensions and unloading/reloading B. Check 100-tick membership refresh and cleanup, plus fallback grouping without meeting memories.
+5. `/va trade` follows the same booking/readiness rules and preserves total inventory quantities. `/va demo_trade` remains a generated-gift demonstration and rejects already booked participants. Saving/restarting must not leave usable orphan meeting roots or persisted appointment locks.
+
+
+2026-10-27 documentation/source audit: validated 325 local Markdown links across active top-level documents and complete code-index coverage for 169 Java source/test files. `git diff --check` passed. This prose-only update did not rerun compilation or claim new game acceptance. See [Documentation audit](documentation_audit.md) for corrected claims and remaining implementation boundaries.
+
+2026-10-27 resource workstations and output-based task discovery: `gradlew.bat compileJava check --offline --console=plain` passed with JDK 11. The suite passed 20 `TaskContractChecks` assertions (independent skills, NBT round trips, minimum-level/output contracts, retained tool metadata, cycle/depth/node limits and failed-branch cleanup), 27 method-executor assertions (including child progress and monetary cost excluding failure penalties), 12 request-ownership assertions, 28 order assertions, 86 goal-exit assertions, 225 scheduler assertions, 44 task-frame assertions and eight acquisition-search cases. The standalone capability check uses the built-in level table when no Forge configuration context exists. Compilation does not exercise actual recipes, POI ownership, world breaking or rendering.
+
+Static validation parsed all 20 packaged JSON resources and verified both workstation blockstate → model → local texture chains, item models, recipe outputs, self-drop loot, and six 16×16 PNG block textures. `git diff --check` passed. No Minecraft client/server acceptance session was run. Pending game checks:
+
+1. Give/place both stations; confirm the specified textures, names, creative entries and no right-click UI. Check recipes, breaking drops, villager and zombie profession clothing.
+2. Two unemployed adults compete for one POI; only one claims it. Destroy/replace a claimed station and verify reacquisition. Orders alone must not assign an unemployed villager a role.
+3. Claim lumberjack/miner and inspect WOODCUTTING 3 versus MINING 3 / QUARRYING 3. Load an older high-GATHERING villager: new skills remain zero unless its real profession grants them. Switching resource jobs must not duplicate starter kits.
+4. Request oak logs with an axe and WOODCUTTING 1, then with WOODCUTTING 0. Compare logging, a real paid offer and cooperative delivery; no-money paid purchases must not start.
+5. Remove the axe and provide a purchasable/craftable replacement. Verify nested tool acquisition, then logging; log → axe → log with no external route must not recurse or cancel its ancestor unexpectedly.
+6. Request coal, iron ore and cobblestone with separate skill levels/tool tiers. Reject wrong tiers and Silk Touch when it changes the target drop; actual world drops determine completion. Breaking practices the appropriate skill; buying/dropping/picking up the item must not grant that production skill.
+7. Request a crop: mature crops can be harvested, immature ones cannot. Source removal, protected blocks, full inventories, preemption and dropped-item competition must not create items or falsely complete a target.
+8. Craft a hoe through missing raw materials, including nearby oak versus unavailable alternative log species. Verify all missing-material costs, shared wallet affordability, retained surplus, stall-based replacement, child progress propagation, and cancellation of only the abandoned method's nested wants/orders.
+
+
+2026-10-27 unified task methods: `gradlew.bat compileJava check --offline --console=plain` passed with 25 `TaskMethodExecutionChecks` assertions, 28 work-order assertions and the existing acquisition/goal/task checks. After fixing expiry cleanup, `gradlew.bat compileJava methodRequestChecks --offline --console=plain` passed all 12 request assertions. Coverage includes cost ordering, minimum run, stall grace/timeout, failure cooldown, hysteresis, meaningful-progress reset, off-scheduler body time, safe-switch boundaries, cleanup order, owned versus ordinary requests, matched-offer release, pruned delivery receipts and exclusion of transient owned orders from saves. `git diff --check` passed. No Minecraft session was run.
+
+Pending live method cases: waiting supply loses to a feasible paid method after its stall score rises; active harvesting/delivery resets stall time; a cheap but unavailable table does not trap acquisition; preemption and WAITING retain method identity/cooldowns; partial ingredient deliveries replan without duplicating purchases; goal clear/expiry, entity removal, dimension transfer and world unload clean only their own requests; simultaneous same-item roots do not erase each other's demand; money already spent and intermediates already made are preserved after switches. Observe `task-method` transition/score/stall logs and real inventories. The 100-tick reconsideration interval is a minimum; the ordinary 200-tick WAITING scheduling cooldown can delay observations.
+
+
+2026-10-27 acquisition costs: `gradlew.bat compileJava check --offline --console=plain` passed, including eight new `AcquisitionSearchChecks` cases and the existing 376 rule assertions. The new cases cover logs versus finished hoes, direct versus mixed ingredients, insufficient funds, zero-cost existing stock, per-transaction rounding, and bounded-search fallback. These pure basket tests do not validate live Minecraft recipe/world integration. Pending game cases: cheap finished hoe versus costly ingredients; cheap log converted to a hoe with two spare sticks; multiple suppliers and changing balances; missing/unreachable table; locked recipe; full buyer/seller inventories; unpriced item; no available quote; raw cooperative supply; retry after delivery; explicit craft remains craft-only. Current method logs use `task-method`. Search caps and excluded non-grid processing are documented in failure recovery.
+
+
+2026-10-27 automatic trade funds: `gradlew.bat compileJava --offline --console=plain` and `python scripts/check_trade_ui.py --jdk "C:/Program Files/Java/jdk-11.0.15.1"` passed. The existing harness covers the shared inventory transaction's insufficient-stock and capacity rejection, not live signal matching/navigation. Pending game checks: zero/insufficient funds must create no matched delivery; exact funds settle completely; spending funds during approach cancels delivery without transfer; full inventories and missing seller stock transfer nothing; two pending purchases cannot spend the same emeralds twice. Resource orders are separate from paid trades.
+
+2026-10-27 value-table reset: `gradlew.bat compileJava --offline --console=plain` passed using JDK 11; packaged price JSON parsed successfully and `git diff --check` passed. No game session was run. In game, verify `/va reset_values` with one UUID, a nearby multi-villager selector and a mixed-entity selector; confirm reset counts, removal of personal overrides, profession prices plus cobblestone buy 0.75 / sell 1.5, independent tables between villagers, and persistence after save/reload. Unselected villagers' prices and all inventories must remain unchanged.
+
 Run from the project root:
 
 ```powershell
@@ -13,7 +52,7 @@ Run from the project root:
 .\gradlew.bat check --console=plain
 ```
 
-`WorkOrderBookChecks` covers pure Java request merging, exclusive claims, lease renewal/expiry, stock satisfaction, and partial deliveries. `GoalExitPolicyChecks` covers retention, failure exits, and cooldowns. `GoalSchedulerChecks` covers wander fallback, preemption, weighted selection, and farmland-anchor NBT round trips; `check` depends on all three. Compilation checks interfaces/mappings; rule checks cover specified logic. In-game actions, navigation, entity loading, and presentation need separate acceptance tests.
+`WorkOrderBookChecks` covers pure Java request merging, exclusive claims, lease renewal/expiry, stock satisfaction, and partial deliveries. `GoalExitPolicyChecks` covers retention, failure exits, and cooldowns. `GoalSchedulerChecks` covers wander fallback, preemption, weighted selection, and farmland-anchor NBT round trips; `check` also includes task-frame, acquisition-search, method-executor, request-ownership and task-contract checks, as recorded above. Compilation checks interfaces/mappings; rule checks cover specified logic. In-game actions, navigation, entity loading, and presentation need separate acceptance tests.
 
 ### Player trade regression checks
 
@@ -34,7 +73,7 @@ Enable `brain_log_enabled` and filter `VillagerBrain` in the actual instance's `
 | `order-offer-empty` | Eligibility, ownership, distance, requester loading |
 | `order-claim/wait/blocked` | Lease, inventory, resources, and tool shortages |
 | `resource-scan` | Matching, natural trees, exposure, standing positions, and paths |
-| `order-source/break/collected/delivery` | Gathering, drop collection, and actual transfer |
+| `order-delivery`, `pickup-collected` | Real transfer and contact pickup; inspect `resource-scan`, task-child logs and inventory for extraction |
 | `move-start/no-path/stuck` | Navigation requests versus displacement |
 | `social-empty/no-path/chat` | Neighbors, paths, and actual conversation |
 | `job-site-empty/approach/select/reject` | POIs, path completeness, temporary exclusions, and station approach |

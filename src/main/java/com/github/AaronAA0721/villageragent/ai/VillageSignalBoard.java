@@ -37,6 +37,8 @@ public class VillageSignalBoard {
      * Broadcast membership is spatial, not a persistent village identity.
      */
     private static final VillageSignalBoard INSTANCE = new VillageSignalBoard();
+    private static final Map<UUID, VillageMessage> MESSAGE_INDEX = new HashMap<>();
+    public static final TradeAppointments APPOINTMENTS = new TradeAppointments();
 
     /** Must have arrived near the threat before contributing to a charge. */
     public static final double RALLY_READY_RADIUS = 8.0;
@@ -205,6 +207,12 @@ public class VillageSignalBoard {
         public final Set<UUID> responders = new HashSet<>();
         public UUID matchedWith = null;       // TRADE: the counterpart message id
         public boolean resolved = false;
+        /** Runtime method attempt; null denotes ordinary shared demand. */
+        public UUID ownerAttempt;
+        public VillageSignalBoard market;
+        /** Emeralds per item; negative means no valid quote. */
+        public double unitPrice = -1;
+        public int agreedPayment = -1;
 
         VillageMessage(MsgType type, UUID author, BlockPos origin, ResourceLocation item,
                        int quantity, long now, long ttl) {
@@ -218,7 +226,7 @@ public class VillageSignalBoard {
         }
     }
 
-    private static final Map<MsgType, List<VillageMessage>> board = new ConcurrentHashMap<>();
+    private final Map<MsgType, List<VillageMessage>> board = new HashMap<>();
     private static final double MSG_HEAR_RADIUS = 48.0;
 
     /** Post (or refresh) a message; returns its id. {@code now} is the current game time. */
@@ -226,8 +234,9 @@ public class VillageSignalBoard {
         List<VillageMessage> list = board.computeIfAbsent(type, k -> new ArrayList<>());
         // De-dupe by author+item so a villager refreshes its own offer instead of spamming.
         for (VillageMessage m : list) {
-            if (!m.resolved && m.author.equals(author)
+            if (!m.resolved && m.ownerAttempt == null && m.author.equals(author)
                     && (type == MsgType.THREAT || java.util.Objects.equals(m.item, item))) {
+                if (m.matchedWith != null) return m.id; // Freeze the agreed quantity while meeting.
                 m.quantity = qty;
                 m.origin = origin;
                 m.postedTick = now;
@@ -236,8 +245,26 @@ public class VillageSignalBoard {
             }
         }
         VillageMessage m = new VillageMessage(type, author, origin, item, qty, now, messageTtl());
+        m.market = this; MESSAGE_INDEX.put(m.id, m);
         list.add(m);
         return m.id;
+    }
+
+    /** Isolated method-owned demand; it never overwrites a different task's request. */
+    public UUID postOwnedWant(UUID owner, UUID author, BlockPos origin, ResourceLocation item, int qty, long now) {
+        if (owner == null) throw new IllegalArgumentException("Missing attempt owner");
+        List<VillageMessage> list = board.computeIfAbsent(MsgType.TRADE_WANT, key -> new ArrayList<>());
+        VillageMessage message = new VillageMessage(MsgType.TRADE_WANT, author, origin, item, qty, now, messageTtl());
+        message.ownerAttempt = owner;
+        message.market = this; MESSAGE_INDEX.put(message.id, message);
+        list.add(message);
+        return message.id;
+    }
+
+    public void removeOwned(UUID owner) {
+        if (owner == null) return;
+        for (VillageMessage m : new ArrayList<>(MESSAGE_INDEX.values()))
+            if (owner.equals(m.ownerAttempt)) m.market.removeMessage(m);
     }
 
     /** Messages of {@code type} within hearing radius of {@code pos} at game time {@code now}. */
@@ -266,11 +293,15 @@ public class VillageSignalBoard {
     public boolean matchTrade(UUID wantId, UUID haveId) {
         VillageMessage want = find(wantId), have = find(haveId);
         if (want == null || have == null) return false;
+        if (want.market != have.market) return false;
+        if (want.resolved || have.resolved) return false;
         if (want.type != MsgType.TRADE_WANT || have.type != MsgType.TRADE_HAVE) return false;
         if (want.matchedWith != null || have.matchedWith != null) return false;
         if (!java.util.Objects.equals(want.item, have.item)) return false;
         if (have.quantity < want.quantity) return false;
         if (want.author.equals(have.author)) return false; // no self-trade
+        if (!APPOINTMENTS.reserve(want.id, want.author, have.author,
+                Math.min(want.expireTick, have.expireTick))) return false;
         want.matchedWith = have.id;
         have.matchedWith = want.id;
         return true;
@@ -281,6 +312,7 @@ public class VillageSignalBoard {
         VillageMessage want = find(wantId);
         if (want == null) return;
         want.resolved = true;
+        APPOINTMENTS.release(want.id);
         if (want.matchedWith != null) {
             VillageMessage have = find(want.matchedWith);
             if (have != null) have.resolved = true;
@@ -289,15 +321,12 @@ public class VillageSignalBoard {
 
     /** Find any message across all types by id. */
     public VillageMessage find(UUID id) {
-        for (List<VillageMessage> list : board.values()) {
-            for (VillageMessage m : list) if (m.id.equals(id)) return m;
-        }
-        return null;
+        return MESSAGE_INDEX.get(id);
     }
 
     public List<VillageMessage> messagesOfType(MsgType type) {
         List<VillageMessage> list = board.get(type);
-        return list == null ? new ArrayList<>() : list;
+        return list == null ? new ArrayList<>() : new ArrayList<>(list);
     }
 
     /**
@@ -308,19 +337,14 @@ public class VillageSignalBoard {
      * @return how many were removed
      */
     public int removeByAuthor(UUID author, MsgType type, ResourceLocation item) {
-        List<VillageMessage> list = board.get(type);
-        if (list == null) return 0;
         int removed = 0;
-        for (int i = list.size() - 1; i >= 0; i--) {
-            VillageMessage m = list.get(i);
+        for (VillageMessage m : new ArrayList<>(MESSAGE_INDEX.values())) {
+            if (m.type != type) continue;
             if (m.resolved) continue;
+            if (m.ownerAttempt != null) continue;
             if (!m.author.equals(author)) continue;
             if (item != null && !java.util.Objects.equals(m.item, item)) continue;
-            if (m.matchedWith != null) {
-                VillageMessage counterpart = find(m.matchedWith);
-                if (counterpart != null) counterpart.matchedWith = null;
-            }
-            list.remove(i);
+            m.market.removeMessage(m);
             removed++;
         }
         return removed;
@@ -328,9 +352,29 @@ public class VillageSignalBoard {
 
     /** Drop expired / resolved messages. Call once per tick. */
     public void clearExpiredMessages(long now) {
-        for (List<VillageMessage> list : board.values()) {
-            list.removeIf(m -> m.resolved || m.expireTick <= now);
-        }
+        for (List<VillageMessage> list : board.values())
+            for (VillageMessage m : new ArrayList<>(list))
+                if (m.resolved || m.expireTick <= now) removeMessage(m);
+    }
+
+    public void unmatch(UUID id) {
+        VillageMessage m=find(id); if(m==null) { APPOINTMENTS.release(id); return; }
+        VillageMessage other=find(m.matchedWith);
+        APPOINTMENTS.release(m.type==MsgType.TRADE_WANT?m.id:other==null?m.id:other.id);
+        m.matchedWith=null; m.agreedPayment=-1;
+        if(other!=null) { other.matchedWith=null; other.agreedPayment=-1; }
+    }
+    private void removeMessage(VillageMessage m) {
+        unmatch(m.id);
+        List<VillageMessage> list=board.get(m.type); if(list!=null) list.remove(m);
+        MESSAGE_INDEX.remove(m.id);
+    }
+    public void removeResident(UUID resident) {
+        for(List<VillageMessage> list:board.values()) for(VillageMessage m:new ArrayList<>(list))
+            if(m.author.equals(resident)) removeMessage(m);
+    }
+    public void clearMessages() {
+        for(List<VillageMessage> list:board.values()) for(VillageMessage m:new ArrayList<>(list)) removeMessage(m);
     }
 
     private long messageTtl() {

@@ -22,6 +22,9 @@ public final class CraftingPlan {
     private int budget = 4096;
     private final ServerWorld world;
     private final Map<Item, List<ICraftingRecipe>> recipes;
+    private Set<Item> preferredSources = Collections.emptySet();
+    private final Map<Item, Integer> sourceRanks = new HashMap<>();
+    private int rankBudget = 256;
 
     private CraftingPlan(ServerWorld world) {
         this.world = world;
@@ -46,6 +49,22 @@ public final class CraftingPlan {
         return new CraftingPlan(w).recipes.containsKey(item);
     }
 
+    /** Items that may satisfy a target or one of its ordinary recipe dependencies. */
+    public static Set<Item> acquisitionItems(ServerWorld world, Item target) {
+        CraftingPlan catalog = new CraftingPlan(world);
+        Set<Item> result = new LinkedHashSet<>();
+        Deque<Item> pending = new ArrayDeque<>(); pending.add(target);
+        while (!pending.isEmpty() && result.size() < 256) {
+            Item item = pending.removeFirst();
+            if (!result.add(item)) continue;
+            for (ICraftingRecipe recipe : catalog.recipes.getOrDefault(item, Collections.emptyList()))
+                for (Ingredient ingredient : recipe.getIngredients())
+                    for (ItemStack stack : ingredient.getItems())
+                        if (!result.contains(stack.getItem())) pending.addLast(stack.getItem());
+        }
+        return result;
+    }
+
     /** Material recipes inherit permission from a known root, including every tag alternative. */
     public static void unlockDependencies(VillagerAgentData agent, ServerWorld world) {
         CraftingPlan catalog = new CraftingPlan(world);
@@ -68,7 +87,12 @@ public final class CraftingPlan {
 
     /** Quantity is additional output items, not recipe repetitions. */
     public static CraftingPlan build(ServerWorld w, AgentInventory inv, Item target, int quantity) {
+        return build(w, inv, target, quantity, Collections.emptySet());
+    }
+
+    private static CraftingPlan build(ServerWorld w, AgentInventory inv, Item target, int quantity, Set<Item> preferred) {
         CraftingPlan plan = new CraftingPlan(w);
+        plan.preferredSources = preferred;
         AgentInventory virtual = copy(inv);
         // Existing target stock does not count toward an explicit craft request.
         int initial = virtual.countItem(new ItemStack(target));
@@ -76,6 +100,29 @@ public final class CraftingPlan {
         if (!plan.complete) plan.steps.clear();
         else plan.missing.clear();
         return plan;
+    }
+
+    /** Complete remaining leaf requirements, using virtual stock only. build().missing is a first blockage. */
+    public static Map<String, Integer> materialRequirements(ServerWorld world, AgentInventory inventory, Item target, int quantity,
+                                                            Set<Item> preferredSources) {
+        AgentInventory virtual = copy(inventory);
+        Map<String, Integer> result = new LinkedHashMap<>();
+        for (int pass = 0; pass < 64; pass++) {
+            CraftingPlan plan = build(world, virtual, target, quantity, preferredSources);
+            if (plan.complete) return result;
+            if (plan.missing.isEmpty() || plan.missing.containsKey(target.getRegistryName().toString())) break;
+            boolean inserted = false;
+            for (Map.Entry<String, Integer> missing : plan.missing.entrySet()) {
+                Item item = com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.item(missing.getKey());
+                if (item == net.minecraft.item.Items.AIR || missing.getValue() <= 0) continue;
+                int moved = InventoryTransfer.insert(virtual, new ItemStack(item, missing.getValue()));
+                if (moved != missing.getValue()) return Collections.singletonMap(target.getRegistryName().toString(), quantity);
+                result.merge(missing.getKey(), moved, Integer::sum); inserted = true;
+            }
+            if (!inserted) break;
+        }
+        // Exhausted/unsupported routes stay unavailable, rather than pretending a partial bill is complete.
+        return Collections.singletonMap(target.getRegistryName().toString(), quantity);
     }
 
     private boolean ensure(AgentInventory inv, Item target, int count, Set<Item> ancestors, int depth) {
@@ -128,7 +175,14 @@ public final class CraftingPlan {
         List<ItemStack> choices = new ArrayList<>();
         // Exact stacks first: Ingredient.test respects the recipe's matching semantics.
         for (ItemStack stock : inv.getItems()) if (!stock.isEmpty() && ingredient.test(stock)) choices.add(stock.copy());
-        choices.addAll(Arrays.asList(ingredient.getItems()));
+        List<ItemStack> alternatives = new ArrayList<>(Arrays.asList(ingredient.getItems()));
+        if (!preferredSources.isEmpty()) {
+            Map<Item, Integer> ranks = new HashMap<>();
+            for (ItemStack alternative : alternatives)
+                ranks.computeIfAbsent(alternative.getItem(), item -> sourceRank(item, new HashSet<>(), 0));
+            alternatives.sort(Comparator.comparingInt(stack -> ranks.get(stack.getItem())));
+        }
+        choices.addAll(alternatives);
         Map<String, Integer> bestMissing = null;
         for (ItemStack choice : choices) {
             AgentInventory trial = copy(inv);
@@ -151,6 +205,28 @@ public final class CraftingPlan {
         }
         if (bestMissing != null) missing.putAll(bestMissing);
         return false;
+    }
+
+    /** Prefer recipe/tag branches backed by observed sources, without displacing actual stock. */
+    private int sourceRank(Item item, Set<Item> path, int depth) {
+        if (--rankBudget < 0) return 1;
+        if (preferredSources.contains(item)) return 0;
+        Integer cached = sourceRanks.get(item);
+        if (cached != null) return cached;
+        if (depth >= 6 || !path.add(item)) return 1;
+        int best = 1;
+        for (ICraftingRecipe recipe : recipes.getOrDefault(item, Collections.emptyList())) {
+            int rank = 0;
+            for (Ingredient ingredient : recipe.getIngredients()) {
+                if (ingredient == Ingredient.EMPTY) continue;
+                int ingredientRank = 1;
+                for (ItemStack option : ingredient.getItems())
+                    ingredientRank = Math.min(ingredientRank, sourceRank(option.getItem(), path, depth + 1));
+                rank = Math.max(rank, ingredientRank);
+            }
+            best = Math.min(best, rank);
+        }
+        path.remove(item); sourceRanks.put(item, best); return best;
     }
 
     public static final class Step {

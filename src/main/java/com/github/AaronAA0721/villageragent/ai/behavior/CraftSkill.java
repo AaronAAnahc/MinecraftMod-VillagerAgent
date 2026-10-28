@@ -41,12 +41,18 @@ public class CraftSkill implements VillagerSkill {
             state.plan = com.github.AaronAA0721.villageragent.ai.CraftingPlan.build(
                     world, agent.getInventory(), target, Math.max(1, goal.getTargetQuantity()));
             if (!state.plan.complete) {
+                if (goal.getMethodAttempt() != null) {
+                    if (!state.plan.missing.isEmpty()) {
+                        java.util.Map.Entry<String, Integer> need = state.plan.missing.entrySet().iterator().next();
+                        goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
+                    }
+                    return SkillResult.BLOCKED; // The owning method chooses recovery and owns its requests.
+                }
                 for (java.util.Map.Entry<String, Integer> need : state.plan.missing.entrySet()) {
                     com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, need.getKey(),
                         com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, need.getKey()) + need.getValue());
-                    com.github.AaronAA0721.villageragent.ai.VillageSignalBoard.get().post(agent.getVillagerId(), villager.blockPosition(),
-                        com.github.AaronAA0721.villageragent.ai.VillageSignalBoard.MsgType.TRADE_WANT,
-                        new ResourceLocation(need.getKey()), need.getValue(), world.getGameTime());
+                    com.github.AaronAA0721.villageragent.ai.VillagerEconomySystem.postDemand(world, villager, agent,
+                        new ResourceLocation(need.getKey()), need.getValue());
                 }
                 if (!state.plan.missing.isEmpty()) {
                     java.util.Map.Entry<String, Integer> need = state.plan.missing.entrySet().iterator().next();
@@ -95,6 +101,7 @@ public class CraftSkill implements VillagerSkill {
             return SkillResult.WAITING;
         }
         com.github.AaronAA0721.villageragent.ai.BrainLog.diagnostic(agent, "craft-step", "recipe=" + step.recipe.getId());
+        goal.markProgress();
         if (step.recipe.getResultItem().getItem() == target && goal.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE)
             goal.setTargetQuantity(Math.max(0, goal.getTargetQuantity() - step.recipe.getResultItem().getCount()));
         state.next++; state.workTicks = 0; agent.setCurrentAction(null);
@@ -159,6 +166,11 @@ public class CraftSkill implements VillagerSkill {
         java.util.Map<String, Integer> shortages = NativeRecipeResolver.missingMaterialQuantities(
                 agent.getInventory(), recipe, Math.max(1, goal.getTargetQuantity()));
         if (!shortages.isEmpty()) {
+            if (goal.getMethodAttempt() != null) {
+                java.util.Map.Entry<String, Integer> need = shortages.entrySet().iterator().next();
+                goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
+                return SkillResult.BLOCKED;
+            }
             for (java.util.Map.Entry<String, Integer> shortage : shortages.entrySet()) {
                 com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, shortage.getKey(),
                     com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, shortage.getKey()) + shortage.getValue());

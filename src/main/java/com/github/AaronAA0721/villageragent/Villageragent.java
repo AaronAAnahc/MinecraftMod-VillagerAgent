@@ -36,6 +36,7 @@ public class Villageragent {
     private static final Logger LOGGER = LogManager.getLogger();
 
     public Villageragent() {
+        com.github.AaronAA0721.villageragent.content.Workstations.register(FMLJavaModLoadingContext.get().getModEventBus());
         // Register the setup method for modloading
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
         // Register the enqueueIMC method for modloading

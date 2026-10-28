@@ -1,43 +1,35 @@
 # Failure-driven replanning
 
-Reviewed: 2026-10-23. `FailureRecoveryPlanner.handle` is called by `VillagerAgentManager.processGoals` when no handler is available or a skill returns `BLOCKED/FAIL`. See the [main loop](execution_pipeline_and_resource_orders.md) for result retention, cooldowns, and exits.
+`FailureRecoveryPlanner.handle` runs after a root returns BLOCKED/FAIL or has no handler. Missing tools and materials both use `MISSING_ITEM`.
 
-## Failure representation and dispatch
+## Missing items and method selection
 
-`Failure` stores `reason`, `itemId`, `quantity`, `capability`, and `requiredLevel` on `AgentGoal.lastFailure`. Both missing items and tools use `MISSING_ITEM`.
+Recovery reuses or creates a one-shot `acquire_item` root with an absolute inventory target (current stock plus shortage). It does not immediately commit to crafting. Existing acquisition targets are raised as needed and their cooldown is cleared. Farming's missing-hoe substitution still checks unlocked iron/stone/wooden hoes producible from current inventory before choosing the target item; costs compare ways to acquire that exact item, not tool durability or alternative tool tiers.
 
-| Reason | Current handling |
-|---|---|
-| `MISSING_ITEM` | Find an existing output goal, then an unlocked recipe, then publish supply demand |
-| `NO_JOB_SITE` | Reuse or create a one-shot `find_job_site` goal with the target profession |
-| `NO_RECIPE` | Publish supply demand when an item ID exists; otherwise record a memory |
-| `CAPABILITY_TOO_LOW` | Record the required level and wait for training or other external changes |
-| `NO_BED`, `BED_OCCUPIED`, `NOT_NIGHT`, `UNREACHABLE`, `UNKNOWN` | Record a failure memory; let exit policy determine retries |
+`AcquireItemSkill` checks the actual target inventory through `AcquisitionTasks`, then delegates to `TaskMethodExecution` and the output-matched methods from `ItemTaskCatalog`. Sessions survive WAITING and restock-child frame reconstruction. Methods are scored by remaining expenditure, failure history and time without progress, with minimum run, hysteresis, timeout and cooldown. See [Task methods](task_methods.md) for the interface, defaults and ownership lifecycle.
 
-Enum names describe representable reasons. Inspect each skill's `execute` method for reasons actually emitted. For example, current sleep selection depends on fatigue.
+`AcquisitionPlanner` estimates each ordinary craft or finished-product purchase method using nearby priced surplus. It excludes unknown-item fallback prices, seller essential reserves, unavailable stock, unaffordable baskets and plans lacking a reachable remembered table. Purchase simulation shares buyer and seller inventories; `CraftingPlan` handles ingredient reuse, recipe batches and remainders. Root recipes must be unlocked. Crafting purchases can include direct ingredients or upstream inputs such as logs. The buy-product method cannot silently become crafting, and craft cannot buy the finished target.
 
-## Missing-item recovery order
+Costs are additional integer emerald expenditure, rounded up per seller/item batch. Existing materials, walking and time have no monetary charge; the method executor adds time only to the selection score. Bounded search considers up to 256 dependency item IDs, eight deterministic live offers, 32 units per offer, single-offer probes and 128 basket expansions. It is not guaranteed globally optimal. Ingredient purchases execute one at a time; after receipt the craft method updates its remaining plan using actual inventory. Non-grid processing only uses already available inputs and its existing profession-station execution.
 
-1. Search unfinished goals' `outcomeItems`. When a goal can produce the item and has a handler, clear its cooldown. Although named `boost`, this changes `cooldownUntilTick`, leaving priority unchanged.
-2. If `NativeRecipeResolver.resolveRecipe` succeeds and either the unlocked set (including ingredient dependencies) or `SkillCraftCatalog.isUnlockedFor` allows it, reuse a craft goal or create a priority-6 one-shot goal with item, quantity, and outcomes.
-3. Otherwise call `ResourceWorkSystem.request`, targeting current stock plus the shortage, and publish `TRADE_WANT` on `VillageSignalBoard`. If a recipe exists, continue handling missing ingredients with recursion limited to depth 2.
+Cooperative supply is a separate zero-money method for supported raw targets with a nearby loaded, skilled and equipped worker. Material shortages are acquired recursively under their parent production method. A supplier does not guarantee reachable resources. Stall penalties and timeout allow switching to paid routes. No daily free workstation refill exists. Restock and economy essential deficits use acquisition; explicit `/va craft` and production craft goals remain craft-only.
 
-Known crafting routes take precedence over restocking that only publishes demand. `CraftingPlan` fully expands ordinary crafting-table dependencies independently of the two-level trade fallback limit.
+Method-owned requests are canceled by attempt UUID only. Completion removes the owning method's outstanding requests without deleting unrelated tasks' wants. No money is reserved across unrelated transactions; delivery and settlement revalidate funds. Real world changes may invalidate an estimate.
 
-Existing goals, target items, and the signal board provide deduplication. `NO_JOB_SITE` creates priority-7 goals or clears an existing goal's cooldown. Recovery runs on the server thread.
+## Other failures
 
-## Restocking and acquiring items
+- `NO_RECIPE` with an item creates/reuses acquisition; without an item it records a memory.
+- `NO_JOB_SITE` reuses or creates `find_job_site`.
+- Capability gaps and other failures record a memory; exit policy governs retries.
 
-`RestockSkill` traverses profession starter supplies, targeting `min(8, supply.quantity)` for each entry. A shortage with an unlocked ordinary crafting-table route runs a craft child task; otherwise it requests an order, publishes trade demand, and returns `WAITING`. It returns `SUCCESS` when all supplies are satisfied. The starter table defines demand types and quantities; replenishment depends on real supply.
+## Output metadata
 
-`AcquireItemSkill` uses `targetItem` and `targetQuantity`. Sufficient inventory completes the goal and removes that author's `TRADE_WANT`. An unlocked recipe runs a craft child task with ingredient planning and workbench travel, then checks inventory on the tick after success. The crafting chain reports missing ingredients. Without a crafting route, it requests a resource order and waits. Completion currently removes all `TRADE_WANT` signals by that author; account for this scope with concurrent purchase goals.
+`AgentGoal.outcomeItems` remains a lightweight goal/debug hint. Method discovery uses `ItemTaskCatalog` and bound `TaskContract` requirements/effects, with item quantities, retained tools, minimum levels and practice effects. `ResourceCatalog` provides parameterized resource producers, and `ResourceExtraction` executes both personal extraction and supplier work. Supplier `fulfill_order` outputs belong to the requester; the separate personal extraction method keeps its outputs. See [Task methods](task_methods.md) for recursive prerequisites, cycle bounds and ownership.
 
-For a farmer missing a hoe: `FarmSkill` reports the shortage → recovery reuses an output goal or creates crafting/supply demand → the scheduler selects a feasible goal → farming retries after the tool reaches inventory. Inventory and world state provide completion evidence.
+## Sources
 
-## Source locations
-
-- Failure data: `ai/behavior/Failure.java`, `FailureReason.java`.
-- Recovery methods: `ai/FailureRecoveryPlanner.java`.
-- Handler eligibility: `findHandler` and `diagnoseFailure` in `ai/behavior/BehaviorExecutor.java`.
-- Supply execution: `RestockSkill`, `AcquireItemSkill`, `CraftSkill`, `ResourceWorkSystem`.
-- Exit verification: `GoalExitPolicy`, `GoalExitPolicyChecks`.
+- `ai/FailureRecoveryPlanner.java`: failure dispatch and acquisition objectives.
+- `ai/AcquisitionPlanner.java`, `AcquisitionSearch.java`: quotes, simulated baskets and bounded cost search.
+- `ai/behavior/AcquireItemSkill.java`, `RestockSkill.java`: execution and retry boundaries.
+- `ai/CraftingPlan.java`: ordinary recipe dependencies and inventory simulation.
+- `ai/VillagerEconomySystem.java`: surplus quotes and paid settlement.

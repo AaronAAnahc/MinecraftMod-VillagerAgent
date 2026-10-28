@@ -41,8 +41,6 @@ public class ItemAttractionSystem {
         ItemStack remainder = item.getItem().copy(); remainder.shrink(moved);
         if (remainder.isEmpty()) item.remove(); else item.setItem(remainder);
         playPickupSound(villager);
-        agent.gainCapabilityXp(capabilityForItem(offered), ModConfig.CAPABILITY_PRACTICE_XP.get(),
-                villager, villager.level.getGameTime());
         VillagerEquipmentHelper.refreshEquipment(villager, agent);
         BrainLog.diagnostic(agent, "pickup-collected", "item=" + offered.getItem().getRegistryName() + " count=" + moved);
         return moved;
@@ -55,25 +53,6 @@ public class ItemAttractionSystem {
                 0.2F,
                 ((villager.getRandom().nextFloat() - villager.getRandom().nextFloat()) * 0.7F + 1.0F) * 2.0F
         );
-    }
-
-    /** Map an absorbed drop to the capability it trains (ores→smithing, crops→farming, else gathering). */
-    private static CapabilityId capabilityForItem(ItemStack stack) {
-        if (stack == null || stack.isEmpty()) return CapabilityId.GATHERING;
-        Item item = stack.getItem();
-        if (item == null) return CapabilityId.GATHERING;
-        String id = item.getRegistryName() == null ? "" : item.getRegistryName().toString();
-        if (id.contains("ore") || id.contains("ingot") || id.contains("nugget")
-                || id.contains("diamond") || id.contains("emerald") || id.contains("gold")
-                || id.contains("iron") || id.contains("coal")) {
-            return CapabilityId.SMITHING;
-        }
-        if (id.contains("wheat") || id.contains("carrot") || id.contains("potato")
-                || id.contains("beetroot") || id.contains("seed") || id.contains("pumpkin")
-                || id.contains("melon") || id.contains("sugar_cane") || id.contains("apple")) {
-            return CapabilityId.FARMING;
-        }
-        return CapabilityId.GATHERING;
     }
 
     /** Horizontal contact-box expansion; no magnetic attraction is applied. */
