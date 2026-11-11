@@ -133,8 +133,9 @@ public final class AgentDebugExporter {
             for (Map.Entry<String, VillagerEconomySystem.Price> e : pv.entrySet()) {
                 JsonObject p = new JsonObject();
                 p.addProperty("item", e.getKey());
-                p.addProperty("buy", e.getValue().buy);
-                p.addProperty("sell", e.getValue().sell);
+                p.addProperty("value", VillagerEconomySystem.villagerValue(agent,e.getKey()));
+                p.addProperty("playerBuysFor", VillagerEconomySystem.sellPriceForPlayer(agent,e.getKey()));
+                p.addProperty("playerSellsFor", VillagerEconomySystem.buyPriceForPlayer(agent,e.getKey()));
                 vt.add(p);
             }
         }

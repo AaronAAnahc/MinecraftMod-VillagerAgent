@@ -1,17 +1,17 @@
 # Event- and need-driven brain and resource orders
 
-Reviewed: 2026-10-27. This document describes the current workspace's main loop, goal exits, and resource orders.
+Reviewed: 2026-11-06. This document describes the current workspace's main loop, goal exits, and resource orders.
 
 This is implementation and maintenance documentation. See [Project walkthrough](project_walkthrough.md) for interview presentation. The runtime is Minecraft 1.16.5 / Forge; core scheduling and world operations run on the game server thread.
 
 ## Architecture
 
-The system combines Utility intent selection, rule-based task decomposition, and continuous action execution. Item acquisition uses registered output-matched methods, recursive prerequisites, and cost/stall scoring. Resource-order execution uses handwritten supply steps and shares extraction with personal acquisition. This is a bounded HTN-style implementation, not a general planner over arbitrary world-state effects or a GOAP search engine. See [Task methods](task_methods.md).
+The system combines Utility intent selection, rule-based task decomposition, and continuous action execution. Item acquisition uses registered output-matched methods, recursive prerequisites, and cost/stall scoring. Village request responses reuse the same extraction and crafting prerequisites. This is a bounded HTN-style implementation, not a general planner over arbitrary world-state effects or a GOAP search engine. See [Task methods](task_methods.md).
 
 | Concept | Responsibility | Timber example |
 |---|---|---|
 | Utility AI | Choose what to do now | Compare supplying orders, harvesting, chatting, wandering, and resting; sample feasible options by weight |
-| Implemented task methods | Discover item producers, choose one method, and execute prerequisites | Acquire logs → choose extraction, purchase or cooperative supply; extraction may first acquire an axe |
+| Implemented task methods | Discover item producers, choose one method, and execute prerequisites | Acquire logs → choose extraction or a village request; extraction may first acquire an axe |
 | GOAP (comparison only; not implemented) | Search arbitrary modeled world states through action effects | A general action-state search would need additional state/effect modeling |
 
 HTN defines methods for completing tasks, not a time schedule. GOAP still depends on correctly modeled actions and world state, rather than unrestricted random behavior. Both can run without an LLM. Task methods explicitly control tools, harvest results, navigation, and delivery; skill method bodies determine coverage.
@@ -23,7 +23,7 @@ flowchart TD
     W[World state, inventory, fatigue, neighbors] --> P[Slow perception and needs checks]
     E[Integrated world events] --> G[Candidate goal pool]
     P --> G
-    P --> O[Per-dimension resource order book]
+    P --> O[Per-village priced order board]
     O --> G
     G --> U[Utility feasibility filter and weighted selection]
     U --> S[Skills and handwritten task methods]
@@ -41,7 +41,7 @@ Behavioral freedom comes from state-dependent candidates/weights and probabilist
 
 1. Slow perception updates local farming opportunities, remembered fields, conversation neighbors, needs, and profession eligibility. Events can add goals.
 2. `GoalScheduler` samples using current needs, opportunities, recently completed tasks, and cooldowns. Nighttime rest takes precedence over ordinary work; other behavior remains state-scored.
-3. Active tasks retain continuity. After completing an action and running for a minimum period, selection may repeat. Urgent goals can preempt; positive-score executable non-wander goals can interrupt wandering.
+3. Active tasks are committed (`GoalCommitment`): no ordinary switch while walking to or working on a task. Farming, logging and mining may switch only at a yield point between two finished work units. Urgent goals (priority 9+, needed sleep) preempt; positive-score executable goals interrupt wandering. See [Goal utility](goal_utility_and_chance_factors.md#commitment-and-yield-points).
 4. `processGoals` advances actions every server tick independently of `BEHAVIOR_EXECUTOR_INTERVAL_TICKS`. `AGENT_THINK_INTERVAL` controls only perception/candidate maintenance.
 5. `WAITING` releases actions and order leases for a later retry. `SUCCESS/FAIL/DELETE` share cleanup; `GoalExitPolicy` determines retention/retry. Waiting for materials must not become endless `RUNNING`.
 6. The custom Brain continuously controls managed adults using vanilla navigation physics. Children retain vanilla behavior.
@@ -66,30 +66,19 @@ The system combines periodic perception with limited event integration. Not ever
 
 ### Work priorities
 
-Priority floors are 8 for finding job sites and stock delivery; 7 for farming, crafting, and resource orders; and 6 for restocking, acquiring items, gathering, and trading. Executor maintenance raises older saved goals to these floors, preserving existing urgent priorities 9–10. Socializing is 3; ordinary wander is 2 and only a fallback. At fatigue 80, rest precedes ordinary work and can interrupt farming, while urgent 9–10 goals retain precedence. Priorities contribute to Utility weighting rather than strict integer ordering; ordinary work does not mutually preempt, and the urgent threshold remains 9.
+Priority floors are 8 for finding job sites and stock delivery; 7 for farming, crafting, and resource orders; and 6 for restocking, acquiring items, gathering, and collecting smelted output. Executor maintenance raises older saved goals to these floors, preserving existing urgent priorities 9–10. Socializing is 3; ordinary wander (2) and the routine board check (4, weight 0.5) are idle activities chosen only when nothing else scores. At fatigue 80, rest precedes ordinary work and can interrupt farming, while urgent 9–10 goals retain precedence. Priorities contribute to Utility weighting rather than strict integer ordering; ordinary work does not mutually preempt, and the urgent threshold remains 9.
 
 ### Utility selection
 
 Filter completed, suspended, expired, and cooling-down goals, then calculate:
 
 ```text
-baseScore = max(1, priority) × max(0.1, weight)
-finalScore = baseScore × currentOpportunityOrNeedModifier × recentBehaviorModifier
-ordinarySelectionProbability = finalScore / sumOfFeasibleFinalScores
+utility = max(1, priority) * max(0.1, weight) * skill.chanceFactor(agent, goal, now) * recencyFactor
 ```
 
-Sampling uses weights directly, without softmax. Feasible urgent goals bypass ordinary probability competition. Ordinary wander participates only when no other positive-score goal has a handler.
+Each `VillagerSkill` defines a `chanceFactor()` method that returns the opportunity multiplier for its goal type. The scheduler contains no per-type switch; all environment-sensing logic (fatigue curves, crop counts, remembered resources, etc.) lives in the skill that owns the behavior. See [Goal utility and chance factors](goal_utility_and_chance_factors.md) for the full table of per-skill factors and their formulas.
 
-| Candidate | Main current modifiers |
-|---|---|
-| Farming | Local opportunities plus revisitable farmland anchors; absent local maintenance, travel to remembered fields and recheck on arrival. See [Spatial perception](vision_module_implementation.md) |
-| Sleep | Eligible at fatigue 40: very low daytime/high nighttime weight; preemption of ordinary work only at 80 |
-| Conversation | Requires a neighbor and elapsed interval; longer since last conversation increases preference, with personality weighting |
-| Resource orders and stock deliveries | Weight × 2.5 |
-| Repeated crafting | Stop the routine candidate when target stock reaches 8 |
-| Restock | Not selected unless an essential item has zero stock |
-| Wander | Fallback without another positive executable goal; lower weight at high fatigue |
-| Recently completed same-type goals | Weight × 0.3 for 600 ticks |
+Sampling uses weights directly, without softmax. Feasible urgent goals (priority >= 9) bypass ordinary probability competition. Idle activities (wander, routine board check) participate only when no other positive-score goal has a handler. A runnable `meet_trade` is chosen before ordinary goals. Recently finished same-type goals recover from 0.3x to 1x over 600–3600 ticks depending on the last session's length.
 
 Hypothetical farming/order/chat scores of 3/5/2 give 30%/50%/20% selection probabilities. These illustrate the formula, not configuration or measurements. Weighted randomness increases variety but guarantees neither starvation freedom nor fixed action proportions.
 
@@ -115,101 +104,27 @@ Skill success and order completion are distinct. A batch delivery may return `SU
 - `WAITING` retains the goal with a 200-tick cooldown and unchanged failure count.
 - `BLOCKED(MISSING_ITEM)` retains supply dependencies and cools down for 200 ticks without spending a failure attempt. Other `BLOCKED/FAIL` results accumulate failures and remove the goal at three. UNREACHABLE retries after 200 ticks; other failures wait at least 200 ticks or the goal's existing cooldown.
 - `DELETE` removes immediately. `RoutineScheduler` waits at least 1200 ticks before reseeding repeatable goals removed for non-success results.
-- Non-sleep execution times out after 2400 ticks without applicable progress. Continuous farming refreshes this timer after real successful operations, and child-action gaps do not trigger ordinary switching. Navigation failures also enter the exit protocol.
+- Non-sleep, non-walking execution retains its 2400-tick root limit. Active MOVE/WALKING actions refresh a separate watchdog timestamp, so travel neither triggers that limit nor exhausts the subsequent work budget. Shared move goals fail after more than 200 game ticks without at least half a block of physical displacement (including vertical movement and detours); the clock resets on movement. Tiny jitter does not reset it. Missing/unreachable paths can fail immediately. Continuous farming refreshes this timer after real successful operations, and child-action gaps do not trigger ordinary switching. Navigation failures also enter the exit protocol.
 
 `REPEATABLE` defines regeneration and post-completion cooldown. Skills are singletons; per-villager state belongs in `VillagerAgentData`, `BrainRuntime`, or action objects. Actual NBT fields determine persistence.
 
-## Professions and orders
+## Professions and village supply
 
-`LUMBERJACK` and `MINER` are cached resource-order roles synchronized from the registered `villageragent:lumberjack` and `villageragent:miner` professions. They claim the carpenter table and miner workbench through the normal POI path. See [Workstations](workstations.md). Older independent role data is reconciled to the actual entity profession on update.
-
-- Nearby unemployed adults obtain these professions by claiming their workstations. Orders do not assign jobs. The occupation command sets the actual profession and clears its previous job-site reservation.
-- First resource assignment provides one basic tool under the starter-supply convention; switching roles cannot grant it again.
-- Daily `restock` delegates shortages to acquisition, whose method executor compares crafting, paid product purchases and cooperative supply using remaining cost and stall penalties. See [Task methods](task_methods.md). First vanilla profession assignment provides starter supplies.
-- Profession controls claim eligibility; Utility controls when execution starts.
-- Each dimension has its own `WorkOrderSavedData`.
-- Active requests merge only when requester, item and `ownerAttempt` all match. Ordinary requests have a null owner; separate method attempts keep independent demand.
-- One valid claimant per order and one valid lease per worker.
-- Active work renews leases; interruption releases them; absence expires them. Reload preserves active ordinary demand but excludes method-owned orders, clears leases, and rebuilds execution from world/inventory state.
-- Partial batches are allowed; only actual requester stock reaching the target closes the order.
-- Transfers use actual capacity, preserving items when inventories are full.
-- Expired orders stop occupying workers; persistent real shortages generate new requests.
-
-Demand comes from profession essentials in the economy system, failure recovery, item-acquisition tasks, and debug commands. The economy creates production goals for villagers with unlocked recipes; stock trades reserve both participants and enter the unified executor as paired `meet_trade` roots after natural task boundaries. See [Trade and supplies](capabilities_crafting_and_economy.md#trade-and-supplies) for the readiness barrier and per-market scope.
-
-Raw-material orders directly deliver cooperative supply to requesters. Orders cover demand/supply without quotes, advance payments, or breach penalties; stock trading settles in emeralds.
-
-### Order data and state machine
-
-An order records id, requester, item, required profession, target stock, remaining shortage, expiry, claimant, lease expiry, and optional `ownerAttempt`. Request bridges cap desired stock at 256.
-
-```text
-remaining = max(0, targetStock - requesterActualStock)
-When merging active requests: targetStock = max(oldTargetStock, newDesiredStock)
-```
-
-```mermaid
-stateDiagram-v2
-    [*] --> OPEN: Real shortage
-    OPEN --> CLAIMED: Eligible worker claims
-    CLAIMED --> CLAIMED: Renew during execution
-    CLAIMED --> OPEN: Release or lease expiry
-    OPEN --> DELIVERED: Stock satisfied
-    CLAIMED --> DELIVERED: Stock satisfied
-    OPEN --> EXPIRED: Order expires
-    CLAIMED --> EXPIRED: Order expires
-    OPEN --> CANCELLED: Owning method closes
-    CLAIMED --> CANCELLED: Owning method closes
-```
-
-`cancelOwned` is wired into method cleanup: it cancels active orders for that attempt and releases their workers. There is no separate user-facing order-cancellation command.
-
-Required invariants:
-
-1. Only active orders with the same requester/item/owner merge; consumption after completion can create a new order.
-2. Workers cannot claim their own requests and must match the profession.
-3. At most one valid claimant per order and one valid lease per worker.
-4. A candidate expresses intent; execution ownership requires a claim. Multiple villagers observing an opportunity does not grant them simultaneous execution rights.
-5. Worker leases last 600 ticks and renew during execution. Ordinary demand expires after 24000 ticks; method-owned demand expires after 600 ticks and must be refreshed by its requester. Worker renewal does not refresh demand expiry. At 20 TPS these durations are 30 seconds and 20 minutes.
-6. Repeated requests can refresh expiry. Timeouts provide recovery, not delivery deadlines or commercial promises.
-7. Gifts and ordinary trades can satisfy stock too. `DELIVERED` means demand is satisfied, not that every item came from the original claimant.
-
-`WorkOrderBook` is a single-threaded pure Java ledger. Sequential server eligibility/ownership checks provide exclusivity, not distributed locks. Inventory transfer and persistence are not database transactions and provide no cross-crash exactly-once guarantee.
-
-### Closing a timber request
-
-Suppose A has two oak logs and wants ten; nearby B is a lumberjack:
-
-1. A requests `targetStock=10`, leaving eight. Repeated shortage checks merge into the active order.
-2. B's slow update sees the order and adds a `fulfill_order` candidate. The worker must already have the appropriate profession and extraction skill.
-3. Candidate allocation reserves the order before creating the supply goal. When Utility selects supply, B renews or reacquires the lease at execution entry. If another worker owns it, B removes the stale goal and yields.
-4. B checks inventory: enough stock means delivery; otherwise check tools and find locally exposed reachable natural-tree candidates.
-5. Approach and break one block over ticks, collect real drops during a collection window, then inspect inventory to confirm the yield.
-6. Travel to A after reaching the batch amount. Normal batches are capped at eight; limited resources can result in a smaller partial batch.
-7. Transfer only what both inventories permit. If three fit, A has five and still lacks five. The supply skill can finish while the order remains active.
-8. Demand is satisfied only at actual stock ten; consumption during execution changes the next stock check.
-
-Missing tools trigger recovery; missing resources trigger waiting and potentially later movement through wandering. There is no dedicated long-distance exploration route for missing-ore orders. Raw gathering and recipe production connect, but do not form an arbitrary-depth industrial planner.
+Resource professions are assigned through workstations and retain capability baselines. `ResourceWorkSystem.assign` grants no tool; starter items come from `JobStarterItems` when the profession is taken. There is no executable `fulfill_order` goal. Free notice-board requests, request-linked production and one-way delivery meetings are described in [economy](capabilities_crafting_and_economy.md#trade-and-supplies). `WorkOrderBook` is compatibility data; its state-machine checks do not validate village supply.
 
 ## Gathering methods and limits
 
-`ResourceCatalog` supports oak, spruce, birch, jungle, acacia, and dark-oak logs; coal, iron ore, gold ore, diamonds, redstone, lapis lazuli, and cobblestone. It also registers mature wheat, carrot, potato and beetroot crops for personal acquisition. Crop entries have no resource-order profession and cannot create cooperative resource orders.
+`ResourceCatalog` supports six overworld log species, exposed coal/iron/gold/diamond/redstone/lapis ores, stone for cobblestone, and mature wheat/carrot/potato/beetroot crops. `ResourceExtraction` is shared by personal acquisition and request responses; all output comes from actual world loot and stays with the producer until used or delivered. Crop acquisition by a villager that remembers a field runs a `FarmSkill` session instead (see [task methods](task_methods.md)).
 
-In Minecraft 1.16.5, iron mining yields iron ore. Ingot processing uses crafting/recipe systems; recipe resolution and material conversion do not establish complete furnace input, fuel, and output interaction, which needs separate verification.
+Logging selects the nearest remembered chunk with a positive WOOD_LOG count outside known village bounds, walks into it, then scans its 16×16×256 blocks. It checks at most eight nearby exposed candidates and 24 stand paths. BFS follows 26-neighbor log connectivity and requires an adjacent leaf somewhere in the component. Any protected village log, unknown referenced structure bounds, unloaded border or component exceeding 512 logs rejects the entire tree. This is a connectivity rule, not a player-placement ownership detector. A stale/inaccessible chunk is skipped for the current extraction attempt; without remembered suitable chunks the skill waits.
 
-Sensors inspect only local loaded areas, require at least one air-exposed face, and validate reachable nearby standing positions. Workers may approach from another side of a tree; direct sight from the current position is unnecessary. Fully buried ore is excluded. No resource yields execution to other tasks, including exploration/wandering, before retrying.
+The action walks into reach of one root log and accumulates the sum of vanilla tool-aware break ticks for all connected logs, equivalent to log count × single-log duration for uniform wood. Only the root shows cracking/swings. Completion rescans and compares the entire snapshot, runs Forge break protection hooks for every log, and verifies states again before removal. Logs are removed together with real tool-aware loot and durability use; one root break effect plays. Interruption clears the root animation; changed trees abort rather than creating items. Drops still require physical pickup and capacity. The generic single-block breaker also refuses village logs.
 
-Coverage is exposed reachable ore and reachable tree portions. Tunneling, stairs, high-tree scaffolding, whole-tree work, systematic replanting, and long-distance transport need separate methods. Natural-tree detection uses nearby nonpersistent leaves as a heuristic, not full terrain/player-building ownership recognition.
-
-Breaking selects tools, checks harvest suitability, computes duration, displays swings/cracks, creates actual drops, consumes durability, handles changed distance/blocks, and passes through Forge break events. Placement uses real item-use context and Forge placement, consuming inventory blocks.
-
-Search spans horizontal radius 10 and vertical -4 to +5, excludes unloaded regions, sorts by distance, and checks at most eight resource blocks and 24 standing paths. These are budgets, not measured performance evidence.
-
-FakePlayer breaking uses player formulas and the selected tool for progress, drops, XP, and wear. Full equivalence for potion effects, enchantments, and third-party mods requires in-game tests. Action-layer placement does not imply autonomous site selection or complete building planning.
+Non-logging extraction uses the local radius-10, vertical -4/+5 exposed-source scan, except crops from a remembered field. Fully buried ore, tunneling and scaffolding are not supported. Minecraft 1.16.5 iron extraction yields ore, not ingots. Compilation cannot validate navigation, multiplayer animation or third-party protection behavior.
 
 ## With and without an LLM
 
-Without an LLM, the brain, order claims, gathering, delivery, relationship updates, and local villager dialogue continue. Nearby neighbors create conversation opportunities selected by the same scheduler.
+Without an LLM, the brain, village requests and deliveries, gathering, relationship updates, and local villager dialogue continue. Nearby neighbors create conversation opportunities selected by the same scheduler.
 
 With an LLM, the same social entry point generates richer content, falls back to local lines on failure, and applies asynchronous results on the server thread. See [LLM and world interaction](llm_and_world_interaction.md) for player chat and thoughts. Autonomous rule goals come from candidate maintenance, needs, and integrated events. LLM output neither directly manipulates the world nor creates unimplemented capabilities.
 
@@ -219,13 +134,11 @@ Server-thread conversation callbacks check entities, distance, and context befor
 
 | Data | Current policy |
 |---|---|
-| Resource role and starter-tool receipt flag | Saved with villager data; switching roles does not grant tools again |
-| Active ordinary-order demand fields | Per-dimension `WorldSavedData`; only active orders with null owner are saved |
-| Method-owned orders and acquisition attempts | Runtime only; canceled on owner cleanup and excluded from saves |
-| Claimants and execution leases | Not restored; reopened after loading |
-| Breaking progress, current actions, temporary skill plans | No exact checkpoint persistence; rebuild from current world/inventory |
-
-Recovery preserves ordinary demand and re-evaluates execution rather than resuming an exact instruction. Method-owned requests are transient and must be recreated from surviving objectives. Game world/entity saves are not atomic across files.
+| Resource role and currency-grant receipt flag | Agent NBT; no tool grant on assignment |
+| Village origin/bounds and resident affiliation | Per-dimension `VillageRegistry` saved data |
+| Trade messages, appointments and production intents | Runtime only; live needs/stock republish after restart |
+| Personal values | Versioned agent NBT; old two-price data discarded |
+| Breaking progress, actions and temporary skill plans | Rebuilt from actual world/inventory after interruption |
 
 New extraction resources extend `ResourceCatalog` with outputs, source predicates, tools, capability and supply eligibility; `ItemTaskCatalog` discovers them for personal acquisition. Different operations register a provider/contract/executor once, rather than per-villager method lists. New behaviors need candidate producers, scoring, execution, completion evidence, and cleanup, beyond an LLM prompt.
 
@@ -237,7 +150,8 @@ Links are relative to this document and ordered by execution flow.
 | Responsibility | Entry point |
 |---|---|
 | Main loop and goal results | [VillagerAgentManager](../src/main/java/com/github/AaronAA0721/villageragent/ai/VillagerAgentManager.java) |
-| Probabilistic selection and conditional weights | [GoalScheduler](../src/main/java/com/github/AaronAA0721/villageragent/ai/GoalScheduler.java) |
+| Probabilistic selection and utility formula | [GoalScheduler](../src/main/java/com/github/AaronAA0721/villageragent/ai/GoalScheduler.java) |
+| Per-skill opportunity weights (chanceFactor) | Each skill in `ai/behavior/`; see [Goal utility and chance factors](goal_utility_and_chance_factors.md) |
 | Routine candidates and opportunities | [RoutineScheduler](../src/main/java/com/github/AaronAA0721/villageragent/ai/RoutineScheduler.java), [OpportunitySensor](../src/main/java/com/github/AaronAA0721/villageragent/ai/OpportunitySensor.java) |
 | Action exit and release | [ActionLifecycle](../src/main/java/com/github/AaronAA0721/villageragent/ai/ActionLifecycle.java) |
 | Order state and persistence | [WorkOrderBook](../src/main/java/com/github/AaronAA0721/villageragent/ai/work/WorkOrderBook.java), [WorkOrderSavedData](../src/main/java/com/github/AaronAA0721/villageragent/ai/work/WorkOrderSavedData.java) |
@@ -251,30 +165,7 @@ Links are relative to this document and ordered by execution flow.
 
 ## Debugging and acceptance
 
-Commands target the managed villager nearest the executor:
-
-```text
-/va occupation lumberjack
-/va occupation miner
-/va occupation none
-/va request minecraft:oak_log 8
-/va request minecraft:iron_ore 4
-/va orders
-```
-
-`request` asks that villager for an additional quantity; it cannot fulfill its own external order. Request near the consumer, then assign another villager a role or wait for automatic unemployed participation. AI, world interaction, and economy must be enabled. First assignment grants a basic tool; diamond/gold mining still requires a suitable iron pickaxe.
-
-Test-world scenarios:
-
-1. Without LLM, use two adults, natural trees, and reachable surface ore. Observe claims, block breaking, collection, return, and delivery; compare inventories with `/va orders`.
-2. Two workers compete for one order; only one holds it, and another can continue after unload or panic.
-3. An unsuitable pickaxe must cause tool requests/waiting rather than fabricated ore.
-4. Full requester inventory and partial supplier stock must preserve quantities and leave unmet orders open.
-5. Remove ore, block routes, or separate participants during work; timeout/waiting must release execution.
-6. Save/reload: ordinary demand persists and leases are reacquired; owned demand is replanned. Cached resource roles reconcile with actual entity professions.
-7. High fatigue permits daytime rest; at night, seek sleep after current work. Fatigue 80 can preempt ordinary tasks. Farming and chatting need no LLM.
-
-`gradlew workOrderChecks` or `gradlew check` runs pure Java order checks covering deduplication, exclusive claims, lease renewal/expiry, partial delivery, external stock satisfaction, renewed demand, and dimension isolation. Compilation and rule checks do not replace Minecraft scenarios. See [Debugging and verification](DEBUG_VERIFICATION.md).
+See [Debugging and verification](DEBUG_VERIFICATION.md) for compile/rule checks and live request, village isolation and tree-felling cases. `/va request` makes the looked-at villager acquire an item (posting a request if needed); `/va orders` is a work-order-book diagnostic, not the notice board. Use `/va markets` for board message counts. Valuation tables apply only to player barter.
 
 ## Drop and active pickup primitives
 
@@ -326,4 +217,4 @@ Reclamation requires FARMING ≥ 2, an inventory hoe, dirt/grass/path/coarse dir
 
 While owning the vanilla Brain, the mod separately runs vanilla `SwimTask(0.8F)` and enables `setCanFloat(true)` on ground navigation to retain floating/jumping control. Work goals remain under custom scheduling.
 
-Acquisition method sessions are retained separately from the transient execution tree across WAITING and preemption. Method-owned trade/resource requests are isolated and canceled by attempt UUID; ordinary resource-order persistence is unchanged, while transient owned orders are excluded from saves. See [Task methods](task_methods.md).
+Acquisition method sessions are retained separately from the transient execution tree across WAITING and preemption. Method-owned requests are isolated and canceled by attempt UUID; board messages are runtime-only. See [Task methods](task_methods.md).

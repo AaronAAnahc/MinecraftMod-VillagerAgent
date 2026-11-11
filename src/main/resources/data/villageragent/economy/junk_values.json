@@ -1,0 +1,16 @@
+{
+  "minecraft:dirt": 0.05,
+  "minecraft:sand": 0.05,
+  "minecraft:gravel": 0.08,
+  "minecraft:cobblestone": 0.10,
+  "minecraft:clay_ball": 0.20,
+  "minecraft:string": 0.30,
+  "minecraft:feather": 0.25,
+  "minecraft:flint": 0.38,
+  "minecraft:rotten_flesh": 0.30,
+  "minecraft:bone": 0.50,
+  "minecraft:spider_eye": 0.50,
+  "minecraft:gunpowder": 1.00,
+  "minecraft:ink_sac": 0.50,
+  "minecraft:leather": 1.50
+}

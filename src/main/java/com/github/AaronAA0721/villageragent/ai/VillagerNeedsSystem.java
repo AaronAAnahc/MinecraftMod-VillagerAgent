@@ -1,13 +1,9 @@
 package com.github.AaronAA0721.villageragent.ai;
 
-import net.minecraft.item.Food;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.world.server.ServerWorld;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import com.github.AaronAA0721.villageragent.config.ModConfig;
 
-import java.util.List;
+import net.minecraft.world.server.ServerWorld;
+
 import java.util.Map;
 
 /**
@@ -15,11 +11,11 @@ import java.util.Map;
  *
  * <h3>Hunger (0–100, starts full at 100)</h3>
  * <ul>
- *   <li>Decays by {@link #HUNGER_DECAY_RATE} every {@link #DECAY_INTERVAL} ticks.</li>
- *   <li>When hunger falls below {@link #EAT_THRESHOLD}, the villager automatically
- *       consumes one food item from their {@link AgentInventory} and gains back
- *       hunger proportional to the item's nutrition value.</li>
- *   <li>If no food is available at starvation level ({@code < 10}), a memory is added.</li>
+ *   <li>Decays by the configured {@code hunger_decay_per_minute} every {@link #DECAY_INTERVAL} ticks.</li>
+ *   <li>When hunger falls below {@link #EAT_THRESHOLD}, a goal-driven {@code eat} task is seeded;
+ *       {@link com.github.AaronAA0721.villageragent.ai.behavior.EatSkill} performs the eating
+ *       (chewing animation, sounds, acquisition when no food is carried). Starvation raises the
+ *       goal into the emergency priority band.</li>
  * </ul>
  *
  * <h3>Fatigue (0–100, starts at 0)</h3>
@@ -32,19 +28,12 @@ import java.util.Map;
  */
 public class VillagerNeedsSystem {
 
-    private static final Logger LOGGER = LogManager.getLogger();
-
     /** Ticks between each hunger-decay step (~1 Minecraft minute = 1200 ticks). */
     private static final int DECAY_INTERVAL = 1200;
 
-    /** Hunger points lost per decay step. */
-    private static final float HUNGER_DECAY_RATE = 5.0f;
 
     /** Hunger below this level triggers automatic eating. */
-    private static final float EAT_THRESHOLD = 40.0f;
-
-    /** Hunger gained per food nutrition point (vanilla nutrition * this factor). */
-    private static final float NUTRITION_FACTOR = 8.0f;
+    private static final float EAT_THRESHOLD = 60.0f;
 
     // ── Public entry point ────────────────────────────────────────────────────
 
@@ -62,15 +51,33 @@ public class VillagerNeedsSystem {
 
         // ── Hunger ──
         float hunger = agent.getHunger();
-        hunger = Math.max(0f, hunger - HUNGER_DECAY_RATE * scale);
+        float decay = ModConfig.HUNGER_DECAY_PER_MINUTE.get().floatValue();
+        hunger = Math.max(0f, hunger - decay * scale);
         agent.setHunger(hunger);
 
         if (hunger < EAT_THRESHOLD) {
-            tryEat(agent, gameTime);
+            ensureEatGoal(agent, hunger);
         }
 
         // ── Mood (re-derived every needs tick) ──
         agent.setMood(deriveMood(agent));
+    }
+
+    /**
+     * Seed a goal-driven {@code eat} task instead of silently consuming food in the background.
+     * {@link com.github.AaronAA0721.villageragent.ai.behavior.EatSkill} handles selection, the
+     * chewing animation and sounds, and acquisition when no food is carried. Starvation raises the
+     * priority into the emergency band so eating can preempt ordinary work.
+     */
+    private static void ensureEatGoal(VillagerAgentData agent, float hunger) {
+        for (AgentGoal g : agent.getGoals())
+            if (!g.isCompleted() && "eat".equals(g.getGoalType())) return;
+        if (agent.getGoals().size() >= 10) return;
+        int priority = hunger < 15f ? 9 : 6;
+        AgentGoal eat = new AgentGoal("eat", "Eat to satisfy hunger", priority);
+        eat.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
+        eat.setImportance(priority);
+        agent.getGoals().add(eat);
     }
 
     /** Per-tick sampling avoids charging a whole slow-update interval as work after a walk. */
@@ -91,46 +98,6 @@ public class VillagerNeedsSystem {
                 && !"rest".equals(type) && !"sleep".equals(type);
         // 6000 ticks working + 6000 idle/moving = 60 + 15 = 75, starting at zero.
         agent.setFatigue(agent.getFatigue() + (working ? 12f : 3f) * Math.min(1, now - previous) / 1200f);
-    }
-
-    // ── Eating ───────────────────────────────────────────────────────────────
-
-    private static void tryEat(VillagerAgentData agent, long gameTime) {
-        AgentInventory inv = agent.getInventory();
-        List<ItemStack> items = inv.getItems();
-
-        for (int i = 0; i < items.size(); i++) {
-            ItemStack stack = items.get(i);
-            if (stack.isEmpty()) continue;
-
-            Item item = stack.getItem();
-            if (!item.isEdible()) continue;
-
-            Food food = item.getFoodProperties();
-            if (food == null) continue;
-
-            // Consume one food item
-            stack.shrink(1);
-            if (stack.isEmpty()) items.set(i, ItemStack.EMPTY);
-
-            float restored = food.getNutrition() * NUTRITION_FACTOR;
-            float newHunger = Math.min(100f, agent.getHunger() + restored);
-            agent.setHunger(newHunger);
-
-            String foodName = item.getRegistryName() != null
-                    ? item.getRegistryName().getPath().replace("_", " ")
-                    : "some food";
-            agent.addMemory("Ate " + foodName + " — hunger satisfied");
-            LOGGER.debug("{} ate {} (hunger: {} -> {})",
-                    agent.getName(), foodName, (int) (agent.getHunger() - restored), (int) newHunger);
-            return;
-        }
-
-        // No food found
-        if (agent.getHunger() < 10f) {
-            agent.addMemory("I'm very hungry but have nothing to eat!");
-            LOGGER.debug("{} is starving with no food", agent.getName());
-        }
     }
 
     // ── Mood derivation ───────────────────────────────────────────────────────

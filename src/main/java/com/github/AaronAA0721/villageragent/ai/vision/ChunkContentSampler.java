@@ -33,9 +33,29 @@ import net.minecraft.world.World;
  * A sampled chunk therefore costs ~100–200 bytes in memory, no matter whether it is empty
  * plains or a 256-block farm.
  *
- * <p>The scan reuses a single {@link BlockPos.Mutable}, so it allocates nothing per block.
+ * <p>Ore features additionally require <b>reachable</b> exposure: an ore only counts as sighted
+ * when it touches the air connected to the viewer's own cell. A mere "has an air face" test
+ * would also report ore sealed behind a wall or inside a disconnected cave pocket, which the
+ * villager can neither see nor walk to.
+ *
+ * <p>Cost is bounded and dominated by the block reads that were always there. The read pass
+ * does {@code layers * 256} (2048 by default) {@code getBlockState} calls and fills a
+ * {@code boolean[]} air bitmap. The connectivity flood fill is skipped entirely unless the
+ * slab holds ore the memory does not already know, and when it does run it stays inside that
+ * same bitmap — at most 2048 cells, 6 constant-offset neighbour tests each, zero world access.
+ * Nothing per-block is retained after the call.
  */
 public final class ChunkContentSampler {
+
+    /** Vertical slab half-extents around the reference Y: [refY - BELOW, refY + ABOVE]. */
+    private static final int SLAB_BELOW = 3, SLAB_ABOVE = 4;
+
+    /**
+     * Ore cells held back for the visibility pass. A slab with more exposed ore than this
+     * is a vein wall; checking the first {@value} is more than enough to find a visible face,
+     * and the overflow can only cause a conservative "not seen".
+     */
+    private static final int MAX_ORE_CANDIDATES = 64;
 
     private ChunkContentSampler() {}
 
@@ -44,33 +64,189 @@ public final class ChunkContentSampler {
         cm.lastVisitedTick = world.getGameTime();
 
         BlockPos vp = villager.blockPosition();
-        int yLo = Math.max(0, vp.getY() - 3);
-        int yHi = Math.min(255, vp.getY() + 4);
-        int x0 = cx << 4;
-        int z0 = cz << 4;
+        scanSlab(world, cm, cx, cz, vp.getY(), vp);
+
+        deriveTags(cm);
+        sampleEntities(villager, world, cm);
+        computeSaliency(cm);
+        return cm;
+    }
+
+    /**
+     * Sample a chunk at a fixed reference Y, without a living entity.
+     * Used for seeding village shared memories at discovery time.
+     * Skips entity sampling (no reference entity available).
+     */
+    public static ChunkMemory sampleAt(World world, int cx, int cz, int refY) {
+        if (!world.hasChunk(cx, cz)) return null;
+        ChunkMemory cm = new ChunkMemory(net.minecraft.util.math.ChunkPos.asLong(cx, cz));
+        cm.lastVisitedTick = world.getGameTime();
+
+        scanSlab(world, cm, cx, cz, refY, null);
+
+        deriveTags(cm);
+        computeSaliency(cm);
+        return cm;
+    }
+
+    /**
+     * Re-read the slab of an already known chunk for its non-ore features only: features that appeared since
+     * the last visit are added, and a remembered anchor whose block is gone is replaced by another block of that
+     * kind in the slab (or forgotten if there is none). Tags, counts, ore, entities and building ids are kept.
+     * Called when a villager re-enters a chunk it has not visited for a while.
+     */
+    public static void refreshFeatures(World world, ChunkMemory cm, int refY) {
+        int cx = cm.getX(), cz = cm.getZ();
+        if (!world.hasChunk(cx, cz)) return;
+        // Drop anchors that no longer hold their block.
+        for (ChunkFeature f : ChunkFeature.values()) {
+            if (f.isOre() || !cm.has(f)) continue;
+            BlockPos anchor = cm.anchorOf(f);
+            if (anchor != null && featureOf(world.getBlockState(anchor)) != f) cm.forgetFeature(f);
+        }
+        int yLo = Math.max(0, refY - SLAB_BELOW), yHi = Math.min(255, refY + SLAB_ABOVE);
+        int x0 = cx << 4, z0 = cz << 4;
+        BlockPos.Mutable p = new BlockPos.Mutable();
+        for (int y = yLo; y <= yHi; y++)
+            for (int lx = 0; lx < 16; lx++)
+                for (int lz = 0; lz < 16; lz++) {
+                    BlockState st = world.getBlockState(p.set(x0 + lx, y, z0 + lz));
+                    if (st.getMaterial() == Material.AIR) continue;
+                    ChunkFeature f = featureOf(st);
+                    if (f != null && !f.isOre() && !cm.has(f)) cm.recordFeature(f, lx, y, lz);
+                }
+    }
+
+    // ── Slab scan ─────────────────────────────────────────────────────────
+    //
+    // Cell indexing: i = (ly << 8) | (lx << 4) | lz, so the slab is a flat array of
+    // layers * 256 cells and axis steps are plain constants (±1 z, ±16 x, ±256 y).
+    // Decomposition is shifts and masks only — no integer division in the inner loop.
+
+    private static final int X_STEP = 16, Y_STEP = 256;
+
+    /**
+     * Read the slab once, folding every solid cell into counters and feature bits. Ore cells
+     * are deferred: they only become features if they touch the air the {@code viewer} is
+     * standing in, which needs a flood fill — and that fill runs <b>only</b> when the slab
+     * actually holds unrecorded ore. {@code viewer} may be null (no entity), in which case
+     * the open air across the top of the slab seeds the fill.
+     */
+    private static void scanSlab(World world, ChunkMemory cm, int cx, int cz, int refY, BlockPos viewer) {
+        int yLo = Math.max(0, refY - SLAB_BELOW);
+        int yHi = Math.min(255, refY + SLAB_ABOVE);
+        int layers = yHi - yLo + 1;
+        if (layers <= 0) return;
+        int x0 = cx << 4, z0 = cz << 4;
+
+        boolean[] air = new boolean[layers << 8];
+        int[] oreCells = null;              // allocated on first ore sighting
+        ChunkFeature[] oreFeatures = null;
+        int oreCount = 0;
 
         BlockPos.Mutable p = new BlockPos.Mutable();
-        for (int lx = 0; lx < 16; lx++) {
-            for (int lz = 0; lz < 16; lz++) {
-                for (int y = yLo; y <= yHi; y++) {
-                    p.set(x0 + lx, y, z0 + lz);
+        for (int ly = 0; ly < layers; ly++) {
+            for (int lx = 0; lx < 16; lx++) {
+                for (int lz = 0; lz < 16; lz++) {
+                    p.set(x0 + lx, yLo + ly, z0 + lz);
                     BlockState st = world.getBlockState(p);
-                    if (st.getMaterial() == Material.AIR) continue;
+                    int i = (ly << 8) | (lx << 4) | lz;
+                    if (st.getMaterial() == Material.AIR) { air[i] = true; continue; }
 
                     BlockCategory cat = classify(st);
                     if (cat != null) cm.addCount(cat, 1);
 
                     // Feature bits: only the first sighting stores a position, the rest are free.
                     ChunkFeature f = featureOf(st);
-                    if (f != null && !cm.has(f)) cm.recordFeature(f, lx, y, lz);
+                    if (f == null || cm.has(f)) continue;
+                    if (!f.isOre()) { cm.recordFeature(f, lx, yLo + ly, lz); continue; }
+                    // Ore is decided after the fill — see visibility pass below.
+                    if (oreCells == null) {
+                        oreCells = new int[MAX_ORE_CANDIDATES];
+                        oreFeatures = new ChunkFeature[MAX_ORE_CANDIDATES];
+                    }
+                    if (oreCount < MAX_ORE_CANDIDATES) {
+                        oreCells[oreCount] = i;
+                        oreFeatures[oreCount] = f;
+                        oreCount++;
+                    }
                 }
             }
         }
 
-        deriveTags(cm);
-        sampleEntities(villager, world, cm);
-        computeSaliency(cm);
-        return cm;
+        // Common case — plains, forest, any slab without fresh ore: no fill, no extra arrays.
+        if (oreCount == 0) return;
+
+        boolean[] reachable = reachableAir(air, layers, viewer, x0, z0, yLo, yHi);
+        for (int c = 0; c < oreCount; c++) {
+            ChunkFeature f = oreFeatures[c];
+            if (cm.has(f)) continue;                                  // an earlier cell won it
+            int i = oreCells[c];
+            if (!touchesReachableAir(reachable, i, layers)) continue;  // buried or walled off
+            cm.recordFeature(f, (i >> 4) & 15, yLo + (i >> 8), i & 15);
+        }
+    }
+
+    /**
+     * Breadth-first flood fill over air cells, seeded at the viewer's own cell (and the one
+     * above it, i.e. eye level).
+     *
+     * <p>The fill cannot run away: it is clipped to the sampled slab, so it visits at most
+     * {@code layers * 256} cells (2048 by default) and never leaves the chunk or climbs toward
+     * the sky. It also never touches the world — it walks the {@code air} bitmap the read pass
+     * already produced. The flip side is that air detouring outside the chunk and back is not
+     * followed, an accepted approximation of "the same open space the villager is standing in".
+     */
+    private static boolean[] reachableAir(boolean[] air, int layers, BlockPos viewer,
+                                          int x0, int z0, int yLo, int yHi) {
+        boolean[] seen = new boolean[air.length];
+        int[] queue = new int[air.length]; // each cell is enqueued at most once
+        int head = 0, tail = 0;
+
+        if (viewer != null) {
+            int lx = viewer.getX() - x0, lz = viewer.getZ() - z0;
+            if (lx >= 0 && lx < 16 && lz >= 0 && lz < 16) {
+                for (int y = viewer.getY(); y <= Math.min(yHi, viewer.getY() + 1); y++) {
+                    if (y < yLo) continue;
+                    int i = ((y - yLo) << 8) | (lx << 4) | lz;
+                    if (air[i] && !seen[i]) { seen[i] = true; queue[tail++] = i; }
+                }
+            }
+        }
+        if (tail == 0) {
+            // No viewer, or the viewer's cell is solid (embedded / out of slab): fall back to
+            // the open air across the top of the slab as the shared outdoor air set.
+            int base = (layers - 1) << 8;
+            for (int k = 0; k < 256; k++) {
+                int i = base | k;
+                if (air[i] && !seen[i]) { seen[i] = true; queue[tail++] = i; }
+            }
+        }
+
+        int top = (layers - 1) << 8;
+        while (head < tail) {
+            int i = queue[head++];
+            int lz = i & 15, lx = (i >> 4) & 15, yBase = i & ~255;
+            if (lz > 0       && air[i - 1]      && !seen[i - 1])      { seen[i - 1]      = true; queue[tail++] = i - 1; }
+            if (lz < 15      && air[i + 1]      && !seen[i + 1])      { seen[i + 1]      = true; queue[tail++] = i + 1; }
+            if (lx > 0       && air[i - X_STEP] && !seen[i - X_STEP]) { seen[i - X_STEP] = true; queue[tail++] = i - X_STEP; }
+            if (lx < 15      && air[i + X_STEP] && !seen[i + X_STEP]) { seen[i + X_STEP] = true; queue[tail++] = i + X_STEP; }
+            if (yBase > 0    && air[i - Y_STEP] && !seen[i - Y_STEP]) { seen[i - Y_STEP] = true; queue[tail++] = i - Y_STEP; }
+            if (yBase < top  && air[i + Y_STEP] && !seen[i + Y_STEP]) { seen[i + Y_STEP] = true; queue[tail++] = i + Y_STEP; }
+        }
+        return seen;
+    }
+
+    /** True if any of cell {@code i}'s 6 faces is in the reachable air set. */
+    private static boolean touchesReachableAir(boolean[] reachable, int i, int layers) {
+        int lz = i & 15, lx = (i >> 4) & 15, yBase = i & ~255;
+        if (lz > 0                        && reachable[i - 1])      return true;
+        if (lz < 15                       && reachable[i + 1])      return true;
+        if (lx > 0                        && reachable[i - X_STEP]) return true;
+        if (lx < 15                       && reachable[i + X_STEP]) return true;
+        if (yBase > 0                     && reachable[i - Y_STEP]) return true;
+        if (yBase < ((layers - 1) << 8)   && reachable[i + Y_STEP]) return true;
+        return false;
     }
 
     // ── Block classification ──────────────────────────────────────────────
@@ -102,7 +278,7 @@ public final class ChunkContentSampler {
     }
 
     /** The point-of-interest kind this block represents, or null if it is not noteworthy. */
-    static ChunkFeature featureOf(BlockState s) {
+    public static ChunkFeature featureOf(BlockState s) {
         Block b = s.getBlock();
 
         ChunkFeature ore = oreFeature(b);
@@ -110,6 +286,10 @@ public final class ChunkContentSampler {
 
         if (b == Blocks.CRAFTING_TABLE) return ChunkFeature.CRAFTING_TABLE;
         if (b == Blocks.FURNACE)        return ChunkFeature.FURNACE;
+        if (b == Blocks.BLAST_FURNACE)  return ChunkFeature.BLAST_FURNACE;
+        if (b == Blocks.SMOKER)         return ChunkFeature.SMOKER;
+        if (b == Blocks.CAMPFIRE || b == Blocks.SOUL_CAMPFIRE) return ChunkFeature.CAMPFIRE;
+        if (b == Blocks.GRAVEL)         return ChunkFeature.GRAVEL;
         if (b == Blocks.CHEST)          return ChunkFeature.CHEST;
         if (b == Blocks.BARREL)         return ChunkFeature.BARREL;
         if (s.is(BlockTags.BEDS))       return ChunkFeature.BED;

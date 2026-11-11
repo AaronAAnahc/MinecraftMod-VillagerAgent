@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.client;
 
 import com.github.AaronAA0721.villageragent.ai.TradeInventory;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
+import com.github.AaronAA0721.villageragent.network.TradeProposalDeclinePacket;
 import com.github.AaronAA0721.villageragent.network.TradeRequestPacket;
 import com.mojang.blaze3d.matrix.MatrixStack;
 import net.minecraft.client.Minecraft;
@@ -55,6 +56,12 @@ public class VillagerTradeScreen extends Screen {
     private boolean tradePending = false;
     private long tradeResultTime = 0;
 
+    /**
+     * True while showing a trade the villager offered in chat: the slots are locked and the buttons are
+     * Accept / Decline instead of Propose / Clear.
+     */
+    private boolean proposalMode = false;
+
     // Layout constants
     private static final int SLOT_SIZE = 18;
 
@@ -80,6 +87,19 @@ public class VillagerTradeScreen extends Screen {
         }
     }
 
+    /** The trade panel pre-filled with the villager's offer (player gives {@code gives}, gets {@code gets}). */
+    public static VillagerTradeScreen proposal(VillagerChatScreen chat, List<ItemStack> inventory, List<ItemStack> armor,
+                                               ItemStack[] gives, ItemStack[] gets) {
+        VillagerTradeScreen screen = new VillagerTradeScreen(chat.getVillagerId(), chat.getVillagerName(),
+                chat.getProfessionName(), chat.getPersonality(), inventory, armor, chat);
+        for (int i = 0; i < 2; i++) {
+            screen.sellSlots[i] = i < gives.length && gives[i] != null ? gives[i].copy() : ItemStack.EMPTY;
+            screen.buySlots[i] = i < gets.length && gets[i] != null ? gets[i].copy() : ItemStack.EMPTY;
+        }
+        screen.proposalMode = true;
+        return screen;
+    }
+
     @Override
     protected void init() {
         super.init();
@@ -87,6 +107,16 @@ public class VillagerTradeScreen extends Screen {
         int centerX = this.width / 2;
         // Trade area starts below the inventory/armor panels
         int tradeY = getTradeAreaY();
+
+        if (proposalMode) {
+            this.addButton(new Button(10, 10, 60, 20,
+                new StringTextComponent("< Back"), button -> declineProposal()));
+            this.addButton(new Button(centerX - 105, tradeY + 40, 100, 20,
+                new StringTextComponent(TextFormatting.GREEN + "Accept"), button -> acceptProposal()));
+            this.addButton(new Button(centerX + 5, tradeY + 40, 100, 20,
+                new StringTextComponent(TextFormatting.RED + "Decline"), button -> declineProposal()));
+            return;
+        }
 
         // Back button (top left)
         this.addButton(new Button(10, 10, 60, 20,
@@ -111,6 +141,27 @@ public class VillagerTradeScreen extends Screen {
         int panelBottom = 35 + 100 + 5 + 40;  // = 180
         // Ensure at least 10px gap below panels
         return Math.max(panelBottom + 10, this.height / 2 + 10);
+    }
+
+    /** Accept the villager's offer: submit exactly the offered stacks; the server lets the matching trade through. */
+    private void acceptProposal() {
+        if (!proposalMode || tradePending) return;
+        proposalMode = false;
+        proposeTrade();
+    }
+
+    /** Decline the villager's offer: tell the server, drop the slots, back to the chat. */
+    private void declineProposal() {
+        if (!proposalMode) { goBack(); return; }
+        proposalMode = false;
+        ModNetworking.CHANNEL.sendToServer(new TradeProposalDeclinePacket(villagerId));
+        discardSelection();
+        if (parentScreen != null) {
+            parentScreen.addMessage("You", "No thanks.", true);
+            Minecraft.getInstance().setScreen(parentScreen);
+        } else {
+            Minecraft.getInstance().setScreen(null);
+        }
     }
 
     private void goBack() {
@@ -211,7 +262,9 @@ public class VillagerTradeScreen extends Screen {
 
         // Title with profession
         drawCenteredString(matrixStack, this.font,
-            TextFormatting.GOLD + "Trade with " + villagerName + TextFormatting.GRAY + " (" + profession + ")",
+            proposalMode
+                ? TextFormatting.GOLD + villagerName + " offers you this trade" + TextFormatting.GRAY + " (" + profession + ")"
+                : TextFormatting.GOLD + "Trade with " + villagerName + TextFormatting.GRAY + " (" + profession + ")",
             centerX, 20, 0xFFFFFF);
 
         // === LEFT PANEL: Player Inventory (top area) ===
@@ -256,6 +309,12 @@ public class VillagerTradeScreen extends Screen {
         }
 
         // Instructions
+        if (proposalMode) {
+            drawCenteredString(matrixStack, this.font, TextFormatting.GRAY + "Accept to make this trade, Decline to refuse it",
+                    centerX, this.height - 25, 0xAAAAAA);
+            super.render(matrixStack, mouseX, mouseY, partialTicks);
+            return;
+        }
         String instructions = heldItem.isEmpty()
             ? "Left-click: pick up stack | Right-click: pick up half | Shift+click: quick move"
             : "Give slots: place all/one | Inventory: release all/one";
@@ -382,7 +441,7 @@ public class VillagerTradeScreen extends Screen {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) return super.mouseClicked(mouseX, mouseY, button);
 
-        if (tradePending) return super.mouseClicked(mouseX, mouseY, button);
+        if (tradePending || proposalMode) return super.mouseClicked(mouseX, mouseY, button);
         if (button != 0 && button != 1) return super.mouseClicked(mouseX, mouseY, button);
         int centerX = this.width / 2;
         int tradeY = getTradeAreaY();
@@ -612,8 +671,8 @@ public class VillagerTradeScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        if (keyCode == 256) { // Escape
-            goBack();
+        if (keyCode == 256) { // Escape (on an offer: decline it)
+            if (proposalMode) declineProposal(); else goBack();
             return true;
         }
         return super.keyPressed(keyCode, scanCode, modifiers);

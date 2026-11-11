@@ -32,8 +32,8 @@ public class JobStarterItems {
     }
     
     private static void initializeStarterItems() {
-        jobStarterItems.put("lumberjack", Collections.singletonList(new StarterItem(Items.WOODEN_AXE, 1)));
-        jobStarterItems.put("miner", Collections.singletonList(new StarterItem(Items.STONE_PICKAXE, 1)));
+        jobStarterItems.put("lumberjack", Collections.singletonList(new StarterItem(Items.IRON_AXE, 1)));
+        jobStarterItems.put("miner", Collections.singletonList(new StarterItem(Items.IRON_PICKAXE, 1)));
         // Farmer: seeds, hoe, bone meal
         List<StarterItem> farmerItems = new ArrayList<>();
         farmerItems.add(new StarterItem(Items.WHEAT_SEEDS, 32));
@@ -46,6 +46,7 @@ public class JobStarterItems {
         weaponsmithItems.add(new StarterItem(Items.IRON_INGOT, 8));
         weaponsmithItems.add(new StarterItem(Items.STICK, 32));
         weaponsmithItems.add(new StarterItem(Items.COAL, 8));
+        weaponsmithItems.add(new StarterItem(Items.CRAFTING_TABLE, 1));
         jobStarterItems.put("weaponsmith", weaponsmithItems);
         
         // Toolsmith: iron ingots, sticks, coal
@@ -53,6 +54,8 @@ public class JobStarterItems {
         toolsmithItems.add(new StarterItem(Items.IRON_INGOT, 16));
         toolsmithItems.add(new StarterItem(Items.STICK, 32));
         toolsmithItems.add(new StarterItem(Items.COAL, 8));
+        // Tools need the 3x3 grid; the smith carries a crafting table and places it when there is none nearby.
+        toolsmithItems.add(new StarterItem(Items.CRAFTING_TABLE, 1));
         jobStarterItems.put("toolsmith", toolsmithItems);
         
         // Librarian: paper, leather, ink sacs
@@ -69,17 +72,38 @@ public class JobStarterItems {
         clericItems.add(new StarterItem(Items.LAPIS_LAZULI, 8));
         jobStarterItems.put("cleric", clericItems);
         
+        // Butcher: animal feed (cows/sheep eat wheat, pigs carrots and potatoes, rabbits carrots) + coal for the smoker
+        List<StarterItem> butcherItems = new ArrayList<>();
+        butcherItems.add(new StarterItem(Items.CARROT, 16));
+        butcherItems.add(new StarterItem(Items.WHEAT, 16));
+        butcherItems.add(new StarterItem(Items.POTATO, 16));
+        butcherItems.add(new StarterItem(Items.COAL, 4));
+        jobStarterItems.put("butcher", butcherItems);
+        
+        // Armorer: iron ore, coal (raw materials for smelting)
+        List<StarterItem> armorerItems = new ArrayList<>();
+        armorerItems.add(new StarterItem(Items.IRON_ORE, 8));
+        armorerItems.add(new StarterItem(Items.COAL, 8));
+        jobStarterItems.put("armorer", armorerItems);
+        
         // Fisherman: fishing rod, bucket
         List<StarterItem> fishermanItems = new ArrayList<>();
         fishermanItems.add(new StarterItem(Items.FISHING_ROD, 1));
         fishermanItems.add(new StarterItem(Items.BUCKET, 1));
         jobStarterItems.put("fisherman", fishermanItems);
         
-        // Shepherd: shears, wool
+        // Shepherd: shears, wool, wheat to feed the sheep so the flock breeds
         List<StarterItem> shepherdItems = new ArrayList<>();
         shepherdItems.add(new StarterItem(Items.SHEARS, 1));
         shepherdItems.add(new StarterItem(Items.WHITE_WOOL, 16));
+        shepherdItems.add(new StarterItem(Items.WHEAT, 16));
         jobStarterItems.put("shepherd", shepherdItems);
+
+        // Fletcher: shovel to dig gravel for flint, bow to defend the village
+        List<StarterItem> fletcherItems = new ArrayList<>();
+        fletcherItems.add(new StarterItem(Items.IRON_SHOVEL, 1));
+        fletcherItems.add(new StarterItem(Items.BOW, 1));
+        jobStarterItems.put("fletcher", fletcherItems);
         
         // Cartographer: paper, compass
         List<StarterItem> cartographerItems = new ArrayList<>();
@@ -101,8 +125,11 @@ public class JobStarterItems {
      * For example: if farmer has 20 seeds and max is 64, only give 44 more (total 64)
      */
     public static void giveStarterItems(VillagerAgentData agent) {
-        // ResourceWorkSystem owns their lifetime-once starter flag, including older saves.
-        if (agent.getResourceProfession() != com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE) return;
+        // ResourceWorkSystem has its own starter-item path; skip only if the resource
+        // system has ALREADY given items (checked by its own flag, not by profession).
+        // Note: ResourceWorkSystem.assign is called before this method in setProfession,
+        // so we must NOT gate on resourceProfession != NONE — that would block all custom
+        // professions (lumberjack, miner) from receiving their tools.
         List<StarterItem> items = getStarterItems(agent.getProfession());
 
         for (StarterItem starterItem : items) {

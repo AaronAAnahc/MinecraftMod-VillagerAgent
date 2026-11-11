@@ -53,6 +53,23 @@ public interface VillagerSkill {
     default int minLevel() { return 0; }
 
     /**
+     * Opportunity/chance multiplier for this goal type, applied by {@code GoalScheduler.utility()}.
+     * Return 0 to suppress the goal entirely (e.g. "not tired enough to sleep").
+     * Return 1.0 for no adjustment. Return >1 to boost, <1 to dampen.
+     *
+     * <p>This is the single extension point for per-skill utility tuning.
+     * Override in each skill instead of adding cases to GoalScheduler's switch.
+     *
+     * @param agent the villager considering this goal
+     * @param goal  the candidate goal
+     * @param now   current game time
+     * @return multiplier (0 = skip, 1 = neutral, >1 = boost)
+     */
+    default double chanceFactor(VillagerAgentData agent, AgentGoal goal, long now) {
+        return 1.0;
+    }
+
+    /**
      * Whether the villager's capability pool meets this skill's gate. Always true when the
      * skill declares no {@link #requiredCapability()}. Implementations should call this at the
      * top of {@link #canHandle} so the executor never routes an unqualified villager here.

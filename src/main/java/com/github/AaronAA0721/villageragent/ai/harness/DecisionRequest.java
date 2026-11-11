@@ -27,6 +27,8 @@ public class DecisionRequest {
     public final List<String> availableActions = new ArrayList<>();
     /** The villager's current goals (for prioritisation). */
     public final List<String> goals = new ArrayList<>();
+    /** Recent memories (last few) for reflection context. */
+    public final List<String> recentMemories = new ArrayList<>();
 
     /** Assemble a request from a villager's live state. */
     public static DecisionRequest from(VillagerAgentData agent, String envSummary,
@@ -59,6 +61,14 @@ public class DecisionRequest {
         for (AgentGoal g : agent.getGoals()) {
             r.goals.add(g.toString());
         }
+
+        // Recent memories for reflection context (last 5).
+        List<String> memories = agent.getMemories();
+        int memStart = Math.max(0, memories.size() - 5);
+        for (int i = memStart; i < memories.size(); i++) {
+            r.recentMemories.add(memories.get(i));
+        }
+
         return r;
     }
 
@@ -70,6 +80,11 @@ public class DecisionRequest {
           .append("action to take right now.\n\n");
         sb.append("PERCEPTION:\n").append(perception).append("\n");
         sb.append("BLACKBOARD: ").append(blackboard.toString()).append("\n");
+        if (!recentMemories.isEmpty()) {
+            sb.append("RECENT MEMORIES:\n");
+            for (String m : recentMemories) sb.append("- ").append(m).append("\n");
+            sb.append("\n");
+        }
         sb.append("CURRENT GOALS:\n");
         if (goals.isEmpty()) sb.append("- (none)\n");
         else for (String g : goals) sb.append("- ").append(g).append("\n");

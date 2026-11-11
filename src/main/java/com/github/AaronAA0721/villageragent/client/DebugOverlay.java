@@ -2,14 +2,21 @@ package com.github.AaronAA0721.villageragent.client;
 
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import com.github.AaronAA0721.villageragent.network.DebugDataPacket;
+import com.github.AaronAA0721.villageragent.network.VillagerLabelPacket;
 import com.mojang.blaze3d.matrix.MatrixStack;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.AbstractGui;
+import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.renderer.ActiveRenderInfo;
 import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.IRenderTypeBuffer;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
+import net.minecraft.entity.Entity;
+import net.minecraft.util.math.vector.Matrix4f;
 import net.minecraft.util.math.vector.Vector3d;
+import net.minecraft.util.math.vector.Vector3f;
+import net.minecraft.util.math.vector.Vector4f;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
@@ -18,7 +25,10 @@ import net.minecraftforge.fml.common.Mod;
 import org.lwjgl.opengl.GL11;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Client-side debug overlay. Renders:
@@ -39,13 +49,50 @@ public final class DebugOverlay {
     public static volatile DebugDataPacket latest = null;
     public static long lastReceived = 0L;
 
+    /** Per-villager head-top label data, keyed by entity ID. */
+    private static volatile Map<Integer, VillagerLabelPacket.VillagerLabel> labelMap = Collections.emptyMap();
+    private static long labelsReceived = 0L;
+
     private static final long STALE_MS = 5000;
+
+    /** Goal-type → bar colour (ARGB). Deterministic palette for readability. */
+    private static final int[] GOAL_COLORS = {
+        0xFF97C459, // green  — farm / gather
+        0xFF85B7EB, // blue   — rest / sleep
+        0xFFF09595, // red    — combat
+        0xFFFAC775, // amber  — craft
+        0xFFAFA9EC, // purple — socialize
+        0xFF5DCAA5, // teal   — trade / restock / deliver
+        0xFFED93B1, // pink   — acquire_item
+        0xFFB4B2A9, // gray   — wander / other
+    };
+
+    private static int goalColor(String type) {
+        if (type.startsWith("acquire")) return GOAL_COLORS[6]; // "acquire_item" or "acquire oak_log x4"
+        switch (type) {
+            case "farm": case "gather": case "farm_maintain": case "farm_reclaim": return GOAL_COLORS[0];
+            case "rest": case "sleep": return GOAL_COLORS[1];
+            case "combat": case "defend": return GOAL_COLORS[2];
+            case "craft": case "smelt": case "collect_smelt": return GOAL_COLORS[3];
+            case "socialize": return GOAL_COLORS[4];
+            case "trade": case "restock": case "deliver_trade": case "meet_trade": case "fulfill_order": return GOAL_COLORS[5];
+            case "lumberjack_work": case "miner_work": case "fish": case "butcher_work": case "shepherd_work": return GOAL_COLORS[3];
+            default: return GOAL_COLORS[7];
+        }
+    }
 
     private DebugOverlay() {}
 
     public static void setLatest(DebugDataPacket p) {
         latest = p;
         lastReceived = System.currentTimeMillis();
+    }
+
+    public static void setLabels(List<VillagerLabelPacket.VillagerLabel> labels) {
+        Map<Integer, VillagerLabelPacket.VillagerLabel> map = new ConcurrentHashMap<>();
+        for (VillagerLabelPacket.VillagerLabel lbl : labels) map.put(lbl.entityId, lbl);
+        labelMap = map;
+        labelsReceived = System.currentTimeMillis();
     }
 
     private static boolean fresh() {
@@ -175,6 +222,154 @@ public final class DebugOverlay {
         RenderSystem.disableBlend();
         RenderSystem.popMatrix();
         ms.popPose();
+
+        // ── Per-villager head-top labels (world-space, billboard) ──
+        if (ModConfig.DEBUG_SHOW_VILLAGER_LABELS.get()
+                && (System.currentTimeMillis() - labelsReceived) < STALE_MS) {
+            renderVillagerLabels(event, cam, cp);
+        }
+    }
+
+    /**
+     * Render stacked utility bar + current-action text above each villager's vanilla nametag.
+     *
+     * Layout (Y grows downward in billboard space, but we offset upward):
+     *   top:    current action text (colored to match its bar segment)
+     *   middle: stacked colour bar
+     *   bottom: (vanilla nametag sits here at Y≈0, rendered by MC itself)
+     */
+    private static void renderVillagerLabels(RenderWorldLastEvent event,
+                                              ActiveRenderInfo cam, Vector3d camPos) {
+        Minecraft mc = Minecraft.getInstance();
+        FontRenderer font = mc.font;
+        Map<Integer, VillagerLabelPacket.VillagerLabel> labels = labelMap;
+        float partialTicks = event.getPartialTicks();
+
+        IRenderTypeBuffer.Impl buffer = mc.renderBuffers().bufferSource();
+
+        for (Map.Entry<Integer, VillagerLabelPacket.VillagerLabel> entry : labels.entrySet()) {
+            Entity entity = mc.level != null ? mc.level.getEntity(entry.getKey()) : null;
+            if (entity == null) continue;
+
+            VillagerLabelPacket.VillagerLabel lbl = entry.getValue();
+
+            double x = entity.xOld + (entity.getX() - entity.xOld) * partialTicks;
+            double y = entity.yOld + (entity.getY() - entity.yOld) * partialTicks;
+            double z = entity.zOld + (entity.getZ() - entity.zOld) * partialTicks;
+
+            double dx = x - camPos.x;
+            double dy = y - camPos.y + entity.getBbHeight() + 0.5;
+            double dz = z - camPos.z;
+
+            double range = ModConfig.DEBUG_RENDER_RANGE.get();
+            if (dx * dx + dy * dy + dz * dz > range * range) continue;
+
+            float scale = 0.025F;
+            if (ModConfig.DEBUG_LABELS_FIXED_SCREEN_SIZE.get()) {
+                // Project the anchor to obtain perspective W (camera depth), not radial distance.
+                // One font unit then occupies one GUI pixel, including when FOV changes.
+                Vector4f anchor = new Vector4f((float) dx, (float) dy, (float) dz, 1);
+                anchor.transform(event.getMatrixStack().last().pose());
+                anchor.transform(event.getProjectionMatrix());
+                if (anchor.w() <= 0.01F) continue;
+                Vector4f vertical = new Vector4f(0, 1, 0, 0);
+                vertical.transform(event.getProjectionMatrix());
+                float projectionY = Math.abs(vertical.y());
+                if (projectionY <= 0.0001F) continue;
+                scale = 2.0F * anchor.w() / (projectionY * mc.getWindow().getGuiScaledHeight());
+            }
+
+            MatrixStack ms = event.getMatrixStack();
+            ms.pushPose();
+            ms.translate(dx, dy, dz);
+
+            ms.mulPose(Vector3f.YP.rotationDegrees(-cam.getYRot()));
+            ms.mulPose(Vector3f.XP.rotationDegrees(cam.getXRot()));
+            ms.scale(-scale, -scale, scale);
+
+            Matrix4f matrix = ms.last().pose();
+
+            // ── Stacked utility bar (just above vanilla nametag, which is at Y≈0) ──
+            // Bar sits at Y = -20 to -14 (above the vanilla name which is ~Y=0).
+            float barHeight = 6;
+            float barY = -20;
+            int barWidth = 80;
+
+            if (!lbl.scores.isEmpty()) {
+                float totalScore = 0;
+                for (VillagerLabelPacket.GoalScore gs : lbl.scores) totalScore += gs.score;
+
+                if (totalScore > 0) {
+                    float barX = -barWidth / 2.0F;
+                    float currentX = barX;
+                    for (VillagerLabelPacket.GoalScore gs : lbl.scores) {
+                        float segWidth = (gs.score / totalScore) * barWidth;
+                        if (segWidth < 1) continue;
+                        int color = goalColor(gs.goalType);
+                        fillRect(buffer, matrix, currentX, barY, currentX + segWidth, barY + barHeight, color);
+                        currentX += segWidth;
+                    }
+
+                    // Small score labels inside/below bar segments
+                    currentX = barX;
+                    for (VillagerLabelPacket.GoalScore gs : lbl.scores) {
+                        float segWidth = (gs.score / totalScore) * barWidth;
+                        if (segWidth >= 18) {
+                            String label = gs.goalType.length() > 4 ? gs.goalType.substring(0, 4) : gs.goalType;
+                            float tw = font.width(label);
+                            float lx = currentX + segWidth / 2 - tw / 2;
+                            font.drawInBatch(label, lx, barY + barHeight + 1, 0xAADDDDDD, false,
+                                    matrix, buffer, true, 0x20000000, 0xF000F0);
+                        }
+                        currentX += segWidth;
+                    }
+                }
+            }
+
+            // ── Current action text above the bar, coloured to match its goal type ──
+            int actionColor = goalColor(lbl.currentGoal);
+            String actionText = lbl.currentGoal;
+            int actionWidth = font.width(actionText);
+            float actionX = -actionWidth / 2.0F;
+            float actionY = barY - 12; // above the bar
+
+            font.drawInBatch(actionText, actionX, actionY, actionColor, false,
+                    matrix, buffer, true, 0x40000000, 0xF000F0);
+
+            ms.popPose();
+        }
+
+        buffer.endBatch();
+    }
+
+    /** Draw a filled rectangle via font renderer's underlying vertex consumer. */
+    private static void fillRect(IRenderTypeBuffer buffer, Matrix4f matrix,
+                                  float x0, float y0, float x1, float y1, int argb) {
+        float a = ((argb >> 24) & 0xFF) / 255.0F;
+        float r = ((argb >> 16) & 0xFF) / 255.0F;
+        float g = ((argb >> 8) & 0xFF) / 255.0F;
+        float b = (argb & 0xFF) / 255.0F;
+
+        net.minecraft.client.renderer.Tessellator tes = net.minecraft.client.renderer.Tessellator.getInstance();
+        BufferBuilder bb = tes.getBuilder();
+
+        RenderSystem.enableBlend();
+        RenderSystem.disableTexture();
+        RenderSystem.defaultBlendFunc();
+
+        RenderSystem.pushMatrix();
+        RenderSystem.multMatrix(matrix);
+
+        bb.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR);
+        bb.vertex(x0, y1, 0).color(r, g, b, a).endVertex();
+        bb.vertex(x1, y1, 0).color(r, g, b, a).endVertex();
+        bb.vertex(x1, y0, 0).color(r, g, b, a).endVertex();
+        bb.vertex(x0, y0, 0).color(r, g, b, a).endVertex();
+        tes.end();
+
+        RenderSystem.enableTexture();
+        RenderSystem.disableBlend();
+        RenderSystem.popMatrix();
     }
 
     private static void addBox(BufferBuilder b, double x0, double y0, double z0,

@@ -141,11 +141,8 @@ final class VillagerControlCommands {
     private static int start(CommandContext<CommandSource> c, VillagerEntity v, VillagerAgentData a, AgentGoal goal) {
         if (!ModConfig.ENABLE_AI_AGENTS.get() || !ModConfig.ENABLE_WORLD_INTERACTION.get())
             return fail(c, "请先开启 aiagents 和 worldinteraction。");
-        ActionLifecycle.cancel(a, v, c.getSource().getLevel());
         goal.setSource(AgentGoal.Source.PLAYER); goal.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
-        a.getGoals().add(goal); a.setRunningGoal(goal);
-        a.brain().goalStartedTick = c.getSource().getLevel().getGameTime();
-        a.setCurrentActivity(goal.getGoalType());
+        ActionLifecycle.startNow(a, v, c.getSource().getLevel(), goal);
         return ok(c, "任务已开始：" + goal.getDescription() + "；缺材料或工作台时会等待/请求补给。");
     }
     private static int fail(CommandContext<CommandSource> c, String text) {

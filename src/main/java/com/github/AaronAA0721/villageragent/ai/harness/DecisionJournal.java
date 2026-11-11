@@ -35,7 +35,7 @@ public final class DecisionJournal {
     private static PrintWriter writer; // lazily opened on first write
 
     /** What kind of decision produced this journal entry. */
-    public enum Kind { SCHEDULE, REFLECTION, CHAT, SOCIAL, GREETING, DAILY_GOAL }
+    public enum Kind { SCHEDULE, REFLECTION, CHAT, SOCIAL, GREETING, DAILY_GOAL, INVITE }
 
     private DecisionJournal() {}
 

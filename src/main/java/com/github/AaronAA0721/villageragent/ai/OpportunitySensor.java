@@ -22,6 +22,8 @@ public final class OpportunitySensor {
         b.farmOpportunities = 0;
         if (agent.getCapabilityPool().levelOf(com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId.FARMING) > 0) {
             FarmMemory.refresh(agent, self, world);
+            // No field yet: open one beside water near the job site (worth one remembered field).
+            if (FarmMemory.bootstrapping(agent) && b.bootstrapSite != null) b.farmOpportunities += 3;
             BlockPos p = self.blockPosition();
             b.farmOpportunities = FarmingAction.findMatureCropsSorted(world, p).size();
             b.farmOpportunities += FarmingAction.findEmptyFarmlandSorted(world, p).size();

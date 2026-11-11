@@ -1,22 +1,21 @@
 package com.github.AaronAA0721.villageragent.ai;
 
 import net.minecraft.entity.Entity;
-import net.minecraft.entity.ai.brain.memory.MemoryModuleType;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.server.ServerWorld;
 import java.util.*;
 
-/** Runtime market membership, not generated structure boundaries. Reads loaded residents only. */
+/** Runtime boards for persistent vanilla village identities. */
 public final class VillageMarkets {
     public static final class Market {
-        public final UUID id = UUID.randomUUID();
+        public final long id;
         public final BlockPos center;
         public final boolean meetingPoint;
         public final VillageSignalBoard board = new VillageSignalBoard();
+        final Map<UUID, Long> lastNoticeVisits = new HashMap<>();
         private final List<VillagerAgentData> members = new ArrayList<>();
-        Market(BlockPos p, boolean meeting) { center=p.immutable(); meetingPoint=meeting; }
+        Market(long key, BlockPos p) { id=key; center=p.immutable(); meetingPoint=false; }
         public List<VillagerAgentData> members() { return Collections.unmodifiableList(members); }
     }
     private static final class Index {
@@ -25,10 +24,6 @@ public final class VillageMarkets {
         final Map<UUID, Market> membership = new HashMap<>();
     }
     private static final Map<ServerWorld, Index> WORLDS = new IdentityHashMap<>();
-    private static BlockPos memory(VillagerEntity v, MemoryModuleType<GlobalPos> type) {
-        Optional<GlobalPos> p = v.getBrain().getMemory(type);
-        return p.isPresent() && p.get().dimension().equals(v.level.dimension()) ? p.get().pos() : null;
-    }
     private static Index index(ServerWorld world) {
         Index index = WORLDS.computeIfAbsent(world, ignored -> new Index());
         long now=world.getGameTime();
@@ -43,28 +38,20 @@ public final class VillageMarkets {
             if(e instanceof VillagerEntity && e.isAlive()) loaded.add((VillagerEntity)e);
         }
         loaded.sort(Comparator.comparing(v->v.getUUID().toString()));
+        VillageRegistry registry=VillageRegistry.get(world);
+        // Discover all loaded residents first so assignment does not depend on iteration order.
+        for(VillagerEntity v:loaded) registry.discover(world,v.blockPosition());
         for(VillagerEntity v:loaded) {
-            BlockPos p=memory(v,MemoryModuleType.MEETING_POINT);
-            if(p!=null && index.markets.stream().noneMatch(m->m.meetingPoint && m.center.equals(p)))
-                index.markets.add(new Market(p,true));
-        }
-        for(VillagerEntity v:loaded) {
-            BlockPos meeting=memory(v,MemoryModuleType.MEETING_POINT);
-            BlockPos anchor=meeting;
-            if(anchor==null) anchor=memory(v,MemoryModuleType.HOME);
-            if(anchor==null) anchor=memory(v,MemoryModuleType.JOB_SITE);
+            Long key=registry.join(world,v.getUUID(),v.blockPosition());
+            if(key==null) continue;
+            Market best=null;
+            for(Market m:index.markets) if(m.id==key.longValue()) { best=m; break; }
+            if(best==null) { best=new Market(key,registry.center(key)); index.markets.add(best); }
             VillagerAgentData a=VillagerAgentManager.getAgent(v.getUUID());
-            if(anchor==null) anchor=a.getHomeBedPos();
-            if(anchor==null) anchor=v.blockPosition();
-            Market best=null; double distance=64*64+1;
-            for(Market m:index.markets) {
-                if(meeting!=null && (!m.meetingPoint || !m.center.equals(meeting))) continue;
-                double d=anchor.distSqr(m.center);
-                if(d<distance || (d==distance && m.meetingPoint && best!=null && !best.meetingPoint)) {
-                    best=m; distance=d;
-                }
+            if(a!=null && !previous.containsKey(v.getUUID())) {
+                // New resident joining this village — seed with shared chunk memories.
+                a.importSharedMemories(registry.getSharedMemories(key));
             }
-            if(best==null) { best=new Market(anchor,false); index.markets.add(best); }
             best.members.add(a); index.membership.put(v.getUUID(),best);
         }
         for(Map.Entry<UUID,Market> old:previous.entrySet())
@@ -75,15 +62,19 @@ public final class VillageMarkets {
     }
     public static Market market(ServerWorld world, UUID resident) {
         Index i=index(world);
-        if(!i.membership.containsKey(resident) && world.getEntity(resident) instanceof VillagerEntity) {
+        if(i.refreshed==Long.MIN_VALUE) {
             i.refreshed=Long.MIN_VALUE; i=index(world);
         }
         return i.membership.get(resident);
     }
     public static VillageSignalBoard board(ServerWorld world, UUID resident) {
         Market m=market(world,resident);
-        if(m==null) throw new IllegalStateException("Market requested for unloaded resident " + resident);
-        return m.board;
+        return m==null?null:m.board;
+    }
+    public static VillageSignalBoard combatBoard(VillagerEntity v) {
+        VillageSignalBoard board=board((ServerWorld)v.level,v.getUUID());
+        // Unaffiliated residents cannot broadcast to other unaffiliated residents.
+        return board==null?new VillageSignalBoard():board;
     }
     public static List<Market> loaded(ServerWorld world) {
         List<Market> result=new ArrayList<>();

@@ -111,6 +111,8 @@ public class VillagerAction {
     public void setTargetBlockPos(BlockPos pos) { this.targetBlockPos = pos; }
     public UUID getTargetEntityId() { return targetEntityId; }
     public void setTargetEntityId(UUID id) { this.targetEntityId = id; }
+    public final MovementProgress movementProgress = new MovementProgress();
+
     public int getStuckTicks() { return stuckTicks; }
     public void incrementStuckTicks() { this.stuckTicks++; }
     public void resetStuckTicks() { this.stuckTicks = 0; }

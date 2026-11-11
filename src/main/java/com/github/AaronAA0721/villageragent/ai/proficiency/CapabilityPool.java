@@ -106,6 +106,19 @@ public class CapabilityPool implements INBTSerializable<CompoundNBT> {
         }
     }
 
+    /** Human-readable summary of all non-zero capabilities, e.g. "FARMING=3 CRAFTING=1". */
+    public String snapshot() {
+        StringBuilder sb = new StringBuilder();
+        for (CapabilityId id : CapabilityId.values()) {
+            int lvl = levelOf(id);
+            if (lvl > 0) {
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(id.name()).append('=').append(lvl);
+            }
+        }
+        return sb.length() == 0 ? "(none)" : sb.toString();
+    }
+
     /** Vanilla trade level mirrored from a capability: {@code (level - 1) / 2}, capped at 5. */
     public int vanillaLevelFor(CapabilityId id) {
         int lvl = levelOf(id);

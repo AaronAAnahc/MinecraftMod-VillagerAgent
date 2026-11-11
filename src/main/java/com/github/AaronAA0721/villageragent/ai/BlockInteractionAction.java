@@ -85,6 +85,16 @@ public class BlockInteractionAction {
         return best;
     }
 
+    /**
+     * Player-style "hit" sound while a block is being worked on (vanilla plays it every 4 ticks).
+     * Louder than the player's own so it carries on a recording.
+     */
+    public static void playHitSound(ServerWorld world, BlockPos pos, BlockState state, net.minecraft.entity.Entity source) {
+        net.minecraft.block.SoundType sound = state.getSoundType(world, pos, source);
+        world.playSound(null, pos, sound.getHitSound(), net.minecraft.util.SoundCategory.BLOCKS,
+                (sound.getVolume() + 1.0F) / 4.0F, sound.getPitch() * 0.5F);
+    }
+
     /** Chebyshev distance &le; 1 — the precise "within one block" rule. */
     public static boolean withinReach(BlockPos from, BlockPos to) {
         return Math.max(Math.abs(from.getX() - to.getX()),
@@ -182,6 +192,8 @@ public class BlockInteractionAction {
     public static StepResult tickBreak(VillagerEntity villager, ServerWorld world,
                                        VillagerAgentData agent, VillagerAction action) {
         BlockPos target = action.getTargetBlockPos();
+        if(world.getBlockState(target).is(net.minecraft.tags.BlockTags.LOGS)
+                &&VillageRegistry.get(world).contains(world,target)) return StepResult.ABANDONED;
         BlockPos stand = action.getStandCell();
         if (stand == null) stand = findStandable(world, target);
         if (stand == null) {
@@ -249,6 +261,7 @@ public class BlockInteractionAction {
         if (state.requiresCorrectToolForDrops() && (tool.isEmpty() || !tool.isCorrectToolForDrops(state))) return StepResult.ABANDONED;
         action.incrementBreakProgress();
         if (action.getBreakProgress() % 5 == 0) villager.swing(net.minecraft.util.Hand.MAIN_HAND);
+        if (action.getBreakProgress() % 4 == 1) playHitSound(world, target, state, villager);
         int stage = Math.min(9, action.getBreakProgress() * 10 / Math.max(1, action.getBreakTargetTicks()));
         world.destroyBlockProgress(villager.getId(), target, stage);
         villager.getLookControl().setLookAt(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
@@ -274,5 +287,108 @@ public class BlockInteractionAction {
             return StepResult.DONE;
         }
         return StepResult.IN_PROGRESS;
+    }
+
+    /**
+     * Non-destructive "mining" of a block: identical walk-up and tool-aware animation to
+     * {@link #tickBreak}, but on completion the block is LEFT in place and a single configured
+     * drop ({@code output}) is popped instead. Used for ore veins so the world is not depleted;
+     * the caller is responsible for a per-block once-per-day throttle. Plays the vanilla break
+     * particle/sound (level event 2001) and consumes one point of tool durability.
+     */
+    public static StepResult tickMine(VillagerEntity villager, ServerWorld world,
+                                      VillagerAgentData agent, VillagerAction action,
+                                      net.minecraft.item.Item output, int dropCount) {
+        return tickMine(villager, world, agent, action, output, dropCount, 1.0f);
+    }
+
+    /**
+     * Mine a block in place (the block stays) with a {@code dropChance} that the dig yields {@code output};
+     * otherwise the dig yields nothing. Used by fletchers digging gravel for flint.
+     */
+    public static StepResult tickMine(VillagerEntity villager, ServerWorld world,
+                                      VillagerAgentData agent, VillagerAction action,
+                                      net.minecraft.item.Item output, int dropCount, float dropChance) {
+        BlockPos target = action.getTargetBlockPos();
+        com.github.AaronAA0721.villageragent.ai.work.MiningWorldData ledger =
+                com.github.AaronAA0721.villageragent.ai.work.MiningWorldData.get(world);
+        if (target == null || !world.isLoaded(target)
+                || !ledger.claim(villager.getUUID(), target, world.getGameTime())) return StepResult.ABANDONED;
+        BlockPos stand = action.getStandCell();
+        if (stand == null) stand = findStandable(world, target);
+        if (stand == null) { agent.addMemory("Couldn't find a place to stand to mine at " + target); return StepResult.ABANDONED; }
+        action.setStandCell(stand);
+
+        if (action.getPhase() != VillagerAction.ActionPhase.ACTING) {
+            if (withinReach(villager.blockPosition(), target)) {
+                action.setPhase(VillagerAction.ActionPhase.ACTING);
+                villager.getNavigation().stop();
+            } else {
+                if (action.movementProgress.stationaryTicks(world.getGameTime(), villager.getX(), villager.getY(), villager.getZ()) > 200)
+                    return StepResult.ABANDONED;
+                action.incrementStuckTicks();
+                if (action.getStuckTicks() == 1 || action.getStuckTicks() % 20 == 0) {
+                    net.minecraft.pathfinding.Path path = villager.getNavigation().createPath(stand, 0);
+                    if (path == null || !path.canReach() || !villager.getNavigation().moveTo(path, WALK_SPEED))
+                        return StepResult.ABANDONED;
+                }
+                return StepResult.IN_PROGRESS;
+            }
+        }
+        if (!withinReach(villager.blockPosition(), target)) {
+            world.destroyBlockProgress(villager.getId(), target, -1);
+            action.setBreakTargetTicks(0);
+            action.setPhase(VillagerAction.ActionPhase.WALKING);
+            return StepResult.IN_PROGRESS;
+        }
+
+        BlockState state = world.getBlockState(target);
+        if (world.isEmptyBlock(target)) return StepResult.ABANDONED;
+        if (state.getDestroySpeed(world, target) < 0.0f) return StepResult.ABANDONED;
+        if (action.getBreakingState() != null && !state.equals(action.getBreakingState())) {
+            world.destroyBlockProgress(villager.getId(), target, -1);
+            action.setBreakTargetTicks(0);
+        }
+        if (action.getBreakTargetTicks() <= 0) {
+            ItemStack tool = action.getBreakTool();
+            if (tool == null || tool.isEmpty() || !agent.getInventory().getItems().contains(tool))
+                tool = VillagerEquipmentHelper.equipBestToolForBlock(villager, agent, state);
+            if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return StepResult.ABANDONED;
+            action.setBreakingState(state);
+            action.setBreakTool(tool);
+            int ticks = VillagerEquipmentHelper.computeBreakTicks(world, target, state, tool);
+            if (ticks == Integer.MAX_VALUE) return StepResult.ABANDONED;
+            // Villager mining is deliberately slower than a player's (config mining_time_multiplier).
+            ticks = (int) Math.min(Integer.MAX_VALUE - 1L,
+                    Math.max(1L, Math.round(ticks * ModConfig.MINING_TIME_MULTIPLIER.get())));
+            action.setBreakTargetTicks(ticks);
+            action.setBreakProgress(0);
+        }
+        ItemStack tool = action.getBreakTool();
+        if (!tool.isEmpty() && !agent.getInventory().getItems().contains(tool)) return StepResult.ABANDONED;
+        if (state.requiresCorrectToolForDrops() && (tool.isEmpty() || !tool.isCorrectToolForDrops(state))) return StepResult.ABANDONED;
+        action.incrementBreakProgress();
+        if (action.getBreakProgress() % 5 == 0) villager.swing(net.minecraft.util.Hand.MAIN_HAND);
+        if (action.getBreakProgress() % 4 == 1) playHitSound(world, target, state, villager);
+        int stage = Math.min(9, action.getBreakProgress() * 10 / Math.max(1, action.getBreakTargetTicks()));
+        world.destroyBlockProgress(villager.getId(), target, stage);
+        villager.getLookControl().setLookAt(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
+        if (action.getBreakProgress() < action.getBreakTargetTicks()) return StepResult.IN_PROGRESS;
+
+        // Completion: keep the block, pop the configured ore drop, spend one tool durability.
+        if (!ledger.complete(villager.getUUID(), target, world.getGameTime())) return StepResult.ABANDONED;
+        world.destroyBlockProgress(villager.getId(), target, -1);
+        world.levelEvent(2001, target, Block.getId(state));
+        if (dropChance >= 1.0f || villager.getRandom().nextFloat() < dropChance)
+            Block.popResource(world, target, new ItemStack(output, Math.max(1, dropCount)));
+        if (!tool.isEmpty()) {
+            net.minecraftforge.common.util.FakePlayer actor = net.minecraftforge.common.util.FakePlayerFactory.get(
+                    world, new com.mojang.authlib.GameProfile(villager.getUUID(), "[VillagerAgent]"));
+            actor.setPos(villager.getX(), villager.getY(), villager.getZ());
+            tool.mineBlock(world, state, target, actor);
+            villager.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, tool.copy());
+        }
+        agent.addMemory("Mined " + output.getRegistryName() + " at " + target);
+        return StepResult.DONE;
     }
 }

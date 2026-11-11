@@ -51,6 +51,8 @@ public final class BehaviorCatalog {
         add("pickup_item",  null,                    0, 1, Category.WORK);
         add("goto",         null,                    0, 1, Category.LEISURE);
         add("wander",       null,                    0, 2, Category.LEISURE);
+        add("place_block",  null,                    0, 1, Category.WORK);
+        add("place_near_self", null,                 0, 1, Category.WORK);
 
         // Gated behaviours — the capability ladder (§3 of capability_pool_plan.md).
         add("farm",         CapabilityId.FARMING,    1, 4, Category.WORK);

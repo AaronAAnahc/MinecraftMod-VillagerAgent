@@ -1,0 +1,20 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "villageragent:block/notice_board",
+      "y": 0
+    },
+    "facing=east": {
+      "model": "villageragent:block/notice_board",
+      "y": 90
+    },
+    "facing=south": {
+      "model": "villageragent:block/notice_board",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "villageragent:block/notice_board",
+      "y": 270
+    }
+  }
+}

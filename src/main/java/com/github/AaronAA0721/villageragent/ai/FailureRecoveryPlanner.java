@@ -35,9 +35,7 @@ public final class FailureRecoveryPlanner {
             return;
         }
         if (f.reason == FailureReason.NO_JOB_SITE) {
-            // The villager's workstation vanished (destroyed) mid-goal. Recovery = find a new one,
-            // not "give up". This closes the loop that used to leave an employed villager standing
-            // still with a dead restock/craft goal (Unified Behavior Generator Refactoring Plan section 4).
+            // The villager's workstation vanished (destroyed) mid-goal. Recovery = find a new one.
             recoverJobSite(agent, failedGoal, villager, world);
             return;
         }
@@ -94,24 +92,80 @@ public final class FailureRecoveryPlanner {
         LOGGER.info("{} recovery: queued find_job_site (lost {})", agent.getName(), failedGoal.getGoalType());
     }
 
+    /** Public entry: ensure one acquisition objective holding at least {@code desiredStock} of the item. */
+    public static AgentGoal requireItem(VillagerAgentData agent, String itemId, int desiredStock) {
+        if (itemId == null || itemId.isEmpty()) return null;
+        int have = com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, itemId);
+        if (desiredStock <= have) return null;
+        recoverMissingItem(agent, null, null, itemId, desiredStock - have);
+        return findGoalByTarget(agent, "acquire_item", itemId);
+    }
+
     /** Reuse or create an inventory-target acquisition goal. */
     private static void recoverMissingItem(VillagerAgentData agent, VillagerEntity villager,
                                            ServerWorld world, String itemId, int qty) {
         if (itemId == null || itemId.isEmpty()) return;
+        // Work skills report a missing tool by category ("axe", "pickaxe"): any tier will do.
+        if (SupplyPolicy.FOOD.equals(itemId)) return; // eat runs its own #food acquisition
+        if (SupplyPolicy.isToolCategory(itemId)) {
+            recoverTool(agent, world, itemId);
+            return;
+        }
+        // Nobody in the village can make it (glass, paper, string...): asking would only post a dead request.
+        if (world != null && !VillageProducible.producible(world, itemId)) {
+            BrainLog.diagnostic(agent, "recovery-unproducible", "item=" + itemId);
+            return;
+        }
 
+        // Wood is interchangeable: a missing oak log is "any log", a missing oak plank "any planks".
+        net.minecraft.item.Item item = com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.item(itemId);
+        String material = SupplyPolicy.materialCategory(item);
         AgentGoal existing = findGoalByTarget(agent, "acquire_item", itemId);
-        int desired = com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, itemId) + Math.max(1, qty);
+        if (existing == null && material != null)
+            for (AgentGoal g : agent.getGoals())
+                if (!g.isCompleted() && "acquire_item".equals(g.getGoalType()) && material.equals(g.getRequestCategory())) existing = g;
+        int held = material != null
+                ? SupplyPolicy.units(SupplyPolicy.Spec.category(material), agent.getInventory().getItems())
+                : com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, itemId);
+        int desired = held + Math.max(1, qty);
         if (existing != null) {
             existing.setTargetQuantity(Math.max(existing.getTargetQuantity(), desired));
             boost(agent, existing);
             return;
         }
-        AgentGoal goal = new AgentGoal("acquire_item", "Acquire " + itemId + " (recovery)", 6);
+        AgentGoal goal = new AgentGoal("acquire_item", "Acquire " + (material != null ? "any " + material : itemId)
+                + " (recovery)", 6);
         goal.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
         goal.setTargetItem(itemId); goal.setTargetQuantity(desired);
+        if (material != null) goal.setRequestCategory(material);
         goal.setOutcomeItems(Collections.singleton(itemId));
         agent.getGoals().add(goal);
         BrainLog.goalAdded(agent, goal, "recovery:acquire:" + itemId);
+    }
+
+    /** One category acquisition for a missing work tool, targeting the profession's configured tool. */
+    private static void recoverTool(VillagerAgentData agent, ServerWorld world, String category) {
+        String item = null;
+        for (String id : VillagerEconomySystem.essentialItems(agent.getProfession())) {
+            net.minecraft.item.Item it = com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.item(id);
+            if (category.equals(SupplyPolicy.toolCategory(it))) { item = id; break; }
+        }
+        if (item == null) item = "minecraft:stone_" + category;
+        for (AgentGoal g : agent.getGoals()) {
+            if (g.isCompleted() || !"acquire_item".equals(g.getGoalType())) continue;
+            if (category.equals(g.getRequestCategory()) || item.equals(g.getTargetItem())) { boost(agent, g); return; }
+        }
+        if (world != null && !VillageProducible.producible(world, item)) {
+            BrainLog.diagnostic(agent, "recovery-unproducible", "item=" + item + " category=" + category);
+            return;
+        }
+        AgentGoal goal = new AgentGoal("acquire_item", "Acquire profession tool " + category, 6);
+        goal.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
+        goal.setTargetItem(item); goal.setTargetQuantity(1);
+        goal.setRequestCategory(category);
+        goal.setOutcomeItems(Collections.singleton(item));
+        agent.getGoals().add(goal);
+        BrainLog.goalAdded(agent, goal, "recovery:tool:" + category);
     }
 
     /** Clear temporary recovery cooldown without changing priority. */

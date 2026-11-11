@@ -1,6 +1,22 @@
 {
+  "entity.villageragent.villager_bobber": "村民浮漂",
   "block.villageragent.carpenter_table": "木工台",
   "block.villageragent.miner_workbench": "矿工工作台",
   "entity.minecraft.villager.villageragent.lumberjack": "伐木工",
-  "entity.minecraft.villager.villageragent.miner": "矿工"
+  "entity.minecraft.villager.villageragent.miner": "矿工",
+  "block.villageragent.notice_board": "村庄消息板",
+  "screen.villageragent.notice_board.title": "村庄消息板",
+  "screen.villageragent.notice_board.buy": "需求",
+  "screen.villageragent.notice_board.sell": "可共享库存",
+  "screen.villageragent.notice_board.refresh": "刷新",
+  "screen.villageragent.notice_board.count": "共 %s 条",
+  "screen.villageragent.notice_board.empty": "当前没有公告",
+  "screen.villageragent.notice_board.no_village": "该消息板不属于任何村庄",
+  "screen.villageragent.notice_board.unknown": "未知村民",
+  "screen.villageragent.notice_board.author": "发布者：%s",
+  "screen.villageragent.notice_board.unclaimed": "暂无配送",
+  "screen.villageragent.notice_board.claimed": "配送中：%s",
+  "screen.villageragent.notice_board.page": "%s / %s",
+  "screen.villageragent.notice_board.category": "任意%s",
+  "screen.villageragent.notice_board.food_points": "饱食点"
 }

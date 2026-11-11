@@ -19,13 +19,55 @@ public final class AcquisitionMethods {
         public final Item target;
         public final int desired;
         public final boolean executing;
+        public boolean productionOnly;
+        /** Generic tool category satisfying this acquisition (any suitable tier); null for exact items. */
+        public String requestCategory;
+        /**
+         * Items this acquisition tree may not ask the board for: while serving a village request, the request's
+         * own item and its "or" alternatives (asking for them would just post the same request again).
+         */
+        public Set<Item> forbiddenRequests = Collections.emptySet();
+        public boolean forbidsRequest(Item item) { return forbiddenRequests.contains(item); }
+        /**
+         * True while answering someone else's request: the responder may not ask the board for a work tool to
+         * do it (an unemployed villager without an axe does not answer a log request by requesting an axe).
+         */
+        public boolean noToolRequests;
+        /** Nested estimate for an input; inherits the forbidden-request set, never production-only. */
+        public Context child(Item item, int quantity) {
+            Context child = new Context(agent, villager, world, item, quantity, false);
+            child.forbiddenRequests = forbiddenRequests;
+            child.noToolRequests = noToolRequests;
+            return child;
+        }
         TaskContract craftingContract;
+        private boolean furnaceChecked;
+        private BlockPos furnace;
+        BlockPos furnace() {
+            if (!furnaceChecked) {
+                furnace = SmeltSkill.findFurnace(agent, villager, world, SmeltSkill.oreFor(target));
+                furnaceChecked = true;
+            }
+            return furnace;
+        }
         public Context(VillagerAgentData agent, VillagerEntity villager, ServerWorld world,
                        Item target, int desired, boolean executing) {
             this.agent = agent; this.villager = villager; this.world = world;
             this.target = target; this.desired = desired; this.executing = executing;
+            this.units = desired;
         }
         int count(Item item) { return agent.getInventory().countItem(new ItemStack(item)); }
+        public SupplyPolicy.Spec spec() {
+            return requestCategory != null && SupplyPolicy.isCategory(requestCategory)
+                    ? SupplyPolicy.Spec.category(requestCategory) : SupplyPolicy.Spec.exact(target.getRegistryName().toString());
+        }
+        /** Units already held: exact item count, or matching category units. */
+        public int satisfiedUnits() {
+            return requestCategory == null ? count(target) : SupplyPolicy.units(spec(), agent.getInventory().getItems());
+        }
+        /** Units that satisfy this acquisition; equals {@code desired} except for food-point categories. */
+        public int units;
+        public boolean satisfied() { return satisfiedUnits() >= units; }
         boolean unlocked() {
             String id = target.getRegistryName().toString();
             return agent.getUnlockedRecipes().contains(id)
@@ -41,15 +83,16 @@ public final class AcquisitionMethods {
         }
     }
     public static List<TaskMethod<Context>> candidates(Context c) {
-        return ItemTaskCatalog.discover(c);
+        List<TaskMethod<Context>> methods=ItemTaskCatalog.discover(c);
+        if(c.productionOnly) methods.removeIf(method->RequestSupply.ID.equals(method.id()));
+        return methods;
     }
 
     private abstract static class Owned implements TaskMethod<Context> {
-        UUID owner, purchase;
-        VillageSignalBoard.VillageMessage transaction;
-        double remainingCost;
+        UUID owner;
         final MotionProgress motion = new MotionProgress();
         public void start(Context c, UUID attempt) { owner = attempt; }
+        /** Ownership-scoped cleanup: nested attempts, owned requests and work orders, never by item type. */
         public void close(Context c) {
             if (owner == null) return;
             c.agent.brain().acquisitions.cancelChildren(owner);
@@ -58,46 +101,168 @@ public final class AcquisitionMethods {
             data.book.cancelOwned(owner); data.setDirty();
             c.discardChild();
         }
-        /** null means the purchase completed and the method can continue. */
-        Update purchaseTick(Context c) {
-            VillageSignalBoard board = VillageSignalBoard.get();
-            VillageSignalBoard.VillageMessage want = board.find(purchase);
-            // Resolved board entries may be pruned while this task is on its WAITING cooldown.
-            if (want == null && transaction != null && transaction.resolved) want = transaction;
-            if (want == null) return new Update(Status.FAILED, false, true);
-            if (want.resolved) {
-                board.removeOwned(owner); purchase = null; transaction = null; motion.reset(); return null;
-            }
-            VillageSignalBoard.VillageMessage offer = want.matchedWith == null ? null : board.find(want.matchedWith);
-            if (offer == null || want.expireTick <= c.world.getGameTime() || offer.resolved
-                    || offer.expireTick <= c.world.getGameTime()
-                    || !VillagerEconomySystem.validateTradeFunds(want, offer)) return new Update(Status.FAILED, false, true);
-            Entity seller = c.world.getEntity(offer.author);
-            return Update.waiting(motion.toward(seller, c.villager.blockPosition()));
-        }
-        boolean beginPurchase(Context c, AcquisitionPlanner.Choice choice) {
-            remainingCost = choice.emeralds;
-            purchase = AcquisitionPlanner.purchase(choice, c.agent, c.villager, c.world, owner);
-            transaction = purchase == null ? null : VillageSignalBoard.get().find(purchase);
-            return purchase != null;
-        }
     }
 
-    static final class Buy extends Owned {
-        AcquisitionPlanner.Choice quote;
-        public String id() { return "buy_product"; }
+    /**
+     * Method {@code request_supply} of compound task {@code acquire_item} — the requester side:
+     *
+     * <pre>
+     * request_supply(item | category, units)
+     *   0. adopt    — this villager already has a live request covering the objective: wait on it (no walk)
+     *   1. post     — walk to the board, read it (60 ticks), post one request for the shortage; when a
+     *                 neighbour's "for sale" notice covers (part of) it, ask for that part and claim the offer
+     *                 at once — the requester then walks to the provider (paired meet_trade goals)
+     *   2. await    — wait while the request is open or its delivery meeting (paired meet_trade goals) runs
+     *   3. verify   — after delivery: objective met → DONE; otherwise retire the consumed request and post again
+     * </pre>
+     *
+     * The request belongs to the villager ({@link OwnRequests}), not to this method: if a cheaper method (e.g.
+     * farming) takes over, the request stays on the board. It is withdrawn only once the need is met some other
+     * way, and only by walking to the board ({@code withdraw_request}).
+     */
+    static final class RequestSupply extends Owned {
+        static final String ID = "request_supply";
+        private static final double WAIT_EFFORT = 4.0;
+        UUID request;
+        UUID claim;
+        /** What was posted, including "or" alternatives. */
+        SupplyPolicy.Spec posted;
+        AgentGoal visit;
+        final VillageNoticeBoards.Reading reading = new VillageNoticeBoards.Reading();
+        int high;
+        public String id() { return ID; }
+        /** Asking others when this villager can make the item itself (it has the skill/recipe) is a last resort. */
+        private static final double OWN_PRODUCTION_PENALTY = 8.0;
         public double estimate(Context c) {
-            if (purchase != null) return remainingCost;
-            quote = AcquisitionPlanner.choose(c.agent, c.villager, c.world, c.target, c.desired, false);
-            return quote == null ? Double.POSITIVE_INFINITY : quote.emeralds;
+            if (!ModConfig.ENABLE_ECONOMY.get() || VillageNoticeBoards.position(c.world, c.villager) == null)
+                return Double.POSITIVE_INFINITY;
+            // Serving a request for this very item (or one of its alternatives): never re-post it.
+            if (c.forbidsRequest(c.target)) return Double.POSITIVE_INFINITY;
+            // Answering a request never starts by asking others for a work tool.
+            if (c.noToolRequests && (SupplyPolicy.isToolCategory(c.requestCategory)
+                    || SupplyPolicy.toolCategory(c.target) != null)) return Double.POSITIVE_INFINITY;
+            // Already asked (by this method or an earlier one): waiting costs nothing new.
+            if (request != null || OwnRequests.covering(c, c.world.getGameTime()) != null) return WAIT_EFFORT * 0.5;
+            double cost = WAIT_EFFORT + VillageNoticeBoards.distance(c.world, c.villager) * 0.05;
+            Context own = c.child(c.target, c.desired);
+            own.productionOnly = true;
+            // Makers prefer making: crafting (even with inputs to gather first) must score better than a request.
+            if (ItemTaskCatalog.canProduce(own)) cost += OWN_PRODUCTION_PENALTY;
+            return cost;
+        }
+        @Override public void start(Context c, UUID attempt) {
+            super.start(c, attempt);
+            request = null; claim = null; posted = null;
+            reading.reset();
+            visit = new AgentGoal("trade", "Post village request", 6);
+            high = c.satisfiedUnits();
+            // 0. adopt the villager's existing request for the same need instead of posting a duplicate.
+            VillageSignalBoard.VillageMessage existing = OwnRequests.covering(c, c.world.getGameTime());
+            if (existing != null) {
+                request = existing.id; posted = existing.spec;
+                OwnRequests.attach(c, request);
+                OwnRequests.hold(c.agent, request, true);
+                BrainLog.diagnostic(c.agent, "supply-request-adopt", "request=" + request + " spec=" + posted.key()
+                        + " target=" + c.target.getRegistryName());
+            }
         }
         public Update tick(Context c) {
-            if (purchase != null) {
-                Update update = purchaseTick(c);
-                return update == null ? new Update(Status.DONE, true, true) : update;
+            int have = c.satisfiedUnits();
+            boolean progressed = have > high;
+            high = Math.max(high, have);
+            long now = c.world.getGameTime();
+            // 2b/3. a booked delivery: the paired meet_trade goals do the walking and the handoff.
+            if (claim == null && request != null) claim = TradeCoordinator.deliveryFor(request, c.agent.getVillagerId());
+            if (claim != null) {
+                if (TradeCoordinator.active(claim)) return new Update(Status.WAITING, true, false);
+                VillageSignalBoard.VillageMessage live = VillageSignalBoard.get().find(request);
+                if (live != null && live.state(c.world.getGameTime()) == VillageSignalBoard.RequestState.OPEN) {
+                    // The meeting fell through before any handoff and the request was reopened: keep waiting on it.
+                    claim = null;
+                    return new Update(Status.WAITING, true, true);
+                }
+                if (c.satisfied()) {
+                    BrainLog.diagnostic(c.agent, "supply-request-filled", "request=" + request + " units=" + have);
+                    VillageSignalBoard.get().retire(request);
+                    OwnRequests.hold(c.agent, request, false);
+                    request = null; claim = null;
+                    return new Update(Status.DONE, true, true);
+                }
+                if (RequestAlternatives.holdsAlternative(c, posted)) {
+                    // An alternative arrived (planks for sticks): convert it ourselves instead of asking again.
+                    BrainLog.diagnostic(c.agent, "supply-alternative-received", "request=" + request + " spec=" + posted);
+                    VillageSignalBoard.get().retire(request);
+                    OwnRequests.hold(c.agent, request, false);
+                    request = null; claim = null; posted = null; reading.reset();
+                    return new Update(Status.FAILED, true, true);
+                }
+                BrainLog.diagnostic(c.agent, "supply-request-retry", "request=" + request + " claim=" + claim
+                        + " shortage=" + (c.units - have));
+                VillageSignalBoard.get().retire(request);
+                OwnRequests.hold(c.agent, request, false);
+                request = null; claim = null; reading.reset();
+                return new Update(Status.RUNNING, progressed, true);
             }
-            return quote != null && beginPurchase(c, quote) ? Update.waiting(false)
-                    : new Update(Status.FAILED, false, true);
+            if (c.satisfied()) return new Update(Status.DONE, true, true); // An open request is withdrawn at the board.
+            // 1. post
+            if (request == null) {
+                SkillResult result = VillageNoticeBoards.read(c.world, c.villager, c.agent, visit, reading);
+                if (result != SkillResult.SUCCESS)
+                    return new Update(result == SkillResult.RUNNING ? Status.RUNNING : Status.FAILED,
+                            motion.toward(c.villager, visit.getTargetLocation()) || result == SkillResult.RUNNING
+                                    && VillageNoticeBoards.atBoard(c.world, c.villager), true);
+                VillageSignalBoard board = VillageMarkets.board(c.world, c.agent.getVillagerId());
+                if (board == null) return new Update(Status.FAILED, false, true);
+                if (c.executing) ActionLifecycle.clearBody(c.agent, c.villager, c.world);
+                int shortage = Math.max(1, c.units - have);
+                // Exact needs list what this villager can finish itself: "2 sticks or 2 planks or 1 log".
+                posted = c.requestCategory == null ? RequestAlternatives.build(c, shortage) : c.spec();
+                boolean existed = false;
+                for (VillageSignalBoard.VillageMessage m : VillageSignalBoard.requestsBy(c.agent.getVillagerId()))
+                    if (m.spec.key().equals(posted.key()) && m.state(now) != VillageSignalBoard.RequestState.EXPIRED
+                            && m.state(now) != VillageSignalBoard.RequestState.CONSUMED) existed = true;
+                // A neighbour already offers it on the board: ask only for what that offer covers and claim the
+                // offer at once (the requester then walks to the provider). The rest is asked for after delivery.
+                VillageSignalBoard.VillageMessage offer = existed ? null
+                        : CooperativeSupply.findOffer(c.world, c.agent, board, posted, shortage);
+                int units = offer == null ? shortage
+                        : Math.max(1, Math.min(shortage, CooperativeSupply.offerUnits(c.world, offer, posted, c.agent.getVillagerId())));
+                // Villager-owned: the request outlives this method (see OwnRequests); the board de-duplicates.
+                request = board.postOwnedRequest(c.agent.getVillagerId(), c.agent.getVillagerId(),
+                        c.villager.blockPosition(), posted, units, now);
+                OwnRequests.attach(c, request);
+                OwnRequests.hold(c.agent, request, true);
+                BrainLog.diagnostic(c.agent, existed ? "supply-request-merged" : "supply-request", "request=" + request
+                        + " spec=" + posted + " units=" + units + " target=" + c.target.getRegistryName()
+                        + (offer == null ? "" : " offer=" + offer.id));
+                if (offer != null) CooperativeSupply.claimOffer(c.world, c.agent, board.find(request), offer);
+                // Being at the board, also read other residents' requests.
+                VillagerEconomySystem.visitMarket(c.world, c.villager, c.agent);
+                return Update.waiting(true);
+            }
+            // 2. await. An open request is a live dependency; other methods may run meanwhile (the request stays).
+            VillageSignalBoard.VillageMessage m = VillageSignalBoard.get().find(request);
+            if (m == null || m.state(now) == VillageSignalBoard.RequestState.EXPIRED) {
+                BrainLog.diagnostic(c.agent, "supply-request-lapsed", "request=" + request
+                        + " reason=" + (m == null ? "gone" : "expired"));
+                if (m != null) VillageSignalBoard.get().retire(request);
+                OwnRequests.hold(c.agent, request, false);
+                request = null;
+                return new Update(Status.FAILED, progressed, true);
+            }
+            if (m.state(now) == VillageSignalBoard.RequestState.CONSUMED) {
+                // Its meeting ended: verify on the next tick.
+                claim = m.claim().id;
+                return new Update(Status.RUNNING, progressed, true);
+            }
+            return new Update(Status.WAITING, true, true);
+        }
+        @Override public void close(Context c) {
+            if (request == null && c.executing) ActionLifecycle.clearBody(c.agent, c.villager, c.world);
+            // Never withdraws the request: it belongs to the villager and is reconciled by OwnRequests.
+            OwnRequests.hold(c.agent, request, false);
+            super.close(c);
+            request = null; claim = null;
         }
     }
 
@@ -108,7 +273,6 @@ public final class AcquisitionMethods {
         boolean legacy;
         public String id() { return "craft"; }
         public double estimate(Context c) {
-            if (purchase != null) return remainingCost;
             if (child != null) return 0; // In-progress production has no new purchase commitment.
             legacy = !CraftingPlan.supports(c.world, c.target);
             if (legacy) {
@@ -118,20 +282,10 @@ public final class AcquisitionMethods {
                         ? 0 : Double.POSITIVE_INFINITY;
             }
             quote = AcquisitionPlanner.choose(c.agent, c.villager, c.world, c.target, c.desired, true);
-            return quote == null ? Double.POSITIVE_INFINITY : quote.emeralds;
+            return quote == null ? Double.POSITIVE_INFINITY : quote.buyerCost;
         }
         public Update tick(Context c) {
             boolean advanced = false;
-            if (purchase != null) {
-                Update update = purchaseTick(c);
-                if (update != null) return update;
-                quote = null; advanced = true;
-                if (!Double.isFinite(estimate(c))) return new Update(Status.FAILED, true, true);
-            }
-            if (quote != null && quote.needsPurchase()) {
-                boolean started = beginPurchase(c, quote); quote = null;
-                return started ? Update.waiting(advanced) : new Update(Status.FAILED, advanced, true);
-            }
             if (child == null) {
                 child = new AgentGoal("craft", "Craft acquisition " + c.target.getRegistryName(), 6);
                 child.setTargetItem(c.target.getRegistryName().toString());
@@ -153,62 +307,26 @@ public final class AcquisitionMethods {
         }
     }
 
-    static final class Supply extends Owned {
-        final Map<String, Integer> targets = new LinkedHashMap<>();
-        final Map<String, Integer> highStock = new HashMap<>();
-        final Map<String, UUID> lastWorkers = new HashMap<>();
-        final Map<String, Integer> workerStock = new HashMap<>();
-        final Map<String, MotionProgress> movements = new HashMap<>();
-        Supply(Context c) { targets.put(c.target.getRegistryName().toString(), c.desired); }
-        public String id() { return "cooperative_supply"; }
-        public double estimate(Context c) {
-            return ModConfig.ENABLE_ECONOMY.get() && ModConfig.ENABLE_WORLD_INTERACTION.get()
-                    && ResourceWorkSystem.hasSupplier(c.world, c.villager, c.target.getRegistryName().toString())
-                    ? 0 : Double.POSITIVE_INFINITY;
-        }
-        public void start(Context c, UUID attempt) {
-            super.start(c, attempt);
-            for (String item : targets.keySet()) highStock.put(item, ResourceWorkSystem.count(c.agent, item));
-        }
-        public Update tick(Context c) {
-            if (!Double.isFinite(estimate(c))) return new Update(Status.FAILED, false, true);
-            boolean done = true, advanced = false;
-            for (Map.Entry<String, Integer> target : targets.entrySet()) {
-                String item = target.getKey(); int stock = ResourceWorkSystem.count(c.agent, item);
-                int previousStock = highStock.getOrDefault(item, 0);
-                if (stock > previousStock) { highStock.put(item, stock); advanced = true; }
-                if (stock >= target.getValue()) continue;
-                done = false;
-                WorkOrderBook.Order order = ResourceWorkSystem.requestOwned(c.world, c.agent, owner, item, target.getValue());
-                if (order == null || order.worker == null) continue;
-                if (!order.worker.equals(lastWorkers.put(item, order.worker))) advanced = true;
-                VillagerAgentData worker = VillagerAgentManager.getAgent(order.worker);
-                Entity entity = c.world.getEntity(order.worker);
-                if (worker != null) {
-                    int gathered = ResourceWorkSystem.count(worker, item);
-                    if (gathered > workerStock.getOrDefault(item, 0)) {
-                        workerStock.put(item, gathered); advanced = true;
-                    }
-                }
-                if (worker != null && worker.getCurrentAction() != null)
-                    advanced |= movements.computeIfAbsent(item, key -> new MotionProgress())
-                            .toward(entity, worker.getCurrentAction().getTargetBlockPos());
-            }
-            return done ? new Update(Status.DONE, true, true) : Update.waiting(advanced);
-        }
-    }
-
     /** Prerequisite acquisition and execution are shared by crafting, logging, mining, quarrying and harvesting. */
+    /** Work routines an acquisition may run as its production step (see {@code Produce.workRoutineFor}). */
+    static final Set<String> WORK_ROUTINES = new HashSet<>(Arrays.asList("farm", "lumberjack_work", "miner_work"));
+
     static final class Produce extends Owned {
         final boolean extraction;
+        final boolean smelting;
         AgentGoal child;
         long progress;
         int highStock;
         String methodId = "craft_inputs";
-        Produce(boolean extraction) { this.extraction = extraction; }
+        Produce(boolean extraction) { this(extraction, false); }
+        Produce(boolean extraction, boolean smelting) {
+            this.extraction = extraction; this.smelting = smelting;
+            if (smelting) methodId = "smelt";
+        }
         Produce bind(Context c) { contract(c); return this; }
         public String id() { return methodId; }
         TaskContract contract(Context c) {
+            if (smelting) return ItemTaskCatalog.smeltContract(c);
             if (extraction) {
                 ResourceCatalog.Source source = ResourceCatalog.get(c.target.getRegistryName().toString());
                 methodId = source.methodId();
@@ -219,44 +337,101 @@ public final class AcquisitionMethods {
         public double estimate(Context c) {
             if (!ModConfig.ENABLE_WORLD_INTERACTION.get()) return Double.POSITIVE_INFINITY;
             if (extraction && !ResourceCatalog.get(c.target.getRegistryName().toString()).skilled(c.agent)
-                    || !extraction && !c.unlocked()) return Double.POSITIVE_INFINITY;
+                    || !extraction && !smelting && !c.unlocked()) return Double.POSITIVE_INFINITY;
             if (child != null && !"acquire_item".equals(child.getGoalType())) return 0;
-            if (extraction && !ResourceSensor.available(c.world, c.villager, c.agent,
+            // Crops: a farmer who remembers a field farms it (travel, harvest, replant, till); ripe crops in sight are
+            // not required. Other resources still need a reachable source now.
+            BlockPos field = fieldFor(c);
+            if (extraction && field == null && !ResourceSensor.available(c.world, c.villager, c.agent,
                     ResourceCatalog.get(c.target.getRegistryName().toString()))) return Double.POSITIVE_INFINITY;
-            if (!extraction) {
+            double furnaceCost = 0;
+            if (smelting && c.furnace() == null) {
+                // No furnace at all known: a smith builds one (craft it, place it beside itself). A known but
+                // busy/incompatible furnace is waited for instead.
+                if (!SmeltSkill.mayBuildFurnace(c.agent, c.villager, c.world)) return Double.POSITIVE_INFINITY;
+                furnaceCost = 2 + (c.count(Items.FURNACE) > 0 ? 0 : ItemTaskCatalog.minimumCost(c.child(Items.FURNACE, 1)));
+                if (!Double.isFinite(furnaceCost)) return Double.POSITIVE_INFINITY;
+            }
+            if (!extraction && !smelting) {
                 ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(c.world, c.target);
-                if (recipe == null || (recipe.vanilla != null && !recipe.vanilla.canCraftInDimensions(2, 2)
-                        && WorkbenchMemory.path(c.agent, c.villager, c.world) == null)) return Double.POSITIVE_INFINITY;
+                // The crafting table is handled inside crafting (CraftSkill makes and places one when needed).
+                if (recipe == null) return Double.POSITIVE_INFINITY;
             }
             TaskContract requirements = contract(c);
-            double cost = 0;
+            // This producer owns its travel/work estimate; the scheduler does not price resources.
+            double cost = extraction ? 0.05 * (field != null ? Math.sqrt(field.distSqr(c.villager.blockPosition()))
+                    : ResourceSensor.travelDistance(c.world, c.villager, c.agent,
+                    ResourceCatalog.get(c.target.getRegistryName().toString())))
+                    + 0.1 * Math.max(1, c.desired - c.count(c.target)) : smelting ? (c.furnace() == null ? furnaceCost
+                    : 1 + 0.05 * SmeltSkill.approachDistance(c.villager, c.world, c.furnace())) : 0;
             for (TaskContract.ItemNeed need : requirements.items) {
                 Item item = ResourceCatalog.item(need.item);
                 if (item == Items.AIR || item == c.target) return Double.POSITIVE_INFINITY;
                 if (c.count(item) >= need.quantity) continue;
+                // Circular input (a hay bale for wheat): it may be unpacked when carried, never acquired.
+                if (!extraction && !smelting && VillageProducible.onlyMadeFrom(c.world, item, c.target))
+                    return Double.POSITIVE_INFINITY;
                 if (child != null && need.item.equals(child.getTargetItem()))
                     cost += c.agent.brain().acquisitions.remainingCost(owner, item);
-                else cost += ItemTaskCatalog.minimumCost(new Context(c.agent, c.villager, c.world, item, need.quantity, false));
+                else cost += ItemTaskCatalog.minimumCost(c.child(item, need.quantity));
             }
-            // All purchases in this route must fit the same wallet, not separate hypothetical wallets.
-            return cost <= c.count(Items.EMERALD) ? cost : Double.POSITIVE_INFINITY;
+            // Individual barter baskets revalidate real stock; costs are subjective, not cash.
+            return cost; // Each proposed barter validates the actual inventory basket.
+        }
+        /**
+         * The work routine that produces this resource for this villager, or null: farm (crop with a remembered
+         * field), lumberjack_work (logs), miner_work (ores, stone). Only routines this villager can actually run.
+         */
+        String workRoutineFor(Context c) {
+            if (!extraction || c.villager == null) return null;
+            if (fieldFor(c) != null) return "farm";
+            ResourceCatalog.Source source = ResourceCatalog.get(c.target.getRegistryName().toString());
+            if (source == null) return null;
+            String type = source.profession == ResourceProfession.LUMBERJACK ? "lumberjack_work"
+                    : source.profession == ResourceProfession.MINER ? "miner_work" : null;
+            if (type == null) return null;
+            AgentGoal probe = new AgentGoal(type, "probe", 6);
+            return BehaviorExecutor.findHandler(c.agent, probe, c.villager, c.world) != null ? type : null;
+        }
+        /** Nearest remembered field when this is crop extraction by a villager able to farm; else null. */
+        BlockPos fieldFor(Context c) {
+            if (!extraction || c.villager == null) return null;
+            ResourceCatalog.Source source = ResourceCatalog.get(c.target.getRegistryName().toString());
+            if (source == null || source.capability != com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId.FARMING
+                    || !source.skilled(c.agent)) return null;
+            return FarmMemory.nearestField(c.agent, c.villager.blockPosition());
         }
         public Update tick(Context c) {
             if (!ModConfig.ENABLE_WORLD_INTERACTION.get()
                     || extraction && !ResourceCatalog.get(c.target.getRegistryName().toString()).skilled(c.agent)
-                    || !extraction && !c.unlocked()) return new Update(Status.FAILED, false, true);
+                    || !extraction && !smelting && !c.unlocked()) return new Update(Status.FAILED, false, true);
             if (child == null) {
                 TaskContract requirements = contract(c);
                 for (TaskContract.ItemNeed need : requirements.items) {
                     if (ResourceWorkSystem.count(c.agent, need.item) >= need.quantity) continue;
                     child = new AgentGoal("acquire_item", "Acquire prerequisite " + need.item, 6);
                     child.setTargetItem(need.item); child.setTargetQuantity(need.quantity);
+                    if (extraction) {
+                        // A missing work tool is a generic requirement: any suitable tier satisfies it.
+                        ResourceCatalog.Source source = ResourceCatalog.get(c.target.getRegistryName().toString());
+                        if (source != null && source.tool != Items.AIR
+                                && need.item.equals(source.tool.getRegistryName().toString()))
+                            child.setRequestCategory(SupplyPolicy.toolCategory(source.tool));
+                    }
                     break;
                 }
                 if (child == null) {
-                    child = new AgentGoal(extraction ? "extract_item" : "craft", "Produce " + c.target.getRegistryName(), 6);
+                    // Resources come from the villager's own work routine when it has one: crops from a remembered
+                    // field run a farm session, logs a lumberjack session, ores a mining session. Anything else
+                    // is extracted locally.
+                    String routine = extraction ? workRoutineFor(c) : null;
+                    String type = routine != null ? routine : extraction ? "extract_item" : smelting ? "smelt" : "craft";
+                    child = new AgentGoal(type, routine != null ? "Work session for " + c.target.getRegistryName()
+                            : "Produce " + c.target.getRegistryName(), 6);
                     child.setTargetItem(c.target.getRegistryName().toString());
                     child.setTargetQuantity(extraction ? c.desired : Math.max(1, c.desired - c.count(c.target)));
+                    if (routine != null) BrainLog.diagnostic(c.agent, "acquire-redirect", "item=" + c.target.getRegistryName()
+                            + " routine=" + routine + " desired=" + c.desired + " have=" + c.count(c.target));
                 }
                 child.setMethodAttempt(owner);
                 progress = child.getProgressVersion();
@@ -275,6 +450,13 @@ public final class AcquisitionMethods {
             }
             if (result == SkillResult.FAIL || result == SkillResult.BLOCKED || result == SkillResult.DELETE)
                 return new Update(Status.FAILED, advanced, true);
+            if (result == SkillResult.WAITING && WORK_ROUTINES.contains(child.getGoalType())) {
+                // The work session found nothing (more) to do: the method has ended; the parent re-checks stock.
+                BrainLog.diagnostic(c.agent, "acquire-redirect-end", "item=" + c.target.getRegistryName()
+                        + " routine=" + child.getGoalType() + " have=" + c.count(c.target) + "/" + c.desired);
+                child = null;
+                return new Update(Status.DONE, advanced, true);
+            }
             return new Update(result == SkillResult.RUNNING ? Status.RUNNING : Status.WAITING, advanced, true);
         }
     }

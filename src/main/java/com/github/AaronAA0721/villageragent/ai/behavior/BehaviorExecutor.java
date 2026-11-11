@@ -31,6 +31,7 @@ public final class BehaviorExecutor {
     static {
         // Built-in skills. Additional skills register the same way as they are implemented.
         register(new SleepSkill());
+        register(new EatSkill());
         register(new FarmSkill());
         for (String type : new String[]{"harvest", "plant", "till", "collect_crops"}) register(new FarmActionSkill(type));
         register(new SocializeSkill());
@@ -46,10 +47,31 @@ public final class BehaviorExecutor {
         register(new RestockSkill());
         register(new AcquireItemSkill());
         register(new FindJobSiteSkill());
-        register(new ResourceWorkSkill());
+
         register(new ExtractItemSkill());
+        register(new SmeltSkill());
+        register(new CollectSmeltSkill());
+        register(new FishSkill());
+        register(new ButcherSkill());
+        register(new CookSkill());
+        register(new FletcherSkill());
+        register(new BreedSkill());
+        register(new ShepherdSkill());
+        register(new PaidProductionSkill());
+        register(new CooperativeSupplySkill());
+        register(new WithdrawRequestSkill());
         register(new TradeDeliverySkill());
         register(new TradeMeetingSkill());
+        register(new LumberjackWorkSkill());
+        register(new MinerWorkSkill());
+        register(new PlaceNearSelfSkill());
+        register(new PlaceBlockSkill());
+        // LLM-authored composites: ordered plans and group invitations.
+        register(new SequenceSkill());
+        register(new InviteSkill());
+        register(new StrollSkill());
+        register(new GiftSkill());
+        register(new WorkSkill());
     }
 
     /**
@@ -79,9 +101,10 @@ public final class BehaviorExecutor {
         TYPE_TO_SKILL.put("restock", "restock");
         TYPE_TO_SKILL.put("acquire_item", "acquire_item");
         TYPE_TO_SKILL.put("find_job_site", "find_job_site");
-        TYPE_TO_SKILL.put("fulfill_order", "fulfill_order");
+
         TYPE_TO_SKILL.put("extract_item", "extract_item");
         TYPE_TO_SKILL.put("deliver_trade", "deliver_trade");
+        TYPE_TO_SKILL.put("collect_smelt", "collect_smelt");
     }
 
     /** True when this mod knows how to run {@code goalType} at all (regardless of this villager). */
@@ -232,5 +255,11 @@ public final class BehaviorExecutor {
             if (s.id().equals(id)) return s;
         }
         return null;
+    }
+
+    /** Look up the skill that handles a given goal type. Used by GoalScheduler for chanceFactor. */
+    public static VillagerSkill skillForGoalType(String goalType) {
+        String mapped = TYPE_TO_SKILL.get(goalType);
+        return mapped != null ? skillById(mapped) : null;
     }
 }

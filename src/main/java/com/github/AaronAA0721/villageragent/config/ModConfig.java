@@ -13,8 +13,12 @@ public class ModConfig {
     public static final ForgeConfigSpec.ConfigValue<String> LLM_MODEL;
     public static final ForgeConfigSpec.IntValue LLM_MAX_TOKENS;
     public static final ForgeConfigSpec.DoubleValue LLM_TEMPERATURE;
+    /** auto | on | off — structured JSON replies vs the plain-text TODO:/REMEMBER: protocol. */
+    public static final ForgeConfigSpec.ConfigValue<String> LLM_JSON_MODE;
     /** Verbose LLM I/O debug logging (request/response dumps, prompts). Off by default. */
     public static final ForgeConfigSpec.BooleanValue LLM_DEBUG;
+    /** Ask hybrid "thinking" models (DeepSeek V3.1+/V4, Qwen3, GLM...) to answer without a reasoning phase. */
+    public static final ForgeConfigSpec.BooleanValue LLM_DISABLE_THINKING;
 
     // Agent Behavior Settings
     public static final ForgeConfigSpec.BooleanValue ENABLE_AI_AGENTS;
@@ -61,6 +65,9 @@ public class ModConfig {
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_BUILDINGS;
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_SEEDS;
     public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_FIELD;
+    /** Per-villager head-top label: current goal + utility stacked bar. */
+    public static final ForgeConfigSpec.BooleanValue DEBUG_SHOW_VILLAGER_LABELS;
+    public static final ForgeConfigSpec.BooleanValue DEBUG_LABELS_FIXED_SCREEN_SIZE;
 
     // ── Proficiency (villager experience / level system) ──
     /** Mirror proficiency level onto vanilla VillagerData.level so trade UI/pools follow it. */
@@ -92,6 +99,7 @@ public class ModConfig {
     public static final ForgeConfigSpec.DoubleValue TRADE_MEET_RADIUS;
     /** Lifetime (ticks) of a trade/have/want message before it expires from the board. */
     public static final ForgeConfigSpec.IntValue TRADE_MSG_TTL;
+    public static final ForgeConfigSpec.DoubleValue HUNGER_DECAY_PER_MINUTE;
 
     // ── Brain logging (decision-brain trace) ──
     /** Trace every todo/goal lifecycle (add / end / switch / suspend-resume) to the VillagerBrain logger. */
@@ -117,6 +125,17 @@ public class ModConfig {
     /** Ticks before a second-hand ore fact stops being re-told (3 MC days = 72000). */
     public static final ForgeConfigSpec.IntValue GOSSIP_ORE_EXPIRY_TICKS;
 
+    // ── Showcase / navigation ──
+    public static final ForgeConfigSpec.BooleanValue SHOWCASE_LABELS;
+    public static final ForgeConfigSpec.IntValue SHOWCASE_LABEL_RANGE;
+    public static final ForgeConfigSpec.DoubleValue SHOWCASE_TEXT_SCALE;
+    public static final ForgeConfigSpec.BooleanValue SHOWCASE_BOARD;
+    public static final ForgeConfigSpec.DoubleValue MINING_TIME_MULTIPLIER;
+    public static final ForgeConfigSpec.BooleanValue NIGHT_CURFEW;
+    public static final ForgeConfigSpec.BooleanValue ENSURE_CORE_JOBS;
+    public static final ForgeConfigSpec.BooleanValue ASYNC_PATHFINDING;
+    public static final ForgeConfigSpec.IntValue PATH_REPATH_INTERVAL;
+
     static {
         BUILDER.push("LLM Settings");
         
@@ -138,11 +157,26 @@ public class ModConfig {
         
         LLM_MAX_TOKENS = BUILDER
                 .comment("Maximum tokens for LLM responses")
-                .defineInRange("llm_max_tokens", 150, 50, 1000);
+                .defineInRange("llm_max_tokens", 400, 50, 1000);
         
         LLM_TEMPERATURE = BUILDER
                 .comment("LLM temperature (creativity) - 0.0 to 2.0")
                 .defineInRange("llm_temperature", 0.7, 0.0, 2.0);
+
+        LLM_JSON_MODE = BUILDER
+                .comment("How villagers format LLM replies. auto (default): ask for JSON output, and switch to the "
+                        + "plain-text 'TODO:' line format only if this provider/model rejects JSON mode or keeps "
+                        + "answering with non-JSON text. on: always JSON. off: always the plain-text TODO: format "
+                        + "(for models without JSON support). JSON replies always get at least 400 tokens.")
+                .define("llm_json_mode", "auto", v -> v instanceof String
+                        && java.util.Arrays.asList("auto", "on", "off").contains(((String) v).trim().toLowerCase()));
+
+        LLM_DISABLE_THINKING = BUILDER
+                .comment("Send enable_thinking=false so hybrid reasoning models (DeepSeek-V3.1+/V4 on SiliconFlow, "
+                        + "Qwen3, GLM...) reply directly instead of reasoning first. On SiliconFlow thinking is ON by "
+                        + "default: a one-line chat reply cost ~1500 reasoning tokens and 15-60 s, so calls timed out. "
+                        + "Skipped for api.openai.com; dropped automatically if a provider rejects the parameter.")
+                .define("llm_disable_thinking", true);
 
         LLM_DEBUG = BUILDER
                 .comment("Verbose LLM I/O debug logging: prints full request/response bodies, prompts, and "
@@ -243,7 +277,7 @@ public class ModConfig {
                 .define("enable_debug_overlay", false);
 
         DEBUG_RENDER_RANGE = BUILDER
-                .comment("Radius (blocks) around the player for debug building boxes")
+                .comment("Radius (blocks) for debug building boxes and villager labels")
                 .defineInRange("debug_render_range", 64, 8, 256);
 
         DEBUG_SHOW_HUD = BUILDER
@@ -266,6 +300,16 @@ public class ModConfig {
                         + "cyan, and the watershed boundary (equal-geodesic-distance surface) in white. "
                         + "Seeds are drawn as a cross at the centre of their block. Client render toggle.")
                 .define("debug_show_field", true);
+
+        DEBUG_SHOW_VILLAGER_LABELS = BUILDER
+                .comment("Draw a head-top label above every nearby villager showing its current goal and "
+                        + "a stacked colour bar of utility scores. Requires enable_debug_overlay to be true.")
+                .define("debug_show_villager_labels", true);
+
+        DEBUG_LABELS_FIXED_SCREEN_SIZE = BUILDER
+                .comment("Keep head-top labels at a fixed GUI-pixel size regardless of camera distance or FOV. "
+                        + "Labels still follow villagers; useful for overhead recording. Client render toggle.")
+                .define("debug_labels_fixed_screen_size", false);
 
         BUILDER.pop();
 
@@ -365,8 +409,15 @@ public class ModConfig {
                 .defineInRange("trade_meet_radius", 2.5, 1.0, 16.0);
 
         TRADE_MSG_TTL = BUILDER
-                .comment("Lifetime (ticks) of a trade/want message on the board before it expires.")
-                .defineInRange("trade_msg_ttl", 1200, 20, 24000);
+                .comment("Lifetime (ticks) of a request on the notice board before it expires unanswered. "
+                        + "Default 48000 = two game days.")
+                .defineInRange("request_ttl_ticks", 48000, 20, 240000);
+
+        HUNGER_DECAY_PER_MINUTE = BUILDER
+                .comment("Hunger points (0-100 scale) a villager loses per in-game minute (1200 ticks). Eating starts "
+                        + "below 60 and refills to 85; one bread restores 25. Default 1.5 = about one bread per 17 "
+                        + "minutes per villager.")
+                .defineInRange("hunger_decay_per_minute", 1.5, 0.0, 20.0);
 
         BUILDER.pop();
 
@@ -440,6 +491,59 @@ public class ModConfig {
                 .comment("Ticks before a second-hand ore fact stops being re-told (depletable resource). "
                         + "3 Minecraft days = 72000 ticks.")
                 .defineInRange("gossip_ore_expiry_ticks", 72000, 24000, 480000);
+
+        BUILDER.pop();
+
+        BUILDER.push("Showcase");
+
+        SHOWCASE_LABELS = BUILDER
+                .comment("Fixed-size card above every villager in range: name, job, current task, current step "
+                        + "and a goal-weight bar. Independent of enable_debug_overlay (no HUD/building wires). "
+                        + "Meant for overhead/fly-over recording. Toggle: /va showcase labels on|off")
+                .define("showcase_labels", false);
+
+        SHOWCASE_LABEL_RANGE = BUILDER
+                .comment("Radius (blocks, measured from the player) for showcase cards and request tags. "
+                        + "Large enough to cover a village while flying above it.")
+                .defineInRange("showcase_label_range", 160, 16, 512);
+
+        SHOWCASE_TEXT_SCALE = BUILDER
+                .comment("Size multiplier for showcase cards, request tags and the board panel (1.0 = one font "
+                        + "pixel per GUI pixel). Client render setting.")
+                .defineInRange("showcase_label_scale", 0.75, 0.2, 3.0);
+
+        MINING_TIME_MULTIPLIER = BUILDER
+                .comment("How many times longer a villager takes to mine an ore or stone block than a player "
+                        + "with the same pickaxe. Higher = slower, easier to follow on camera.")
+                .defineInRange("mining_time_multiplier", 3.0, 1.0, 10.0);
+
+        SHOWCASE_BOARD = BUILDER
+                .comment("Top-right notice-board panel for the village the player is in, plus a request tag above "
+                        + "each villager taking part in the request system (posting, producing, delivering). "
+                        + "Toggle: /va showcase board on|off")
+                .define("showcase_board", false);
+
+        NIGHT_CURFEW = BUILDER
+                .comment("At night every managed adult goes to bed regardless of fatigue, stays asleep until dawn, "
+                        + "and only wakes for a villager actually being chased (alarm) or its own attacker. "
+                        + "Sleepers answer a neighbour's alarm and return to bed afterwards.")
+                .define("night_curfew", true);
+
+        ENSURE_CORE_JOBS = BUILDER
+                .comment("Every loaded village keeps at least one farmer, lumberjack and miner. A missing role is "
+                        + "given to an unemployed (or most-duplicated, novice) resident and its workstation is "
+                        + "placed beside the village notice board. Manual run: /va showcase jobs")
+                .define("ensure_core_jobs", true);
+
+        ASYNC_PATHFINDING = BUILDER
+                .comment("Compute path recomputes, stuck recovery and continuation of partial paths on a worker "
+                        + "thread, applying the result on the server thread. Falls back to synchronous search "
+                        + "on any error.")
+                .define("async_pathfinding", true);
+
+        PATH_REPATH_INTERVAL = BUILDER
+                .comment("Ticks without walking progress before a managed villager re-plans its route.")
+                .defineInRange("path_repath_interval", 80, 20, 400);
 
         BUILDER.pop();
 

@@ -72,7 +72,7 @@ public final class VillagerTradeSystem {
                 + " might accept:";
 
         long tick = world.getGameTime();
-        LLMGuard.query(agentA.getVillagerId(), tick, sys, user).thenAccept(proposal -> {
+        LLMGuard.queryText(agentA.getVillagerId(), tick, sys, user).thenAccept(proposal -> {
             TradeOffer offer = parseOffer(proposal);
             if (offer == null || !offerValid(agentA, agentB, offer)) {
                 agentA.addMemory("Wanted to trade with " + agentB.getName()
@@ -109,7 +109,7 @@ public final class VillagerTradeSystem {
                 + "Do you accept, reject, or counter?";
 
         long tick = world.getGameTime();
-        LLMGuard.query(agentB.getVillagerId(), tick, sys, user).thenAccept(decision -> {
+        LLMGuard.queryText(agentB.getVillagerId(), tick, sys, user).thenAccept(decision -> {
             DecisionJournal.record(agentB.getVillagerId(), DecisionJournal.Kind.SOCIAL, tick,
                     user, decision, DecisionJournal.outcome(decision));
             if (decision == null || LLMService.isFailure(decision)) { release(agentA, agentB); return; }

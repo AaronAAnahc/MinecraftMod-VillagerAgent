@@ -161,7 +161,7 @@ public class FarmingAction {
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
         for (ItemEntity e : items) {
-            if (e == null || !e.isAlive()) continue;
+            if (e == null || !e.isAlive() || com.github.AaronAA0721.villageragent.ai.CraftDisplay.isDisplay(e)) continue;
             double d = e.blockPosition().distSqr(center);
             if (d < bestD) {
                 bestD = d;
@@ -565,9 +565,18 @@ public class FarmingAction {
      */
     public static boolean tillBlockAt(VillagerEntity villager, ServerWorld world,
                                       VillagerAgentData agent, BlockPos dirtPos) {
+        return tillBlockAt(villager, world, agent, dirtPos, true);
+    }
+
+    /**
+     * @param extendField true: the dirt must touch existing farmland (normal rule); false: a new field may be
+     *                    started anywhere within water range (bootstrap rule)
+     */
+    public static boolean tillBlockAt(VillagerEntity villager, ServerWorld world,
+                                      VillagerAgentData agent, BlockPos dirtPos, boolean extendField) {
         // Recheck the connection at mutation time: neighbouring farmland may have disappeared.
         if (!world.isLoaded(dirtPos) || !isTillableDirt(world, dirtPos)
-                || !hasAdjacentFarmland(world, dirtPos)) return false;
+                || (extendField ? !hasAdjacentFarmland(world, dirtPos) : !hasWaterNearby(world, dirtPos))) return false;
         if (!world.isEmptyBlock(dirtPos.above())) return false;
         ItemStack hoe = ItemStack.EMPTY;
         for (ItemStack stack : agent.getInventory().getItems()) {
@@ -594,6 +603,33 @@ public class FarmingAction {
      */
     public static int approachTarget(VillagerAgentData agent, VillagerEntity villager, BlockPos target,
                                       boolean goalDriven, double arriveSq, int stuckTimeout, String desc) {
+        return approachTarget(agent, villager, target, null, goalDriven, arriveSq, stuckTimeout, desc);
+    }
+
+    /**
+     * True when the villager can work {@code block} (till, plant, harvest) from where it stands: the block is
+     * in an adjacent column, its top face is between one block below the feet and arm height (raised beds
+     * included), and nothing solid is in between. Standing on the exact cell is not required.
+     */
+    public static boolean canWork(VillagerEntity villager, BlockPos block) {
+        if (block == null) return false;
+        double dx = Math.abs(villager.getX() - (block.getX() + 0.5));
+        double dz = Math.abs(villager.getZ() - (block.getZ() + 0.5));
+        double top = block.getY() + 1.0 - villager.getY();
+        if (dx > 1.5 || dz > 1.5 || top < -1.0 || top > 1.6) return false;
+        net.minecraft.util.math.vector.Vector3d eye = villager.getEyePosition(1.0F);
+        net.minecraft.util.math.vector.Vector3d aim = new net.minecraft.util.math.vector.Vector3d(
+                block.getX() + 0.5, block.getY() + 0.9, block.getZ() + 0.5);
+        net.minecraft.util.math.BlockRayTraceResult hit = villager.level.clip(new net.minecraft.util.math.RayTraceContext(
+                eye, aim, net.minecraft.util.math.RayTraceContext.BlockMode.COLLIDER,
+                net.minecraft.util.math.RayTraceContext.FluidMode.NONE, villager));
+        return hit.getType() == net.minecraft.util.math.RayTraceResult.Type.MISS
+                || hit.getBlockPos().equals(block) || hit.getBlockPos().equals(block.above());
+    }
+
+    /** As above; {@code workBlock} (may be null) also counts as arrived once {@link #canWork} holds. */
+    public static int approachTarget(VillagerAgentData agent, VillagerEntity villager, BlockPos target, BlockPos workBlock,
+                                      boolean goalDriven, double arriveSq, int stuckTimeout, String desc) {
         VillagerAction cur = agent.getCurrentAction();
         if (cur != null && cur.isFarmMove()) {
             BlockPos t = cur.getTargetBlockPos();
@@ -601,7 +637,8 @@ public class FarmingAction {
                 LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " farmMove target null -> abort (unreachable)");
                 agent.setCurrentAction(null); return 2;
             }
-            if (villager.blockPosition().distSqr(t) <= arriveSq) {
+            if (villager.blockPosition().distSqr(t) <= arriveSq || (workBlock != null && villager.isOnGround()
+                    && canWork(villager, workBlock))) {
                 LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " arrived at farm target " + t + " ('" + desc + "')");
                 agent.setCurrentAction(null);
                 villager.getNavigation().stop();
@@ -632,7 +669,7 @@ public class FarmingAction {
             LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " target null for '" + desc + "' -> unreachable");
             return 2;
         }
-        if (villager.blockPosition().distSqr(target) <= arriveSq) {
+        if (villager.blockPosition().distSqr(target) <= arriveSq || (workBlock != null && canWork(villager, workBlock))) {
             LOGGER.info("[APPROACH-DIAG] " + agent.getName() + " already at target " + target + " ('" + desc + "')");
             return 1;
         }

@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai.harness;
 
 import com.github.AaronAA0721.villageragent.ai.AgentGoal;
 import com.github.AaronAA0721.villageragent.ai.BrainLog;
+import com.github.AaronAA0721.villageragent.ai.GoalValidator;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
@@ -39,7 +40,7 @@ public final class HarnessDecisionPlanner {
         String system = "You are the decision brain of a Minecraft villager. Output only the JSON decision.";
         String user = req.toPrompt();
 
-        LLMGuard.query(id, gameTick, system, user).thenAccept(raw -> {
+        LLMGuard.queryJson(id, gameTick, system, user).thenAccept(raw -> {
             DecisionSchema schema = DecisionSchema.parse(raw);
             String parsed = (schema == null) ? "(unparseable)" : schema.toString();
             String outcome;
@@ -96,6 +97,7 @@ public final class HarnessDecisionPlanner {
             goal.setTargetItem(schema.target);
         }
 
+        if (!GoalValidator.check(goal, agent, null, null, "harness_daily")) return;
         if (agent.getGoals().size() < VillagerAgentManager.getMaxGoals()) {
             agent.getGoals().add(goal);
             agent.addMemory("Harness goal: " + goal.getDescription());

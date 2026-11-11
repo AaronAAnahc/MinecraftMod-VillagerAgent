@@ -64,19 +64,109 @@ public class LLMService {
         return fail(reason);
     }
 
+    // ── JSON output capability ──────────────────────────────────────────────
+    //
+    // Structured calls (chat, thoughts, harness decisions, name generation) ask the provider for
+    // native JSON output. If the provider/model can't do it — the API rejects the JSON-mode
+    // parameter, or the model keeps answering with non-JSON text — we switch to the plain-text
+    // TODO:/REMEMBER: line protocol (see PromptTemplates#responseFormatInstruction). The verdict
+    // is per provider+URL+model and resets when the config changes.
+
+    /** JSON replies (reply + thought + goals + memories) get cut off by a tiny token budget. */
+    private static final int JSON_MIN_TOKENS = 400;
+    /** Consecutive unparseable "JSON" replies before auto mode gives up on JSON for this model. */
+    private static final int JSON_PARSE_FAILURE_LIMIT = 3;
+    private static volatile String jsonProviderKey = "";
+    private static volatile boolean jsonUnsupported = false;
+    private static final java.util.concurrent.atomic.AtomicInteger jsonParseFailures =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    private static String providerKey() {
+        return ModConfig.LLM_API_TYPE.get() + "|" + ModConfig.LLM_API_URL.get() + "|" + ModConfig.LLM_MODEL.get();
+    }
+
+    private static void syncProviderKey() {
+        String key = providerKey();
+        if (!key.equals(jsonProviderKey)) {
+            jsonProviderKey = key;
+            jsonUnsupported = false;
+            jsonParseFailures.set(0);
+        }
+    }
+
+    private static String jsonMode() {
+        String m = ModConfig.LLM_JSON_MODE.get();
+        return m == null ? "auto" : m.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * Whether prompts should ask for the JSON response format. {@code llm_json_mode}: "on" always,
+     * "off" never (plain-text TODO: protocol), "auto" (default) until this provider/model is found
+     * not to support JSON output.
+     */
+    public static boolean jsonOutputSupported() {
+        String mode = jsonMode();
+        if ("off".equals(mode)) return false;
+        if ("on".equals(mode)) return true;
+        syncProviderKey();
+        return !jsonUnsupported;
+    }
+
+    /** Parser feedback: did a reply that was requested as JSON actually parse as JSON? */
+    public static void reportJsonParse(boolean ok) {
+        if (!"auto".equals(jsonMode())) return;
+        syncProviderKey();
+        if (ok) { jsonParseFailures.set(0); return; }
+        int n = jsonParseFailures.incrementAndGet();
+        if (n >= JSON_PARSE_FAILURE_LIMIT) markJsonUnsupported(n + " consecutive non-JSON replies");
+    }
+
+    private static void markJsonUnsupported(String why) {
+        if (!"auto".equals(jsonMode()) || jsonUnsupported) return;
+        jsonUnsupported = true;
+        LOGGER.warn("[LLM] {} does not seem to support JSON output ({}). Switching to the plain-text "
+                + "TODO:/REMEMBER: protocol. Set llm_json_mode=on to force JSON.", providerKey(), why);
+    }
+
+    /** A 4xx whose error body points at the JSON-mode parameter we sent. */
+    private static boolean rejectsJsonMode(int code, String errorBody) {
+        if (code != 400 && code != 422 && code != 501) return false;
+        String b = errorBody == null ? "" : errorBody.toLowerCase(java.util.Locale.ROOT);
+        return b.contains("response_format") || b.contains("json_object") || b.contains("responsemimetype")
+                || b.contains("response_mime_type") || b.contains("json mode") || b.contains("format: json");
+    }
+
+    private static int maxTokens(boolean json) {
+        int configured = ModConfig.LLM_MAX_TOKENS.get();
+        return json ? Math.max(configured, JSON_MIN_TOKENS) : configured;
+    }
+
+    /** Plain-text completion (no JSON mode), e.g. memory summaries. */
     public static CompletableFuture<String> queryLLM(String systemPrompt, String userPrompt) {
+        return query(systemPrompt, userPrompt, false);
+    }
+
+    /**
+     * Structured completion: requests native JSON output when the provider supports it (see
+     * {@link #jsonOutputSupported()}); otherwise a plain request whose prompt uses the text protocol.
+     */
+    public static CompletableFuture<String> queryLLMJson(String systemPrompt, String userPrompt) {
+        return query(systemPrompt, userPrompt, jsonOutputSupported());
+    }
+
+    private static CompletableFuture<String> query(String systemPrompt, String userPrompt, boolean json) {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 String apiType = ModConfig.LLM_API_TYPE.get();
 
                 if ("openai".equalsIgnoreCase(apiType)) {
-                    return queryOpenAI(systemPrompt, userPrompt);
+                    return queryOpenAI(systemPrompt, userPrompt, json);
                 } else if ("anthropic".equalsIgnoreCase(apiType)) {
-                    return queryAnthropic(systemPrompt, userPrompt);
+                    return queryAnthropic(systemPrompt, userPrompt, json);
                 } else if ("ollama".equalsIgnoreCase(apiType)) {
-                    return queryOllama(systemPrompt, userPrompt);
+                    return queryOllama(systemPrompt, userPrompt, json);
                 } else if ("gemini".equalsIgnoreCase(apiType)) {
-                    return queryGemini(systemPrompt, userPrompt);
+                    return queryGemini(systemPrompt, userPrompt, json);
                 } else {
                     LOGGER.warn("Unknown LLM API type: " + apiType);
                     return failWithLog("unknown-api:" + apiType);
@@ -85,10 +175,17 @@ public class LLMService {
                 LOGGER.error("Error querying LLM: ", e);
                 return failWithLog("exception:" + e.getClass().getSimpleName());
             }
-        }, executor);
+        }, executor).thenApply(result -> {
+            // Auto-detect models that ignore the JSON instruction: judge real model output only
+            // (API failures / timeouts say nothing about JSON support).
+            if (json && result != null && !isFailure(result)) {
+                reportJsonParse(LLMResponseParser.extractJsonObject(result) != null);
+            }
+            return result;
+        });
     }
     
-    private static String queryOpenAI(String systemPrompt, String userPrompt) throws Exception {
+    private static String queryOpenAI(String systemPrompt, String userPrompt, boolean json) throws Exception {
         String apiKey = ModConfig.LLM_API_KEY.get();
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
@@ -116,7 +213,7 @@ public class LLMService {
 
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", model);
-        requestBody.addProperty("max_tokens", ModConfig.LLM_MAX_TOKENS.get());
+        requestBody.addProperty("max_tokens", maxTokens(json));
 
         JsonArray messages = new JsonArray();
         JsonObject systemMessage = new JsonObject();
@@ -131,7 +228,22 @@ public class LLMService {
 
         requestBody.add("messages", messages);
 
+        // Request structured JSON output — supported by OpenAI, DeepSeek, and most
+        // OpenAI-compatible providers. Forces the model to emit valid JSON, preventing
+        // markdown fences or stray text that would break LLMResponseParser.
+        // Only for structured calls: plain-text calls (memory summaries) must not be forced into JSON.
+        if (json) {
+            JsonObject responseFormat = new JsonObject();
+            responseFormat.addProperty("type", "json_object");
+            requestBody.add("response_format", responseFormat);
+        }
+        // Hybrid reasoning models (SiliconFlow default: thinking ON) spend thousands of tokens and 15-60 s
+        // "thinking" before a one-line villager reply; ask for a direct answer instead.
+        boolean noThinking = sendNoThinking(apiUrl);
+        if (noThinking) requestBody.addProperty("enable_thinking", false);
+
         debug("Request Body: " + requestBody.toString());
+        long started = System.currentTimeMillis();
 
         try (OutputStream os = conn.getOutputStream()) {
             byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
@@ -158,12 +270,15 @@ public class LLMService {
             JsonParser parser = new JsonParser();
             JsonElement element = parser.parse(response.toString());
             JsonObject jsonResponse = element.getAsJsonObject();
-            String content = jsonResponse.getAsJsonArray("choices")
-                    .get(0).getAsJsonObject()
-                    .getAsJsonObject("message")
-                    .get("content").getAsString();
+            JsonObject choice = jsonResponse.getAsJsonArray("choices").get(0).getAsJsonObject();
+            String content = choice.getAsJsonObject("message").get("content").getAsString();
+            if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()
+                    && "length".equals(choice.get("finish_reason").getAsString())) {
+                LOGGER.warn("[LLM] reply was cut off at the token limit ({} tokens); raise llm_max_tokens", maxTokens(json));
+            }
             debug("Parsed Content: " + content);
-            LOGGER.info("OpenAI response received successfully");
+            LOGGER.info("OpenAI response received successfully in {} ms ({})",
+                    System.currentTimeMillis() - started, usageSummary(jsonResponse));
             return content;
         } else {
             // Read error response
@@ -177,12 +292,48 @@ public class LLMService {
                 }
             }
             debug("Error Response Body: " + errorResponse.toString());
+            if (noThinking && responseCode == 400 && errorResponse.toString().contains("enable_thinking")) {
+                thinkingParamRejected = true;
+                LOGGER.warn("[LLM] provider rejected enable_thinking; retrying without it (not sent again this session)");
+                return queryOpenAI(systemPrompt, userPrompt, json);
+            }
+            if (json && rejectsJsonMode(responseCode, errorResponse.toString())) {
+                markJsonUnsupported("HTTP " + responseCode + " rejected the JSON-mode parameter");
+                LOGGER.warn("[LLM] OpenAI rejected JSON mode; retrying as plain text");
+                return queryOpenAI(systemPrompt, userPrompt, false);
+            }
             LOGGER.error("OpenAI API error " + responseCode + ": " + errorResponse.toString());
             return failWithLog("http-" + responseCode);
         }
     }
     
-    private static String queryAnthropic(String systemPrompt, String userPrompt) throws Exception {
+    /** Set when the provider answered HTTP 400 naming enable_thinking; it is then never sent again this session. */
+    private static volatile boolean thinkingParamRejected = false;
+
+    private static boolean sendNoThinking(String apiUrl) {
+        return ModConfig.LLM_DISABLE_THINKING.get() && !thinkingParamRejected
+                && (apiUrl == null || !apiUrl.contains("api.openai.com"));
+    }
+
+    /** "prompt=2908 completion=73 reasoning=0" from an OpenAI-style usage block, for latency diagnosis. */
+    private static String usageSummary(JsonObject response) {
+        try {
+            if (!response.has("usage") || !response.get("usage").isJsonObject()) return "no usage";
+            JsonObject u = response.getAsJsonObject("usage");
+            int reasoning = 0;
+            if (u.has("completion_tokens_details") && u.get("completion_tokens_details").isJsonObject()) {
+                JsonObject d = u.getAsJsonObject("completion_tokens_details");
+                if (d.has("reasoning_tokens") && !d.get("reasoning_tokens").isJsonNull()) reasoning = d.get("reasoning_tokens").getAsInt();
+            }
+            return "prompt=" + (u.has("prompt_tokens") ? u.get("prompt_tokens").getAsInt() : -1)
+                    + " completion=" + (u.has("completion_tokens") ? u.get("completion_tokens").getAsInt() : -1)
+                    + " reasoning=" + reasoning;
+        } catch (RuntimeException e) {
+            return "usage unreadable";
+        }
+    }
+
+    private static String queryAnthropic(String systemPrompt, String userPrompt, boolean json) throws Exception {
         String apiKey = ModConfig.LLM_API_KEY.get();
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
@@ -211,7 +362,7 @@ public class LLMService {
 
         JsonObject requestBody = new JsonObject();
         requestBody.addProperty("model", model);
-        requestBody.addProperty("max_tokens", ModConfig.LLM_MAX_TOKENS.get());
+        requestBody.addProperty("max_tokens", maxTokens(json));
         requestBody.addProperty("system", systemPrompt);
 
         JsonArray messages = new JsonArray();
@@ -266,12 +417,17 @@ public class LLMService {
                 }
             }
             debug("Error Response Body: " + errorResponse.toString());
+            if (json && rejectsJsonMode(responseCode, errorResponse.toString())) {
+                markJsonUnsupported("HTTP " + responseCode + " rejected the JSON-mode parameter");
+                LOGGER.warn("[LLM] Anthropic rejected JSON mode; retrying as plain text");
+                return queryAnthropic(systemPrompt, userPrompt, false);
+            }
             LOGGER.error("Anthropic API error " + responseCode + ": " + errorResponse.toString());
             return failWithLog("http-" + responseCode);
         }
     }
 
-    private static String queryOllama(String systemPrompt, String userPrompt) throws Exception {
+    private static String queryOllama(String systemPrompt, String userPrompt, boolean json) throws Exception {
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
 
@@ -301,6 +457,11 @@ public class LLMService {
         requestBody.addProperty("model", model);
         requestBody.addProperty("prompt", combinedPrompt);
         requestBody.addProperty("stream", false);
+        if (json) requestBody.addProperty("format", "json");
+        JsonObject ollamaOptions = new JsonObject();
+        ollamaOptions.addProperty("num_predict", maxTokens(json));
+        ollamaOptions.addProperty("temperature", ModConfig.LLM_TEMPERATURE.get());
+        requestBody.add("options", ollamaOptions);
 
         debug("Request Body: " + requestBody.toString());
 
@@ -344,12 +505,17 @@ public class LLMService {
                 }
             }
             debug("Error Response Body: " + errorResponse.toString());
+            if (json && rejectsJsonMode(responseCode, errorResponse.toString())) {
+                markJsonUnsupported("HTTP " + responseCode + " rejected the JSON-mode parameter");
+                LOGGER.warn("[LLM] Ollama rejected JSON mode; retrying as plain text");
+                return queryOllama(systemPrompt, userPrompt, false);
+            }
             LOGGER.error("Ollama API error " + responseCode + ": " + errorResponse.toString());
             return failWithLog("http-" + responseCode);
         }
     }
 
-    private static String queryGemini(String systemPrompt, String userPrompt) throws Exception {
+    private static String queryGemini(String systemPrompt, String userPrompt, boolean json) throws Exception {
         String apiKey = ModConfig.LLM_API_KEY.get();
         String model = ModConfig.LLM_MODEL.get();
         String apiUrl = ModConfig.LLM_API_URL.get();
@@ -405,10 +571,11 @@ public class LLMService {
         contents.add(userContent);
         requestBody.add("contents", contents);
 
-        // Generation config
+        // Generation config — responseMimeType forces Gemini to emit valid JSON.
         JsonObject generationConfig = new JsonObject();
-        generationConfig.addProperty("maxOutputTokens", ModConfig.LLM_MAX_TOKENS.get());
+        generationConfig.addProperty("maxOutputTokens", maxTokens(json));
         generationConfig.addProperty("temperature", ModConfig.LLM_TEMPERATURE.get());
+        if (json) generationConfig.addProperty("responseMimeType", "application/json");
         requestBody.add("generationConfig", generationConfig);
 
         debug("Request Body: " + requestBody.toString());
@@ -459,6 +626,11 @@ public class LLMService {
                 }
             }
             debug("Error Response Body: " + errorResponse.toString());
+            if (json && rejectsJsonMode(responseCode, errorResponse.toString())) {
+                markJsonUnsupported("HTTP " + responseCode + " rejected the JSON-mode parameter");
+                LOGGER.warn("[LLM] Gemini rejected JSON mode; retrying as plain text");
+                return queryGemini(systemPrompt, userPrompt, false);
+            }
             LOGGER.error("Gemini API error " + responseCode + ": " + errorResponse.toString());
             return failWithLog("http-" + responseCode);
         }

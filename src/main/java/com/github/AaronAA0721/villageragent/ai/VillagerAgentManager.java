@@ -101,6 +101,9 @@ public class VillagerAgentManager {
      */
     public static void removeAgent(UUID villagerId) {
         VillagerAgentData removed = agents.remove(villagerId);
+        VillagerPathfinding.forget(villagerId);
+        IdleGaze.forget(villagerId);
+        VillagerBreeding.forget(villagerId);
         if (removed != null) removed.brain().acquisitions.closeWorld(null);
         LOGGER.info("Removed AI agent: " + villagerId);
     }
@@ -122,7 +125,10 @@ public class VillagerAgentManager {
             tickSleepHealing(sw);
 
             // Forget stale rally alarms (village "shouts" that nobody answered).
-            VillageSignalBoard.get().pruneExpired(sw);
+            for(VillageMarkets.Market market:VillageMarkets.loaded(sw)) market.board.pruneExpired(sw);
+
+            // Every loaded village keeps a farmer, a lumberjack and a miner (internally throttled).
+            VillageJobGuarantee.tick(sw);
         }
 
         long currentTime = world.getGameTime();
@@ -134,17 +140,26 @@ public class VillagerAgentManager {
 
             VillagerEntity loaded = findVillagerEntity(world, agent.getVillagerId());
             if (loaded == null || !loaded.isAlive() || loaded.isBaby()) continue;
+            // An entity in a chunk that is no longer fully loaded is frozen (no physics/navigation); planning
+            // for it only churns goals ("stuck" villagers far from the player). Resume when it loads again.
+            if (!world.isLoaded(loaded.blockPosition())) continue;
+            // A player is talking to him: stand still and face them (no goals, no navigation) unless an emergency.
+            if (PlayerConversation.tick((ServerWorld) world, loaded, agent, currentTime)) {
+                VillagerNeedsSystem.tickFatigue((ServerWorld) world, loaded, agent);
+                continue;
+            }
             VillagerNeedsSystem.tickFatigue((ServerWorld) world, loaded, agent);
             VillagerNavigationSupport.tick(loaded, (ServerWorld) world, agent);
             // Check this dimension before updating shared timestamps.
             if (currentTime - agent.getLastThinkTime() >= thinkInterval) {
                 agent.setLastThinkTime(currentTime);
-                WorkbenchMemory.observe(loaded, (ServerWorld) world);
                 updateAgent(world, loaded, agent);
                 CraftingPlan.unlockDependencies(agent, (ServerWorld) world);
                 BrainLog.snapshot(agent, loaded, (ServerWorld) world, "after-think");
             }
             processGoals(loaded, agent);
+            // Idle villagers keep looking around (held every tick so the head actually turns).
+            IdleGaze.tick(loaded, (ServerWorld) world, agent);
         }
     }
 
@@ -210,6 +225,36 @@ public class VillagerAgentManager {
      */
     private static void performCombatActions(VillagerEntity villager, ServerWorld world, VillagerAgentData agent) {
         VillagerAction current = agent.getCurrentAction();
+        // Archers (bow + arrows) look further and also take on monsters that are only safe to fight at range.
+        boolean archer = ArcherCombat.canShoot(agent) && CombatAction.mayAttack(villager, agent);
+        LivingEntity threat = archer ? ArcherCombat.findTarget(villager, world) : CombatAction.findNearestThreat(villager, world);
+        boolean reacting = current != null && (current.getActionType() == VillagerAction.ActionType.ATTACK
+                || current.getActionType() == VillagerAction.ActionType.FLEE
+                || current.getActionType() == VillagerAction.ActionType.RALLY);
+        // Night curfew: only the villager actually being chased (or attacked) starts a fight. Others keep
+        // sleeping/heading to bed and join only when that villager's alarm reaches them.
+        if (threat != null && !reacting && SleepSkill.curfew(world.getDayTime())
+                && !CombatAction.isPursuer(threat, villager)) threat = null;
+        if (threat != null) {
+            agent.brain().lastThreatSeenTick = world.getGameTime();
+            VillageMarkets.combatBoard(villager).respond(villager, agent, threat);
+            // Switch away from a hidden/invalid target when another threat is actually visible.
+            Entity oldTarget = reacting && current.getTargetEntityId() != null
+                    ? world.getEntity(current.getTargetEntityId()) : null;
+            if (reacting && !threat.getUUID().equals(current.getTargetEntityId())
+                    && (!(oldTarget instanceof LivingEntity)
+                        || !(archer ? ArcherCombat.isValidTarget(villager, (LivingEntity) oldTarget)
+                                : CombatAction.isVisibleThreat(villager, (LivingEntity) oldTarget)))) {
+                rallyOrFlee(villager, world, agent, threat);
+                return;
+            }
+        } else if (reacting
+                && (agent.brain().lastThreatSeenTick < 0
+                    || world.getGameTime() - agent.brain().lastThreatSeenTick >= CombatAction.THREAT_MEMORY_TICKS)
+                && !VillageMarkets.combatBoard(villager).hasActiveRally(villager, current.getTargetEntityId())) {
+            disengageCombat(villager, agent);
+            return;
+        }
 
         // ── 1. Already in a combat action ──
         if (current != null && current.getActionType() == VillagerAction.ActionType.ATTACK) {
@@ -231,7 +276,6 @@ public class VillagerAgentManager {
         // Threats and village alarms may interrupt ordinary work.
 
         // ── 3. Idle — scan for threats ──
-            LivingEntity threat = CombatAction.findNearestThreat(villager, world);
         if (threat != null) {
             // Never fight alone: withdraw and wait for a physically assembled group.
             rallyOrFlee(villager, world, agent, threat);
@@ -243,14 +287,15 @@ public class VillagerAgentManager {
         if (!CombatAction.maySupport(villager, agent)) return;
 
         // ── 4. No direct threat — listen for a rally shout and come help ──
-        VillageSignalBoard board = VillageSignalBoard.get();
+        VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         VillageSignalBoard.RallyCall rally = board.nearestRally(villager);
-        if (rally != null) {
+        // A rally whose responders already bring enough strength does not pull in the rest of the village.
+        if (rally != null && board.needsHelp(rally, villager)) {
             Entity rallyThreat = world.getEntity(rally.threatUuid);
             if (rallyThreat instanceof LivingEntity && rallyThreat.isAlive()) {
                 LivingEntity target = (LivingEntity) rallyThreat;
                 board.respond(villager, agent, target);
-                if (board.shouldCharge(target) && CombatAction.mayAttack(villager, agent)) {
+                if ((board.shouldCharge(target) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
                     startCombatAction(villager, agent, target);
                 } else if (!CombatAction.mayAttack(villager, agent)) {
                     // Wounded/unarmed listeners must not approach the hostile rally point.
@@ -282,12 +327,12 @@ public class VillagerAgentManager {
             else disengageCombat(villager, agent);
             return;
         }
-        VillageSignalBoard board = VillageSignalBoard.get();
+        VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         board.respond(villager, agent, target);
         if (!CombatAction.mayAttack(villager, agent)) {
             startFleeAction(villager, agent, target); return;
         }
-        if (board.shouldCharge(target)) {
+        if (board.shouldCharge(target) || ArcherCombat.canShoot(agent)) {
             startCombatAction(villager, agent, target); return;
         }
         if (villager.isSleeping()) villager.stopSleeping();
@@ -337,9 +382,10 @@ public class VillagerAgentManager {
      */
     private static void rallyOrFlee(VillagerEntity villager, ServerWorld world,
                                     VillagerAgentData agent, LivingEntity threat) {
-        VillageSignalBoard board = VillageSignalBoard.get();
+        VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         board.respond(villager, agent, threat);
-        if (board.shouldCharge(threat) && CombatAction.mayAttack(villager, agent)) {
+        // Archers do not wait for a group: they keep their distance and shoot (ArcherCombat).
+        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
             startCombatAction(villager, agent, threat);
         } else {
             startFleeAction(villager, agent, threat);
@@ -388,11 +434,11 @@ public class VillagerAgentManager {
             disengageCombat(villager, agent);
             return;
         }
-        VillageSignalBoard board = VillageSignalBoard.get();
+        VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         board.respond(villager, agent, threat); // keep the alarm alive while we kite
 
-        if (board.shouldCharge(threat) && CombatAction.mayAttack(villager, agent)) {
-            // Enough firepower AND this villager can fight — turn and mob the threat together.
+        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
+            // Enough firepower AND this villager can fight — turn and mob the threat together (archers shoot).
             agent.setCurrentAction(null);
             startCombatAction(villager, agent, threat);
             return;
@@ -456,12 +502,21 @@ public class VillagerAgentManager {
         if (!CombatAction.mayAttack(villager, agent)) {
             BrainLog.diagnostic(agent, "combat-retreat", "reason=eligibility health=" + villager.getHealth()
                     + " fatigue=" + agent.getFatigue() + " night=" + SleepSkill.isNightTime(world.getDayTime()));
-            VillageSignalBoard.get().respond(villager, agent, target);
+            VillageMarkets.combatBoard(villager).respond(villager, agent, target);
             startFleeAction(villager, agent, target);
             return;
         }
-        VillageSignalBoard.get().respond(villager, agent, target);
-        if (!VillageSignalBoard.get().shouldCharge(target)) {
+        VillageMarkets.combatBoard(villager).respond(villager, agent, target);
+        // Ranged battle state: keep distance and shoot while arrows last; melee below once they run out.
+        if (ArcherCombat.canShoot(agent)) {
+            if (distSq > CombatAction.CHASE_MAX_DIST * CombatAction.CHASE_MAX_DIST) {
+                disengageCombat(villager, agent);
+                return;
+            }
+            action.setPhase(VillagerAction.ActionPhase.ACTING);
+            if (ArcherCombat.tick(villager, world, agent, target, COMBAT_TICK_INTERVAL)) return;
+        }
+        if (!VillageMarkets.combatBoard(villager).shouldCharge(target)) {
             BrainLog.diagnostic(agent, "combat-retreat", "reason=group_not_ready threat=" + target.getUUID());
             startFleeAction(villager, agent, target);
             return;
@@ -505,6 +560,9 @@ public class VillagerAgentManager {
      * (e.g. equip hoe for farming, empty hand for talking).
      */
     private static void disengageCombat(VillagerEntity villager, VillagerAgentData agent) {
+        villager.getNavigation().stop();
+        ArcherCombat.forget(villager.getUUID());
+        agent.brain().lastThreatSeenTick = -1;
         agent.setCurrentAction(null);
         agent.setCurrentActivity("idle");
         agent.resumeSuspendedGoals(); // threat gone — resume the paused plan
@@ -691,8 +749,14 @@ public class VillagerAgentManager {
             // Activity system's scheduledActivity translator removed (was fed by the daily
             // schedule planner, now gone); sleep healing + wake-at-dawn remain in tickSleepHealing.
 
+            // Full first/last names, unique within the village.
+            VillagerNames.ensureUnique(sw, villager, agent);
+
             // Needs system — hunger decay, eating, fatigue
             VillagerNeedsSystem.tick(sw, agent);
+
+            // Villagers with more than two days of food pair up and have children.
+            VillagerBreeding.maintain(sw, villager, agent);
 
             // Capability decay + vanilla trade-level sync — once per in-game day (persisted, so it
             // never double-decays across a world reload).
@@ -702,6 +766,26 @@ public class VillagerAgentManager {
                 agent.getCapabilityPool().decayTo(today);
                 agent.syncVanillaTradeLevel(villager);
                 agent.refreshUnlockedRecipes(); // decay may drop levels → re-lock recipes
+
+                // Dawn reflection: trigger a self-thought so the villager plans its day.
+                // Uses the unified JSON format — same parsing/validation as all other LLM calls.
+                if (ModConfig.ENABLE_DAILY_SCHEDULE.get()) {
+                    final ServerWorld dawnWorld = sw;
+                    requestThought(agent,
+                            "It is dawn — a new day begins. Think about what you want to accomplish today. "
+                            + "You should set 1-3 goals for the day based on your profession, needs, and memories. "
+                            + "One of them may be something to do with a friend later today (a meal, a walk, a chat).",
+                            parsed -> {
+                        dawnWorld.getServer().execute(() -> {
+                            processThoughtResult(agent, parsed, dawnWorld, "dawn_reflection");
+                            String thought = parsed.thought.isEmpty() ? parsed.reply : parsed.thought;
+                            if (!thought.isEmpty()) {
+                                agent.addMemory("Dawn thought: " + thought);
+                                LOGGER.info("{} dawn reflection: {}", agent.getName(), thought);
+                            }
+                        });
+                    });
+                }
             }
         }
 
@@ -751,11 +835,25 @@ public class VillagerAgentManager {
             }
             case BLOCK_CHANGED:
             case ITEM_DROPPED:
-            default:
                 // v1 framework only: block changes are already handled by WorldStructureIndex
                 // invalidation, item drops by ItemAttractionSystem pickup. Consumed for
                 // observability; goal injection for these types follows the skill that owns them.
                 break;
+            case FARMLAND_DESTROYED: {
+                // Remember the destroyed farmland position so FarmSkill can prioritize re-tilling.
+                // Only farmers (FARMING >= 1) care about this event.
+                if (agent.getCapabilityPool().levelOf(
+                        com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId.FARMING) >= 1) {
+                    agent.brain().damagedFarmland.add(e.pos.immutable());
+                    // Cap the set to prevent unbounded growth from mass destruction
+                    if (agent.brain().damagedFarmland.size() > 64) {
+                        Iterator<net.minecraft.util.math.BlockPos> it = agent.brain().damagedFarmland.iterator();
+                        it.next(); it.remove();
+                    }
+                    BrainLog.diagnostic(agent, "farmland-destroyed-memory", "pos=" + e.pos);
+                }
+                break;
+            }
         }
     }
 
@@ -820,48 +918,42 @@ public class VillagerAgentManager {
             agent.setLastThoughtTick(gameTime);
 
             final VillagerEntity finalVillager = villager;
-            requestThought(agent, rawThought -> {
+            requestThought(agent, null, parsed -> {
                 // Marshal ALL game-state / memory touches back onto the server thread.
-                // This callback runs on the LLM worker pool, and memories / player messages
-                // are not thread-safe off the main thread.
                 serverWorld.getServer().execute(() -> {
-                    // The LLM may append a GOAL: directive. Strip it from what players see
-                    // and turn it into an actual goal with the importance it assigned.
-                    String displayed = rawThought;
-                    List<AgentGoal> directives = parseGoalDirectives(rawThought);
-                    if (!directives.isEmpty()) {
-                        displayed = stripGoalLines(rawThought);
-                        for (AgentGoal g : directives) {
-                            if (agent.getGoals().size() < MAX_GOALS) {
-                                agent.getGoals().add(g);
-                                agent.addMemory("New goal from thought: " + g.getDescription()
-                                        + " (importance " + g.getImportance() + ")");
-                                BrainLog.goalAdded(agent, g, "thought_goal_directive");
-                            } else {
-                                BrainLog.goalSkipped(agent, g, "thought_goal_directive");
+                    // Enqueue validated goals from the unified JSON response.
+                    processThoughtResult(agent, parsed, serverWorld, "thought");
+
+                    // Broadcast thought to nearby players.
+                    String displayed = parsed.thought.isEmpty() ? parsed.reply : parsed.thought;
+                    if (!displayed.isEmpty()) {
+                        StringTextComponent msg = new StringTextComponent(
+                                "§7[" + agent.getName() + " thinks] §o" + displayed);
+                        for (ServerPlayerEntity player : serverWorld.getServer().getPlayerList().getPlayers()) {
+                            if (player.distanceToSqr(finalVillager) <= THOUGHT_PLAYER_RANGE_SQ) {
+                                player.sendMessage(msg, Util.NIL_UUID);
                             }
                         }
+                        agent.addMemory("I thought: " + displayed);
+                        LOGGER.debug("{} emitted thought: {}", agent.getName(), displayed);
                     }
 
-                    // Broadcast to nearby players (cleaned thought only)
-                    StringTextComponent msg = new StringTextComponent(
-                            "§7[" + agent.getName() + " thinks] §o" + displayed);
-                    for (ServerPlayerEntity player : serverWorld.getServer().getPlayerList().getPlayers()) {
-                        if (player.distanceToSqr(finalVillager) <= THOUGHT_PLAYER_RANGE_SQ) {
-                            player.sendMessage(msg, Util.NIL_UUID);
-                        }
-                    }
-
-                    // Store as a memory so it influences future behaviour
-                    agent.addMemory("I thought: " + displayed);
-                    LOGGER.debug("{} emitted thought: {}", agent.getName(), displayed);
-
-                    // Each thinking may deepen commitment to a random subset of goals.
                     boostSomeGoals(agent);
                 });
             });
         }
     }
+
+    /**
+     * Nudges self-directed thoughts toward village social life. The invite vocabulary itself is in
+     * {@link LlmGoalCatalog#promptDocs()}; {@code LlmGoalIntake} limits how many invitations a villager runs.
+     */
+    private static final String SOCIAL_PLANNING_HINT =
+            "You live among neighbours. Now and then (not every time) you may plan something with a villager you know: "
+            + "\"invite\" a friend to do something together (dinner around 18:00, lunch at noon, an evening stroll), or "
+            + "\"ask\" someone to do something for you that suits their trade (a butcher to cook, a smith to craft). Give it "
+            + "a \"title\" and a start (\"at\"). You may also \"gift\" a spare item to a friend. Prefer friends "
+            + "(higher friendship); do not start a new one while you already have a plan with someone.\n";
 
     /**
      * Core inner-thought generation API. Builds a personality/mood/context-aware prompt and
@@ -876,38 +968,103 @@ public class VillagerAgentManager {
      * @param agent     the villager whose thoughts to generate
      * @param onThought callback receiving the trimmed thought text (empty responses are ignored)
      */
-    public static void requestThought(VillagerAgentData agent, Consumer<String> onThought) {
+    /**
+     * Core thought generation API. Builds a personality/mood/context-aware prompt, asks the
+     * LLM for a JSON response (unified format), and delivers the parsed result asynchronously.
+     *
+     * <p>The callback receives a {@link LLMResponseParser.ParsedResponse} containing the
+     * thought text, any goals, and any memories — all in the same format as chat responses.
+     *
+     * @param agent    the villager whose thoughts to generate
+     * @param context  optional extra context injected into the user prompt (e.g. "It is dawn,
+     *                 plan your day" for daily reflection). May be null.
+     * @param onResult callback receiving the fully parsed response
+     */
+    public static void requestThought(VillagerAgentData agent, String context,
+                                      Consumer<LLMResponseParser.ParsedResponse> onResult) {
         String env  = agent.getEnvironmentSummary();
-        String recentMem = agent.getMemories().isEmpty() ? "nothing in particular"
-                : agent.getMemories().get(agent.getMemories().size() - 1);
         String activity = agent.getCurrentActivity() != null ? agent.getCurrentActivity() : "idle";
         String needsMood = VillagerNeedsSystem.buildNeedsDescription(agent);
 
-        String sysPrompt = "You are a Minecraft villager. Write a single short internal thought "
-                + "(1 sentence, first person) that reflects what you are feeling or thinking "
-                + "right now. Be specific, in-character, and vivid. No quotation marks, no labels.\n"
-                + "If you decide you want to pursue a NEW goal right now, append a separate line "
-                + "starting with GOAL: in the format: GOAL: <type>|<description>|<importance 1-10> "
-                + "where <type> is one of gather, craft, trade, socialize, build, goto, and <importance> "
-                + "is how strongly you want it (1 = passing fancy, 10 = burning need). Only add a "
-                + "GOAL line if you genuinely want something new; otherwise just write the thought.";
+        // Recent memories (last 5)
+        List<String> memories = agent.getMemories();
+        StringBuilder memBlock = new StringBuilder();
+        int start = Math.max(0, memories.size() - 5);
+        for (int i = start; i < memories.size(); i++) {
+            memBlock.append("- ").append(PromptTemplates.scrubDirectives(memories.get(i))).append("\n");
+        }
+
+        // Who this villager can name in goals, and the clock (for timed goals)
+        VillagerEntity selfEntity = findVillagerEntity(agent.getVillagerId());
+        ServerWorld selfWorld = selfEntity != null ? (ServerWorld) selfEntity.level : null;
+        String known = KnownVillagers.promptBlock(agent, selfEntity, selfWorld);
+        String clock = selfWorld != null ? GameClock.format(selfWorld.getDayTime()) : null;
+
+        // Current goals
+        StringBuilder goalBlock = new StringBuilder();
+        for (AgentGoal g : agent.getGoals()) {
+            goalBlock.append("- [").append(g.getGoalType()).append("] ")
+                    .append(PromptTemplates.scrubDirectives(GoalText.label(g, agent.getVillagerId()))).append("\n");
+        }
+
+        String sysPrompt = "You are " + agent.getName() + ", a " + agent.getProfession()
+                + " in a Minecraft village. Personality: " + agent.getPersonality() + ".\n"
+                + "Think about your current situation and decide if you want to pursue any new goals.\n"
+                + SOCIAL_PLANNING_HINT
+                + (LLMService.jsonOutputSupported()
+                    ? "The \"thought\" field is your internal monologue (1 sentence, first person, vivid, in character).\n"
+                      + "The \"reply\" field should be null (you are not talking to anyone).\n"
+                    : "Your text is your internal monologue (1 sentence, first person, vivid, in character); "
+                      + "you are not talking to anyone.\n")
+                + PromptTemplates.responseFormatInstruction();
+
         String userPrompt = "Name: " + agent.getName()
                 + "\nProfession: " + agent.getProfession()
-                + "\nPersonality: " + agent.getPersonality()
                 + "\nMood: " + agent.getMood().name().toLowerCase()
                 + (needsMood.isEmpty() ? "" : " (" + needsMood + ")")
                 + "\nCurrent activity: " + activity
+                + (clock != null ? "\nCurrent time: " + clock : "")
+                + (known.isEmpty() ? "" : "\n" + known)
                 + (env != null ? "\nEnvironment: " + env : "")
-                + "\nMost recent memory: " + recentMem
-                + "\nWrite your thought:";
+                + "\nRecent memories:\n" + (memBlock.length() > 0 ? memBlock : "- nothing in particular\n")
+                + "Current goals:\n" + (goalBlock.length() > 0 ? goalBlock : "- (none)\n")
+                + (context != null ? "\n" + context : "");
 
-        LLMService.queryLLM(sysPrompt, userPrompt).thenAccept(thought -> {
-            if (thought == null || thought.trim().isEmpty() || LLMService.isFailure(thought)) return;
-            onThought.accept(thought.trim());
+        LLMService.queryLLMJson(sysPrompt, userPrompt).thenAccept(raw -> {
+            if (raw == null || raw.trim().isEmpty() || LLMService.isFailure(raw)) return;
+            LLMResponseParser.ParsedResponse parsed = LLMResponseParser.parse(raw.trim(), agent, 0);
+            onResult.accept(parsed);
         }).exceptionally(e -> {
             LOGGER.warn("Thought LLM call failed for {}: {}", agent.getName(), e.getMessage());
             return null;
         });
+    }
+
+    /** Legacy overload: no extra context, callback receives raw thought string. */
+    public static void requestThought(VillagerAgentData agent, Consumer<String> onThought) {
+        requestThought(agent, null, parsed -> {
+            String thought = parsed.thought.isEmpty() ? parsed.reply : parsed.thought;
+            if (!thought.isEmpty()) onThought.accept(thought);
+        });
+    }
+
+    /**
+     * Shared helper: enqueue validated goals and persist agendas from any thought/dawn result.
+     * Called on the server thread after an LLM thought response is parsed.
+     */
+    private static void processThoughtResult(VillagerAgentData agent,
+                                             LLMResponseParser.ParsedResponse parsed,
+                                             ServerWorld world, String source) {
+        if (!parsed.goals.isEmpty()) {
+            VillagerEntity ve = findVillagerEntity(world, agent.getVillagerId());
+            LlmGoalIntake.enqueue(agent, parsed.goals, ve, world, source);
+        }
+        if (!parsed.agendas.isEmpty()) {
+            for (LongTermAgenda a : parsed.agendas) {
+                agent.getAgendas().add(a);
+                agent.addMemory("Long-term commitment from " + source + ": " + a.getTitle());
+            }
+        }
     }
 
     // ── Player proximity greeting ─────────────────────────────────────────────
@@ -990,7 +1147,7 @@ public class VillagerAgentManager {
                         + "\nA player named " + pName + " just walked up to you. Greet them:";
 
                 final VillagerEntity finalVillager = villager;
-                LLMGuard.query(agent.getVillagerId(), gameTime, sysPrompt, userPrompt).thenAccept(greeting -> {
+                LLMGuard.queryText(agent.getVillagerId(), gameTime, sysPrompt, userPrompt).thenAccept(greeting -> {
                     DecisionJournal.record(agent.getVillagerId(), DecisionJournal.Kind.GREETING,
                             gameTime, userPrompt, greeting, DecisionJournal.outcome(greeting));
                     if (greeting == null || greeting.trim().isEmpty() || LLMService.isFailure(greeting)) return;
@@ -1064,6 +1221,20 @@ public class VillagerAgentManager {
         return null;
     }
 
+    /**
+     * Public convenience: find a villager entity across all loaded server worlds by UUID.
+     * Returns null if the entity is not loaded in any dimension.
+     */
+    public static VillagerEntity findVillagerEntity(UUID villagerId) {
+        net.minecraft.server.MinecraftServer server = net.minecraftforge.fml.server.ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return null;
+        for (ServerWorld sw : server.getAllLevels()) {
+            VillagerEntity ve = findVillagerEntity(sw, villagerId);
+            if (ve != null) return ve;
+        }
+        return null;
+    }
+
     // ── Goal lifecycle tuning ──
     /** Hard cap on simultaneous goals — defends against unbounded growth. */
     private static final int MAX_GOALS = 10;
@@ -1074,12 +1245,12 @@ public class VillagerAgentManager {
     /** Probability that a thought also boosts a random subset of goals' importance. */
     private static final double GOAL_BOOST_CHANCE = 0.5;
     private static final Set<String> VALID_GOAL_TYPES = new HashSet<>(Arrays.asList(
-            "craft", "trade", "socialize", "build", "move", "converse", "goto"));
+            "craft", "trade", "socialize", "move", "converse", "goto"));
 
     // ── Goal-execution tuning (shared with the ai.behavior skills) ──
     /** Squared arrival threshold for goal-driven movement (within 4 blocks). */
     public static final double GOAL_ARRIVE_SQ = 16.0;
-    /** Ticks before a goal-driven walk gives up (~10 s). */
+    /** Stationary ticks before a goal-driven walk gives up (~10 s); movement resets this clock. */
     public static final int GOAL_STUCK_TIMEOUT = 200;
     /** Ticks a villager must remain at the workstation before a craft completes (~10 s). */
     public static final int CRAFT_WORK_TICKS = 200;
@@ -1099,7 +1270,9 @@ public class VillagerAgentManager {
      */
     private static void processGoals(VillagerEntity villager, VillagerAgentData agent) {
         ServerWorld world = (ServerWorld) villager.level;
+        agent.grantHobbyTools();
         agent.brain().acquisitions.maintain(agent, villager, world);
+        OwnRequests.maintain(agent, villager, world);
         long now = world.getGameTime();
         VillagerAction action = agent.getCurrentAction();
         // Reactive combat and explicit construction own the body until they yield it.
@@ -1128,8 +1301,9 @@ public class VillagerAgentManager {
             // task are reported below, never confused with an unavailable handler.
             List<AgentGoal> runnable = new ArrayList<>();
             for (AgentGoal g : new ArrayList<>(goals)) {
-                // Meetings only enter at a natural root boundary, never displace ongoing work.
-                if (current != null && g != current && "meet_trade".equals(g.getGoalType())) continue;
+                // Booked meetings enter when the running task ends or reaches a yield point, never mid-task.
+                if (g != current && "meet_trade".equals(g.getGoalType())
+                        && GoalCommitment.committed(agent, current, now)) continue;
                 if (BehaviorExecutor.findHandler(agent, g, villager, world) != null) {
                     runnable.add(g);
                 } else if (g != current && !g.isOnCooldown(now)) {
@@ -1143,6 +1317,8 @@ public class VillagerAgentManager {
                 }
             }
             AgentGoal candidate = GoalScheduler.pickNextGoal(agent, runnable, now);
+            // The running task is committed until it ends or reaches a yield point between work units.
+            boolean taskCommitted = GoalCommitment.committed(agent, current, now);
             if (candidate == null && current == null && (agent.brain().lastNoCandidateTick == Long.MIN_VALUE
                     || now - agent.brain().lastNoCandidateTick >= 100)) {
                 agent.brain().lastNoCandidateTick = now;
@@ -1160,22 +1336,31 @@ public class VillagerAgentManager {
                         + " socialPartner=" + agent.brain().socialPartner
                         + " positiveButUnrunnable=" + rejected);
             }
-            boolean boundary = GoalScheduler.canYieldBetweenActions(current)
+            // Ordinary switches happen only at a yield point (between two finished work units); walking to a
+            // goal never ends in a switch. Wandering stays freely interruptible via shouldPreempt.
+            boolean boundary = !taskCommitted && current != null
                     && !GoalScheduler.isNonUrgentRest(agent, candidate)
-                    && agent.getCurrentAction() == null && !villager.isSleeping()
-                    && now - agent.brain().goalStartedTick >= 200;
+                    && !villager.isSleeping()
+                    && now - agent.brain().goalSelectedTick >= 200;
             if (candidate != null && candidate != current
                     && (current == null || GoalScheduler.shouldPreempt(agent, current, candidate) || boundary)) {
                 AgentGoal previous = current;
                 if (previous != null) {
+                    BrainLog.diagnostic(agent, "goal-yield", "from=" + previous.getGoalType() + " to=" + candidate.getGoalType()
+                            + " why=" + (taskCommitted ? "preempt" : GoalCommitment.atYieldPoint(agent, now) ? "yield_point" : "idle_or_boundary")
+                            + " workUnits=" + agent.brain().workUnitsDone);
+                    recordSession(agent, previous.getGoalType(), now);
                     ActionLifecycle.cancel(agent, villager, world);
                     previous.setCooldownUntilTick(now + Math.max(100, previous.getMinimumExitCooldownTicks()));
                 }
                 current = candidate;
                 current.setSuspended(false);
+                current.markStarted(); // an appointment's start-by deadline stops applying once it runs
                 agent.setRunningGoal(current);
                 agent.setCurrentActivity(current.getGoalType());
                 agent.brain().goalStartedTick = now;
+                agent.brain().executionWatchdogTick = now;
+                GoalCommitment.goalSelected(agent, now);
                 if ("wander".equals(current.getGoalType())) {
                     StringBuilder reasons = new StringBuilder();
                     for (AgentGoal g : goals) reasons.append(g.getGoalType()).append("{score=")
@@ -1208,7 +1393,12 @@ public class VillagerAgentManager {
                     agent.brain().observedWalk = moving;
                     agent.brain().walkStartedTick = now;
                 }
-                if (!villager.isSleeping() && now - agent.brain().goalStartedTick >= 2400) {
+                boolean walking = moving != null && (moving.getActionType() == VillagerAction.ActionType.MOVE
+                        || moving.getPhase() == VillagerAction.ActionPhase.WALKING);
+                // Walking has its own stationary timeout. Do not spend the parent's work budget in transit.
+                if (walking) agent.brain().executionWatchdogTick = now;
+                if (!villager.isSleeping() && !walking
+                        && now - Math.max(agent.brain().goalStartedTick, agent.brain().executionWatchdogTick) >= 2400) {
                     current.setLastFailure(FailureReason.UNKNOWN.with("execution timeout"));
                     result = SkillResult.FAIL;
                 }
@@ -1238,11 +1428,20 @@ public class VillagerAgentManager {
                 agent.brain().retiredRoutines.put(current.getGoalType(), now + GoalExitPolicy.RETIRED_ROUTINE_DELAY);
             }
         }
-        if (result == SkillResult.SUCCESS) {
-            agent.brain().lastFinishedType = current.getGoalType();
-            agent.brain().lastFinishedTick = now;
-        }
+        if (result == SkillResult.SUCCESS) recordSession(agent, current.getGoalType(), now);
         resumeAllGoals(agent, goals);
+    }
+
+    /**
+     * Recency bookkeeping for the "rest after a long session" utility factor: when this goal type last ran and for
+     * how long. Measured from selection ({@code goalSelectedTick}); {@code goalStartedTick} is a watchdog clock
+     * that skills reset while they work, so it cannot measure a session.
+     */
+    private static void recordSession(VillagerAgentData agent, String type, long now) {
+        int duration = (int) Math.max(0, now - agent.brain().goalSelectedTick);
+        agent.brain().lastFinishedTicks.put(type, now);
+        if (duration > 0) agent.brain().lastSessionDurations.put(type, duration);
+        BrainLog.diagnostic(agent, "session-recorded", "type=" + type + " ticks=" + duration);
     }
 
     /** Unsuspend every suspended goal, logging each transition. Called when a running goal finishes. */
@@ -1269,8 +1468,15 @@ public class VillagerAgentManager {
      * Clears any non-goal action, walks to {@code target}, and completes the goal on arrival
      * (or after a stuck timeout).
      */
+    /** Drive a move goal at the default walk speed (0.5). */
     public static SkillResult driveMoveGoal(VillagerEntity villager, VillagerAgentData agent,
                                      AgentGoal goal, BlockPos target, String arriveMemory) {
+        return driveMoveGoal(villager, agent, goal, target, arriveMemory, VillagerNavigationSupport.WALK_SPEED);
+    }
+
+    /** Drive a move goal at a custom speed (e.g. 0.7 for brisk walking, 0.5 for normal). */
+    public static SkillResult driveMoveGoal(VillagerEntity villager, VillagerAgentData agent,
+                                     AgentGoal goal, BlockPos target, String arriveMemory, double speed) {
         if (target == null) {
             agent.addMemory(arriveMemory + " (no target)");
             goal.setLastFailure(FailureReason.UNREACHABLE.with((String) null));
@@ -1288,8 +1494,9 @@ public class VillagerAgentManager {
                 villager.getNavigation().stop();
                 return SkillResult.SUCCESS;
             }
-            cur.incrementStuckTicks();
-            if (cur.getStuckTicks() > GOAL_STUCK_TIMEOUT) {
+            long stationary = cur.movementProgress.stationaryTicks(villager.level.getGameTime(),
+                    villager.getX(), villager.getY(), villager.getZ());
+            if (stationary > GOAL_STUCK_TIMEOUT) {
                 BrainLog.diagnostic(agent, "move-stuck", "goal=" + goal.getGoalType()
                         + " from=" + villager.blockPosition() + " target=" + target
                         + " navDone=" + villager.getNavigation().isDone());
@@ -1299,8 +1506,10 @@ public class VillagerAgentManager {
                 villager.getNavigation().stop();
                 return SkillResult.FAIL;
             }
-            if (villager.getNavigation().isDone() || cur.getStuckTicks() == 80) {
-                boolean started = villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
+            // Ordinary re-planning is owned by VillagerNavigationSupport (early/off-thread). Here only a
+            // finished path or a long stall restarts the walk.
+            if (villager.getNavigation().isDone() || stationary == ModConfig.PATH_REPATH_INTERVAL.get()) {
+                boolean started = startGoalPath(villager, goal, target, speed);
                 if (!started) {
                     BrainLog.diagnostic(agent, "move-no-path", "goal=" + goal.getGoalType()
                             + " from=" + villager.blockPosition() + " target=" + target);
@@ -1313,15 +1522,20 @@ public class VillagerAgentManager {
         }
 
         if (cur != null) return SkillResult.RUNNING; // some unrelated action in progress
+        if (villager.blockPosition().distSqr(target) <= goal.getArrivalDistanceSq()) {
+            goal.setCompleted(true); villager.getNavigation().stop();
+            return SkillResult.SUCCESS;
+        }
 
         VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE,
                 "Walking for " + goal.getGoalType() + " toward " + target.getX() + "," + target.getZ());
+        move.movementProgress.stationaryTicks(villager.level.getGameTime(), villager.getX(), villager.getY(), villager.getZ());
         move.setTargetBlockPos(target);
         move.setPhase(VillagerAction.ActionPhase.WALKING);
         move.setGoalDriven(true);
         move.setRestMove(goal.getArrivalDistanceSq() <= 4);
         agent.setCurrentAction(move);
-        boolean started = villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
+        boolean started = startGoalPath(villager, goal, target, speed);
         BrainLog.diagnostic(agent, "move-start", "goal=" + goal.getGoalType() + " from="
                 + villager.blockPosition() + " target=" + target + " pathStarted=" + started);
         if (!started) {
@@ -1330,6 +1544,15 @@ public class VillagerAgentManager {
             return SkillResult.FAIL;
         }
         return SkillResult.RUNNING;
+    }
+
+    private static boolean startGoalPath(VillagerEntity villager, AgentGoal goal, BlockPos target, double speed) {
+        if (goal.getArrivalDistanceSq() > 0.5)
+            return villager.getNavigation().moveTo(target.getX()+0.5,target.getY(),target.getZ()+0.5,speed);
+        net.minecraft.pathfinding.Path path=villager.getNavigation().createPath(target,0);
+        return path!=null && path.canReach() && path.getNodeCount()>0
+                && path.getNodePos(path.getNodeCount()-1).equals(target)
+                && villager.getNavigation().moveTo(path,speed);
     }
 
     /**

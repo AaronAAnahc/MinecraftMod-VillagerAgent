@@ -90,6 +90,8 @@ public final class SkillCraftCatalog {
     }
 
     private static void add(String prof, int level, String id, boolean enchantable, boolean masterOnly, boolean usesCustomRecipe) {
+        // Stored under the bare profession name that lookups use ("villageragent:miner" -> "miner").
+        prof = norm(prof);
         CapabilityId cap = CapabilityId.mainForProfession(prof);
         CATALOG.computeIfAbsent(prof, k -> new HashMap<>())
                 .computeIfAbsent(level, k -> new ArrayList<>())
@@ -106,6 +108,7 @@ public final class SkillCraftCatalog {
         // ───────────────────────── Weaponsmith ─────────────────────────
         add("weaponsmith", 1, "minecraft:iron_sword", false, false);
         add("weaponsmith", 1, "minecraft:iron_axe",   false, false);
+        add("weaponsmith", 1, "minecraft:furnace",    false, false);
         add("weaponsmith", 2, "minecraft:iron_sword", true,  false);
         add("weaponsmith", 3, "minecraft:iron_axe",   true,  false);
         add("weaponsmith", 4, "minecraft:diamond_sword", true, false);
@@ -113,10 +116,17 @@ public final class SkillCraftCatalog {
         add("weaponsmith", 5, "minecraft:bell",        false, true);
 
         // ───────────────────────── Toolsmith ─────────────────────────
-        add("toolsmith", 1, "minecraft:iron_shovel", false, false);
-        add("toolsmith", 1, "minecraft:iron_pickaxe", false, false);
-        add("toolsmith", 2, "minecraft:iron_axe",    false, false);
-        add("toolsmith", 2, "minecraft:iron_hoe",    false, false);
+        // The toolsmith makes every work tool from the start: stone (cobblestone from the miner) and iron.
+        add("toolsmith", 1, "minecraft:stone_axe",     false, false);
+        add("toolsmith", 1, "minecraft:stone_pickaxe", false, false);
+        add("toolsmith", 1, "minecraft:stone_shovel",  false, false);
+        add("toolsmith", 1, "minecraft:stone_hoe",     false, false);
+        add("toolsmith", 1, "minecraft:iron_axe",      false, false);
+        add("toolsmith", 1, "minecraft:iron_pickaxe",  false, false);
+        add("toolsmith", 1, "minecraft:iron_shovel",   false, false);
+        add("toolsmith", 1, "minecraft:iron_hoe",      false, false);
+        add("toolsmith", 1, "minecraft:shears",        false, false);
+        add("toolsmith", 1, "minecraft:furnace",       false, false);
         add("toolsmith", 3, "minecraft:diamond_axe",  true,  false);
         add("toolsmith", 4, "minecraft:diamond_shovel", true, false);
         add("toolsmith", 5, "minecraft:diamond_pickaxe", true, true);
@@ -125,6 +135,7 @@ public final class SkillCraftCatalog {
         // ───────────────────────── Armorer ─────────────────────────
         add("armorer", 1, "minecraft:iron_helmet",     false, false);
         add("armorer", 1, "minecraft:iron_chestplate", false, false);
+        add("armorer", 1, "minecraft:furnace",         false, false);
         add("armorer", 2, "minecraft:iron_leggings",   false, false);
         add("armorer", 2, "minecraft:iron_boots",      false, false);
         add("armorer", 3, "minecraft:diamond_helmet",  true,  false);
@@ -167,24 +178,35 @@ public final class SkillCraftCatalog {
         add("cleric", 5, "minecraft:ender_pearl", false, true, true);
 
         add("farmer", 1, "minecraft:bread",        false, false);
+        add("farmer", 1, "minecraft:bone_meal",    false, false);
         add("farmer", 2, "minecraft:pumpkin_pie",  false, false);
         add("farmer", 3, "minecraft:cake",         false, false);
 
         add("fisherman", 1, "minecraft:fishing_rod", true, false);
 
         // ─────────────── Universal "crafting" goods (any profession) ───────────────
-        addUniversal(1, "minecraft:wooden_sword");
-        addUniversal(1, "minecraft:wooden_pickaxe");
-        addUniversal(1, "minecraft:wooden_axe");
-        addUniversal(1, "minecraft:wooden_shovel");
-        addUniversal(1, "minecraft:wooden_hoe");
-        addUniversal(1, "minecraft:stick");
-        addUniversal(1, "minecraft:oak_planks");
+        // Crafting table and chest: everyone needs storage and a station to work at.
         addUniversal(1, "minecraft:crafting_table");
-        addUniversal(2, "minecraft:chest");
-        addUniversal(2, "minecraft:furnace");
-        addUniversal(2, "minecraft:torch");
-        addUniversal(2, "minecraft:bread");
+        addUniversal(1, "minecraft:chest");
+
+        // ─────────────── Lumberjack: wood products ───────────────
+        add("villageragent:lumberjack", 1, "minecraft:oak_planks",    false, false);
+        add("villageragent:lumberjack", 1, "minecraft:stick",         false, false);
+
+        // Per-profession self-service tools: each profession can only make the wooden/stone
+        // version of the tool they actually use. Iron+ stays with toolsmith/weaponsmith.
+        // Miner: pickaxes + torches (for mining underground)
+        add("villageragent:miner", 1, "minecraft:wooden_pickaxe", false, false);
+        add("villageragent:miner", 1, "minecraft:stone_pickaxe",  false, false);
+        add("villageragent:miner", 1, "minecraft:torch",          false, false);
+        // Miners keep a little bread for long trips (craft_targets.json).
+        add("villageragent:miner", 1, "minecraft:bread",          false, false);
+        // Lumberjack: axes (for chopping)
+        add("villageragent:lumberjack", 1, "minecraft:wooden_axe", false, false);
+        add("villageragent:lumberjack", 1, "minecraft:stone_axe",  false, false);
+        // Farmer: hoes (for tilling)
+        add("farmer", 1, "minecraft:wooden_hoe",  false, false);
+        add("farmer", 1, "minecraft:stone_hoe",   false, false);
 
         // Apply per-(profession, level) unlock overrides from the "unlocks" block of
         // config/villageragent/proficiency.json (additive over the built-in catalog).
@@ -236,11 +258,15 @@ public final class SkillCraftCatalog {
         }
     }
 
-    /** Normalize a profession string: lowercase, strip a leading "minecraft:" namespace. */
+    /**
+     * Normalize a profession string: lowercase, strip any namespace. Villager professions are stored bare
+     * ("miner", "farmer"), so entries declared as "villageragent:miner" must normalise the same way.
+     */
     private static String norm(String profession) {
         if (profession == null) return "";
         String p = profession.toLowerCase(Locale.ROOT);
-        if (p.startsWith("minecraft:")) p = p.substring("minecraft:".length());
+        int colon = p.indexOf(':');
+        if (colon >= 0) p = p.substring(colon + 1);
         return p;
     }
 
@@ -357,7 +383,11 @@ public final class SkillCraftCatalog {
     // ── Capability-gated access (the new model) ────────────────────────────────
 
     /** Whether the villager's capability pool unlocks this item (JSON skill table OR built-in). */
+    /** Every villager can make its own crafting table (and, through recipe dependencies, the planks for it). */
+    public static final String ALWAYS_CRAFTABLE = "minecraft:crafting_table";
+
     public static boolean isUnlockedFor(CapabilityPool pool, String profession, String itemId) {
+        if (ALWAYS_CRAFTABLE.equals(itemId)) return true;
         // Per-skill unlock table (craft_unlocks.json) — checked first, it is the authoritative gate.
         if (jsonUnlocksItem(pool, itemId)) return true;
 
@@ -412,6 +442,7 @@ public final class SkillCraftCatalog {
     /** Every item id (profession + universal + per-skill JSON) this pool currently unlocks. */
     public static List<String> getUnlockedIds(CapabilityPool pool, String profession) {
         Set<String> out = new LinkedHashSet<>();
+        out.add(ALWAYS_CRAFTABLE);
         Map<Integer, List<CraftableEntry>> byLevel = CATALOG.get(norm(profession));
         if (byLevel != null) {
             for (List<CraftableEntry> list : byLevel.values()) {

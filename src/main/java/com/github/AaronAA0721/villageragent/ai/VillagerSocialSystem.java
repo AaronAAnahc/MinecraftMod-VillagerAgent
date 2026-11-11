@@ -49,6 +49,7 @@ public class VillagerSocialSystem {
 
     private static boolean canSocialize(VillagerAgentData agent, long tick) {
         if (agent.isSocializing()) return false;
+        if (PlayerConversation.isHeld(agent.getVillagerId())) return false; // busy talking to a player
         if (agent.getCurrentAction() != null) return false;
         if (tick - agent.getLastSocialTick() < SOCIAL_COOLDOWN) return false;
         // Only if schedule is empty or says "socializing"
@@ -130,7 +131,7 @@ public class VillagerSocialSystem {
                 + agentB.getName() + "'s recent thoughts: " + memB + "\n"
                 + "Let their mood and relationship colour the conversation. Generate a 4-line conversation:";
 
-        LLMGuard.query(agentA.getVillagerId(), currentTick, sysPrompt, userPrompt)
+        LLMGuard.queryText(agentA.getVillagerId(), currentTick, sysPrompt, userPrompt)
                 .handle((response, error) -> {
                     world.getServer().execute(() -> {
                         if (!villagerA.isAlive() || !villagerB.isAlive() || villagerA.distanceToSqr(villagerB) > 36) {
@@ -198,6 +199,11 @@ public class VillagerSocialSystem {
             if (Math.random() < 0.30) {
                 propagateGossip(agentA, agentB, world);
             }
+
+            // ── Optional social follow-up ─────────────────────────────────────
+            // The initiator may turn the chat into a plan: invite, ask a favour, or give a gift.
+            // SocialFollowUps checks the conditions (plan limits, spare stock) before offering anything.
+            SocialFollowUps.consider(world, villagerA, agentA, villagerB, agentB);
         }
 
         agentA.setSocializing(false);

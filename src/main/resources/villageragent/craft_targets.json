@@ -1,0 +1,9 @@
+{
+  "_comment": "Routine 'craft goods' stock table. Per profession: item id -> how many to keep in stock, in preference order. The routine crafts only listed items the villager has unlocked, one craft batch per run, until the count is reached. Professions not listed (or with an empty object) have no craft routine. Requested items and missing profession tools are crafted by their own goals, not by this table. Farmers have no entry on purpose: they bake bread only to answer a village food request. Edit freely; loaded at startup from config/villageragent/craft_targets.json.",
+  "professions": {
+    "villageragent:miner": {
+      "minecraft:torch": 16,
+      "minecraft:bread": 4
+    }
+  }
+}

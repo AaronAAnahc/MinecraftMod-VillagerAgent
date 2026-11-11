@@ -24,9 +24,15 @@ public final class ResourceCatalog {
         public final Item tool;
         public final CapabilityId capability;
         public final Item output;
-        Source(ResourceProfession profession, Block block, Item tool, CapabilityId capability, Item output) {
+        /** Crops and logs are removed on harvest; ores are mined in place and the block stays. */
+        public final boolean consumesBlock;
+        /** Capability level required to extract this source; gates which ores a miner can yield by rank. */
+        public final int minLevel;
+        Source(ResourceProfession profession, Block block, Item tool, CapabilityId capability, Item output,
+               boolean consumesBlock, int minLevel) {
             this.profession = profession; this.block = block; this.tool = tool;
             this.capability = capability; this.output = output;
+            this.consumesBlock = consumesBlock; this.minLevel = Math.max(1, minLevel);
         }
         public boolean matches(BlockState state) {
             return state.getBlock() == block && (!(block instanceof CropsBlock) || ((CropsBlock) block).isMaxAge(state));
@@ -44,7 +50,7 @@ public final class ResourceCatalog {
             return ItemStack.EMPTY;
         }
         public boolean hasTool(VillagerAgentData agent) { return tool == Items.AIR || !availableTool(agent).isEmpty(); }
-        public boolean skilled(VillagerAgentData agent) { return agent.getCapabilityPool().levelOf(capability) >= 1; }
+        public boolean skilled(VillagerAgentData agent) { return agent.getCapabilityPool().levelOf(capability) >= minLevel; }
         public String methodId() { return capability.name().toLowerCase(Locale.ROOT); }
     }
     private static final Map<String, Source> SOURCES = new LinkedHashMap<>();
@@ -52,24 +58,25 @@ public final class ResourceCatalog {
         log(Items.OAK_LOG, Blocks.OAK_LOG); log(Items.SPRUCE_LOG, Blocks.SPRUCE_LOG);
         log(Items.BIRCH_LOG, Blocks.BIRCH_LOG); log(Items.JUNGLE_LOG, Blocks.JUNGLE_LOG);
         log(Items.ACACIA_LOG, Blocks.ACACIA_LOG); log(Items.DARK_OAK_LOG, Blocks.DARK_OAK_LOG);
-        ore(Items.COAL, Blocks.COAL_ORE, Items.WOODEN_PICKAXE);
-        ore(Items.IRON_ORE, Blocks.IRON_ORE, Items.STONE_PICKAXE);
-        ore(Items.GOLD_ORE, Blocks.GOLD_ORE, Items.IRON_PICKAXE);
-        ore(Items.DIAMOND, Blocks.DIAMOND_ORE, Items.IRON_PICKAXE);
-        ore(Items.REDSTONE, Blocks.REDSTONE_ORE, Items.IRON_PICKAXE);
-        ore(Items.LAPIS_LAZULI, Blocks.LAPIS_ORE, Items.STONE_PICKAXE);
-        ore(Items.COBBLESTONE, Blocks.STONE, Items.WOODEN_PICKAXE);
+        // Ore yield is gated by miner rank: common ores at low level, precious ores only at high level.
+        ore(Items.COBBLESTONE, Blocks.STONE, Items.WOODEN_PICKAXE, 1);
+        ore(Items.COAL, Blocks.COAL_ORE, Items.WOODEN_PICKAXE, 1);
+        ore(Items.IRON_ORE, Blocks.IRON_ORE, Items.STONE_PICKAXE, 2);
+        ore(Items.LAPIS_LAZULI, Blocks.LAPIS_ORE, Items.STONE_PICKAXE, 2);
+        ore(Items.GOLD_ORE, Blocks.GOLD_ORE, Items.IRON_PICKAXE, 3);
+        ore(Items.REDSTONE, Blocks.REDSTONE_ORE, Items.IRON_PICKAXE, 3);
+        ore(Items.DIAMOND, Blocks.DIAMOND_ORE, Items.IRON_PICKAXE, 4);
         crop(Items.WHEAT, Blocks.WHEAT); crop(Items.CARROT, Blocks.CARROTS);
         crop(Items.POTATO, Blocks.POTATOES); crop(Items.BEETROOT, Blocks.BEETROOTS);
     }
     private static void log(Item item, Block block) {
-        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.LUMBERJACK, block, Items.WOODEN_AXE, CapabilityId.WOODCUTTING, item));
+        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.LUMBERJACK, block, Items.WOODEN_AXE, CapabilityId.WOODCUTTING, item, true, 1));
     }
-    private static void ore(Item item, Block block, Item tool) {
-        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.MINER, block, tool, item == Items.COBBLESTONE ? CapabilityId.QUARRYING : CapabilityId.MINING, item));
+    private static void ore(Item item, Block block, Item tool, int minLevel) {
+        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.MINER, block, tool, item == Items.COBBLESTONE ? CapabilityId.QUARRYING : CapabilityId.MINING, item, false, minLevel));
     }
     private static void crop(Item item, Block block) {
-        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.NONE, block, Items.AIR, CapabilityId.FARMING, item));
+        SOURCES.put(item.getRegistryName().toString(), new Source(ResourceProfession.NONE, block, Items.AIR, CapabilityId.FARMING, item, true, 1));
     }
     public static Collection<Source> all() { return Collections.unmodifiableCollection(SOURCES.values()); }
     public static Source get(String item) { return SOURCES.get(item); }

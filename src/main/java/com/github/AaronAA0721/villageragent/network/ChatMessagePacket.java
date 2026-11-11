@@ -1,12 +1,10 @@
 package com.github.AaronAA0721.villageragent.network;
 
-import com.github.AaronAA0721.villageragent.ai.AgendaParser;
-import com.github.AaronAA0721.villageragent.ai.AgentGoal;
-import com.github.AaronAA0721.villageragent.ai.BrainLog;
+import com.github.AaronAA0721.villageragent.ai.TradeProposal;
+
+import com.github.AaronAA0721.villageragent.ai.ChatReplyProcessor;
 import com.github.AaronAA0721.villageragent.ai.LLMService;
 import com.github.AaronAA0721.villageragent.ai.LLMSetupReminder;
-import com.github.AaronAA0721.villageragent.ai.LongTermAgenda;
-import com.github.AaronAA0721.villageragent.ai.GoalParser;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.ai.VillagerVisionSystem;
@@ -75,6 +73,8 @@ public class ChatMessagePacket {
             }
 
             String playerName = player.getName().getString();
+            com.github.AaronAA0721.villageragent.ai.PlayerConversation.touch(packet.villagerId, player.getUUID(),
+                    player.level.getGameTime());
             LOGGER.info("Chat from " + playerName + " to " + agent.getName() + ": " + packet.message);
 
             // Resolve the live villager entity (may be null if it isn't loaded right now).
@@ -98,61 +98,70 @@ public class ChatMessagePacket {
             // Generate LLM response asynchronously (pass game tick for conversation memory)
             long gameTick = player.level.getGameTime();
             agent.generateChatResponse(playerName, packet.message, gameTick, villagerEntity, player.getUUID())
-                    .thenAccept(response -> {
-                // P0 fix (defense in depth): never broadcast a raw failure sentinel to the player.
-                if (LLMService.isFailure(response)) {
-                    ModNetworking.CHANNEL.send(
-                            PacketDistributor.PLAYER.with(() -> player),
-                            new VillagerResponsePacket(packet.villagerId, agent.getName(),
-                                    agent.getName() + " seems momentarily lost in thought."));
-                    return;
-                }
-
-                // Parse any hidden TODO: directives the LLM embedded into executable goals.
-                // Capped to MAX_GOALS so a chatty villager can't grow the agenda without bound.
-                List<AgentGoal> parsed = GoalParser.parse(response, agent);
-                if (!parsed.isEmpty()) {
-                    for (AgentGoal g : parsed) {
-                        if (agent.getGoals().size() < VillagerAgentManager.getMaxGoals()) {
-                            agent.getGoals().add(g);
-                            agent.addMemory("New goal from chat: " + g.getDescription()
-                                    + " (importance " + g.getImportance() + ")");
-                            BrainLog.goalAdded(agent, g, "chat_todo");
-                        } else {
-                            BrainLog.goalSkipped(agent, g, "chat_todo");
-                        }
-                    }
-                    LOGGER.info("{} parsed {} TODO directive(s) from chat into goals",
-                            agent.getName(), parsed.size());
-                }
-
-                // Parse any REMEMBER: directives the LLM embedded into long-term agendas
-                // (debts, deals, acquisitions, or free-form generic intentions).
-                List<LongTermAgenda> agendas = AgendaParser.parse(response, agent, gameTick);
-                if (!agendas.isEmpty()) {
-                    for (LongTermAgenda a : agendas) {
-                        agent.getAgendas().add(a);
-                        agent.addMemory("Long-term commitment recorded: " + a.getTitle());
-                    }
-                    LOGGER.info("{} parsed {} REMEMBER directive(s) into agendas",
-                            agent.getName(), agendas.size());
-                }
-
-                // The player only sees the spoken reply — TODO / REMEMBER lines stay hidden.
-                String visible = GoalParser.stripTodoLines(response);
-                visible = AgendaParser.stripRememberLines(visible);
-                VillagerResponsePacket responsePacket = new VillagerResponsePacket(
-                        packet.villagerId,
-                        agent.getName(),
-                        visible
-                );
-                ModNetworking.CHANNEL.send(
-                        PacketDistributor.PLAYER.with(() -> player),
-                        responsePacket
-                );
-            });
+                    // The LLM answers off-thread; everything that touches the world or the brain runs on the server thread.
+                    .thenAccept(response -> player.getServer().execute(() -> handleReply(packet, player, agent, response, gameTick)));
         });
         ctx.get().setPacketHandled(true);
     }
-}
 
+    /** Apply a chat reply: enqueue its goals and agendas, then show the spoken text. Server thread. */
+    private static void handleReply(ChatMessagePacket packet, ServerPlayerEntity player, VillagerAgentData agent,
+                                    String response, long gameTick) {
+        // P0 fix (defense in depth): never broadcast a raw failure sentinel to the player.
+        if (LLMService.isFailure(response)) {
+            ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                    new VillagerResponsePacket(packet.villagerId, agent.getName(),
+                            agent.getName() + " seems momentarily lost in thought."));
+            return;
+        }
+
+        // Parse, ground/validate/enqueue goals, record agendas and thought (shared with /va ask).
+        VillagerEntity ve = VillagerAgentManager.findVillagerEntity(agent.getVillagerId());
+        ServerWorld sw = ve != null ? (ServerWorld) ve.level : (ServerWorld) player.level;
+        ChatReplyProcessor.Result result = ChatReplyProcessor.process(agent, response, gameTick, ve, sw, "chat", true);
+
+        // The villager offered a trade: check it against both inventories and the price floor, then open the
+        // pre-filled trade panel for the player to accept or decline.
+        String reply = result.parsed.reply;
+        TradeProposal offer = null;
+        if (result.parsed.trade != null) {
+            if (ve == null || !ve.isAlive() || player.distanceToSqr(ve) > 64.0) {
+                reply = reply + " [No trade offered: you are too far away]";
+            } else {
+                // After a trade-check round the LLM saw the exact values: its price stands (only stock/space checked).
+                boolean priceDecided = agent.consumeReplyPriceDecided();
+                TradeProposal.Result made = TradeProposal.create(result.parsed.trade, agent, ve, player, sw.getGameTime(), priceDecided);
+                if (made.ok()) {
+                    offer = made.proposal;
+                    agent.addMemory("Offered " + player.getName().getString() + " a trade: " + offer.describe());
+                    LOGGER.info("{} offers {} a trade: {}", agent.getName(), player.getName().getString(), offer.describe());
+                } else if (made.tooCheap) {
+                    // The LLM agreed to a price below what this villager can accept (it does the sums loosely).
+                    // The villager corrects itself out loud, with a fair counter-offer when one exists, and the
+                    // correction goes into the conversation history so the next reply builds on it.
+                    offer = made.counter;
+                    reply = offer != null
+                            ? "Hmm, wait, let me count that up... that's too little for me. I can let you have "
+                              + offer.getsText() + " for " + offer.givesText() + " — here's my offer."
+                            : "Hmm, wait, let me count that up... that's too little for me: " + made.error + ".";
+                    agent.addConversation(agent.getName() + ": " + reply, gameTick);
+                    agent.addMemory("Corrected my price for " + player.getName().getString()
+                            + (offer != null ? ": countered with " + offer.describe() : ": " + made.error));
+                    LOGGER.info("{} trade offer to {} was too cheap ({}); counter: {}", agent.getName(),
+                            player.getName().getString(), made.error, offer == null ? "none" : offer.describe());
+                } else {
+                    reply = reply + " [No trade offered: " + made.error + "]";
+                    LOGGER.info("{} trade offer to {} rejected: {}", agent.getName(), player.getName().getString(), made.error);
+                }
+            }
+        }
+
+        ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                new VillagerResponsePacket(packet.villagerId, agent.getName(), reply));
+        if (offer != null) {
+            ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                    new TradeProposalPacket(packet.villagerId, offer.give1, offer.give2, offer.get1, offer.get2,
+                            TradeRequestPacket.collectInventorySnapshot(agent), TradeRequestPacket.collectArmorSnapshot(ve)));
+        }
+    }
+}

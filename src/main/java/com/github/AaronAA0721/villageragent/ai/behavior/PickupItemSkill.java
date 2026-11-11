@@ -88,7 +88,7 @@ public final class PickupItemSkill implements VillagerSkill {
         return SkillResult.RUNNING;
     }
     private static boolean valid(ItemEntity drop, Item item, VillagerEntity v) {
-        return drop != null && drop.isAlive() && !drop.getItem().isEmpty()
+        return drop != null && drop.isAlive() && !com.github.AaronAA0721.villageragent.ai.CraftDisplay.isDisplay(drop) && !drop.getItem().isEmpty()
                 && drop.getItem().getItem() == item && v.distanceToSqr(drop) <= 32 * 32
                 && (drop.getOwner() == null || drop.getOwner().equals(v.getUUID()));
     }

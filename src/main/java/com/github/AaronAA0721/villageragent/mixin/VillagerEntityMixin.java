@@ -46,6 +46,7 @@ public abstract class VillagerEntityMixin {
                 swim.tryStart(world, self, world.getGameTime());
             if (swim.getStatus() == net.minecraft.entity.ai.brain.task.Task.Status.RUNNING)
                 swim.tickOrStop(world, self, world.getGameTime());
+            com.github.AaronAA0721.villageragent.ai.BrainLog.swimming(agent, self, world);
             ci.cancel();
         }
     }

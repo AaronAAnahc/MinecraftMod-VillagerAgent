@@ -34,6 +34,75 @@ public final class BrainLog {
         return ModConfig.BRAIN_LOG_ENABLED != null && ModConfig.BRAIN_LOG_ENABLED.get();
     }
 
+    /** Bounded collision snapshot; does not request movement or change path evaluation. */
+    public static void movementObstacle(VillagerAgentData agent, VillagerEntity v, ServerWorld world) {
+        if (!on() || !v.horizontalCollision) return;
+        BrainRuntime b = agent.brain();
+        long now = world.getGameTime();
+        if (b.lastMovementDiagnosticTick != Long.MIN_VALUE && now - b.lastMovementDiagnosticTick < 20) return;
+        b.lastMovementDiagnosticTick = now;
+        net.minecraft.pathfinding.Path path = v.getNavigation().getPath();
+        net.minecraft.util.math.BlockPos next = path == null || path.isDone() ? null : path.getNodePos(path.getNextNodeIndex());
+        StringJoiner blocks = new StringJoiner(";", "[", "]");
+        net.minecraft.util.math.BlockPos feet = v.blockPosition();
+        // Bounded 3x3x3 neighborhood, including thin and vertically mounted trapdoors.
+        for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++) for (int z = -1; z <= 1; z++) {
+            net.minecraft.util.math.BlockPos pos = feet.offset(x, y, z);
+            if (!world.isLoaded(pos)) continue;
+            net.minecraft.block.BlockState state = world.getBlockState(pos);
+            net.minecraft.util.math.shapes.VoxelShape shape = state.getCollisionShape(world, pos);
+            if (!shape.isEmpty()) blocks.add(pos + "=" + state + " shape=" + shape.toAabbs());
+        }
+        diagnostic(agent, "[DEBUG-movement]", "tick=" + now + " dimension=" + world.dimension().location()
+                + " pos=" + v.position() + " velocity=" + v.getDeltaMovement()
+                + " water=" + v.isInWater() + " onGround=" + v.isOnGround()
+                + " horizontalCollision=" + v.horizontalCollision
+                + " headroom1=" + world.noCollision(v, v.getBoundingBox().move(0, 1, 0))
+                + " navDone=" + v.getNavigation().isDone() + " next=" + next
+                + " rise=" + (next == null ? "none" : next.getY() - v.getY())
+                + " target=" + (path == null ? "none" : path.getTarget())
+                + " reachable=" + (path != null && path.canReach())
+                + " action=" + agent.getCurrentAction() + " collisions=" + blocks);
+    }
+
+    /** Sample after SwimTask, before travel: velocity is not the result of this tick's jump. */
+    public static void swimming(VillagerAgentData agent, VillagerEntity v, ServerWorld world) {
+        BrainRuntime b = agent.brain();
+        if (!on()) {
+            b.lastSwimDiagnosticPosition = null;
+            b.lastSwimDiagnosticTick = Long.MIN_VALUE;
+            return;
+        }
+        boolean wet = v.isInWater();
+        if (!wet && b.lastSwimDiagnosticPosition == null) return;
+        long now = world.getGameTime();
+        if (wet && b.lastSwimDiagnosticTick != Long.MIN_VALUE
+                && now - b.lastSwimDiagnosticTick < 20) return;
+        net.minecraft.pathfinding.Path path = v.getNavigation().getPath();
+        net.minecraft.util.math.BlockPos next = path == null || path.isDone() ? null
+                : path.getNodePos(path.getNextNodeIndex());
+        net.minecraft.util.math.BlockPos feet = v.blockPosition();
+        net.minecraft.fluid.FluidState fluid = world.getFluidState(feet);
+        diagnostic(agent, "[DEBUG-swim]", "tick=" + now + " dimension=" + world.dimension().location()
+                + " phase=after-swim-before-travel water=" + wet + " pos=" + v.position()
+                + " sampleTicks=" + (b.lastSwimDiagnosticPosition == null ? 0 : now - b.lastSwimDiagnosticTick)
+                + " displacement=" + (b.lastSwimDiagnosticPosition == null ? "first" : v.position().subtract(b.lastSwimDiagnosticPosition))
+                + " velocity=" + v.getDeltaMovement()
+                + " waterDepth=" + v.getFluidHeight(net.minecraft.tags.FluidTags.WATER)
+                + " swim=" + b.swim.getStatus() + " onGround=" + v.isOnGround()
+                + " horizontalCollision=" + v.horizontalCollision
+                + " headroom1=" + world.noCollision(v, v.getBoundingBox().move(0, 1, 0))
+                + " feetBlock=" + world.getBlockState(feet) + " feetFluid=" + fluid
+                + " feetFlow=" + fluid.getFlow(world, feet)
+                + " navDone=" + v.getNavigation().isDone() + " next=" + next
+                + " rise=" + (next == null ? "none" : next.getY() - v.getY())
+                + " target=" + (path == null ? "none" : path.getTarget())
+                + " reachable=" + (path != null && path.canReach())
+                + " action=" + agent.getCurrentAction());
+        b.lastSwimDiagnosticTick = now;
+        b.lastSwimDiagnosticPosition = wet ? v.position() : null;
+    }
+
     /** A new todo was enqueued into the goal list. {@code source} says where it came from. */
     public static void goalAdded(VillagerAgentData agent, AgentGoal g, String source) {
         if (!on() || agent == null || g == null) return;

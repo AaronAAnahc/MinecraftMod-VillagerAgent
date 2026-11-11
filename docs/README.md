@@ -1,6 +1,6 @@
 # VillagerAgent documentation
 
-Reviewed: 2026-10-27. The current workspace source, including uncommitted code, is authoritative. Read this document first in an agent session.
+Reviewed: 2026-11-09. Source inventory verified against the workspace. The current workspace source, including uncommitted code, is authoritative. Read this document first in an agent session.
 
 ## Five-minute onboarding
 
@@ -9,13 +9,14 @@ Reviewed: 2026-10-27. The current workspace source, including uncommitted code, 
 3. Locate files by task in the [code index](CODE_INDEX.md), then read the relevant source and topic document.
 4. Run `git status --short` before editing and preserve existing changes. See [Debugging and verification](DEBUG_VERIFICATION.md) for checks.
 
-Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow server updates maintain perception and candidates; skills execute every tick. `GoalScheduler` performs Utility-weighted sampling using current state. Rule-based behavior runs independently; the LLM optionally supplies content for conversations and other integration points. Resource supply uses per-dimension order books, profession eligibility, leases, and real inventory.
+Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow server updates maintain perception and candidates; skills execute every tick. `GoalScheduler` performs Utility-weighted sampling where each skill defines its own `chanceFactor()` opportunity multiplier (see [Goal utility and chance factors](goal_utility_and_chance_factors.md)). Rule-based behavior runs independently; the LLM optionally supplies content for conversations and other integration points. Villager resource supply is free and demand-driven: notice-board requests, non-exclusive request-linked production and physical one-way delivery (player barter remains paid); logging revisits remembered village-external chunks. Valuation content is populated per profession; see [Economy value tables](economy_value_tables.md).
 
 ## Current documents and responsibilities
 
 | Document | Authoritative topic |
 |---|---|
 | [Execution pipeline and resource orders](execution_pipeline_and_resource_orders.md) | Main loop, Utility, exit protocol, resource work, and persistence boundaries |
+| [Goal utility and chance factors](goal_utility_and_chance_factors.md) | Per-skill opportunity weights, utility formula, and the chanceFactor extension point |
 | [Code index](CODE_INDEX.md) | Task-to-source navigation and module map |
 | [Resource workstations](workstations.md) | Block assets, POIs, lumberjack/miner professions and skill baselines |
 | [Task methods](task_methods.md) | Method interface, cost/time scoring, stable execution, ownership and cleanup |
@@ -23,6 +24,7 @@ Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow serv
 | [Spatial perception](vision_module_implementation.md) | Chunk memory, near-field frustum, and environment summaries |
 | [Beds and building algorithms](bed_room_search_implementation.md) | Geometry, index invalidation, multiple beds, and algorithm limits |
 | [Capabilities, crafting, and economy](capabilities_crafting_and_economy.md) | Capability data, recipe gates, trade, and supply sources |
+| [Economy value tables](economy_value_tables.md) | Item prices per profession, player spread, and pricing policy |
 | [Events and knowledge sharing](events_and_knowledge_sharing.md) | Actual EventBus, SignalBoard, and Gossip wiring |
 | [LLM and world interaction](llm_and_world_interaction.md) | Conversation, Harness integration scope, building interfaces, and boundaries |
 | [Configuration and operation](configuration_and_operation.md) | Build, configuration files, and commands |
@@ -30,6 +32,10 @@ Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow serv
 | [Documentation audit](documentation_audit.md) | Source-backed corrections, unimplemented boundaries, and verification scope |
 | [Implementation boundaries](implementation_status.md) | Current limits, disconnected components, and verification status |
 | [Project walkthrough](project_walkthrough.md) | A short explanation grounded in the implementation above |
+
+Two documents are deliberately absent from the table because they do not describe current behavior: `pr_1_integration.md` records the merge history of PR #1, and `llm_memory_and_behavior_research.md` surveys external research. Neither is authority for current implementation.
+
+Two further documents are implementation plans, not descriptions of current behavior: `village_ecology_loop_plan.md` (the village ecology-loop refactoring proposal) and `t0_economy_execution_plan.md` (the T0 economy-refactor batch plan derived from it). They record pending decisions and buildable batches; they are not authority for current implementation until the described work lands in the source.
 
 ## Documentation maintenance
 

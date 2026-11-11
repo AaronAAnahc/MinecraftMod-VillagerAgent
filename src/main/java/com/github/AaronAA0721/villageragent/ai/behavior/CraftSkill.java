@@ -31,6 +31,14 @@ public class CraftSkill implements VillagerSkill {
         com.github.AaronAA0721.villageragent.ai.CraftingPlan plan;
         int next, workTicks;
         BlockPos table;
+        /** Floating result on the table while this step is being worked (null when none). */
+        java.util.UUID display;
+        long displayStart;
+    }
+
+    private static void clearDisplay(PlanState state, ServerWorld world) {
+        if (state.display != null) com.github.AaronAA0721.villageragent.ai.CraftDisplay.remove(world, state.display);
+        state.display = null;
     }
 
     private SkillResult craftGrid(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager,
@@ -41,19 +49,8 @@ public class CraftSkill implements VillagerSkill {
             state.plan = com.github.AaronAA0721.villageragent.ai.CraftingPlan.build(
                     world, agent.getInventory(), target, Math.max(1, goal.getTargetQuantity()));
             if (!state.plan.complete) {
-                if (goal.getMethodAttempt() != null) {
-                    if (!state.plan.missing.isEmpty()) {
-                        java.util.Map.Entry<String, Integer> need = state.plan.missing.entrySet().iterator().next();
-                        goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
-                    }
-                    return SkillResult.BLOCKED; // The owning method chooses recovery and owns its requests.
-                }
-                for (java.util.Map.Entry<String, Integer> need : state.plan.missing.entrySet()) {
-                    com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, need.getKey(),
-                        com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, need.getKey()) + need.getValue());
-                    com.github.AaronAA0721.villageragent.ai.VillagerEconomySystem.postDemand(world, villager, agent,
-                        new ResourceLocation(need.getKey()), need.getValue());
-                }
+                // Crafting only reports what it lacks. The owning method, or failure recovery's
+                // acquire_item for a root goal, decides how the missing input is obtained.
                 if (!state.plan.missing.isEmpty()) {
                     java.util.Map.Entry<String, Integer> need = state.plan.missing.entrySet().iterator().next();
                     goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
@@ -66,20 +63,52 @@ public class CraftSkill implements VillagerSkill {
         if (step.needsTable()) {
             if (state.table != null && (!world.isLoaded(state.table)
                     || !world.getBlockState(state.table).is(net.minecraft.block.Blocks.CRAFTING_TABLE))) {
+                clearDisplay(state, world);
                 state.table = null; state.workTicks = 0; agent.setCurrentAction(null); villager.getNavigation().stop();
             }
-            if (state.table == null) {
-                com.github.AaronAA0721.villageragent.ai.WorkbenchMemory.observe(villager, world);
-                net.minecraft.pathfinding.Path path = com.github.AaronAA0721.villageragent.ai.WorkbenchMemory.path(agent, villager, world);
-                if (path == null) {
-                    agent.addMemory("Need a reachable crafting table for " + goal.getTargetItem());
-                    // Crafting tables are shared facilities, not profession POIs: never request a job site.
-                    return SkillResult.WAITING;
+                if (state.table == null) {
+                // Find via chunk memory.
+                state.table = findNearestWorkbench(agent, villager, world);
+                if (state.table != null && agent.brain().tasks.current().child() != null
+                        && "minecraft:crafting_table".equals(agent.brain().tasks.current().child().goal.getTargetItem())) {
+                    // A table turned up while we were getting one: stop making/requesting it.
+                    com.github.AaronAA0721.villageragent.ai.ActionLifecycle.clearBody(agent, villager, world);
+                    com.github.AaronAA0721.villageragent.ai.ActionLifecycle.releaseTree(agent.brain().tasks.current().child(), agent, world);
+                    agent.brain().tasks.current().child().goal.setCompleted(true);
+                    agent.brain().tasks.discardChild();
                 }
-                state.table = path.getTarget();
-                if (!villager.getNavigation().moveTo(path, VillagerNavigationSupport.WALK_SPEED)) return SkillResult.WAITING;
-                VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to remembered crafting table");
-                move.setTargetBlockPos(state.table); move.setStandCell(path.getNodePos(path.getNodeCount() - 1)); move.setGoalDriven(true); move.setPhase(VillagerAction.ActionPhase.WALKING);
+                if (state.table == null) {
+                    if (hasCraftingTable(agent)) {
+                        // Has a crafting table in inventory → place it as a child goal, then retry.
+                        SkillResult placeResult = BehaviorExecutor.executeChild(agent, villager, world, () -> {
+                            AgentGoal place = new AgentGoal("place_near_self", "Place crafting table", goal.getPriority());
+                            place.setTargetItem("minecraft:crafting_table");
+                            return place;
+                        });
+                        if (placeResult == SkillResult.RUNNING) return SkillResult.RUNNING;
+                        // Whether it succeeded or failed, retry finding the table next tick.
+                        return SkillResult.RUNNING;
+                    } else {
+                        // No table anywhere: obtain one first (usually by crafting it from planks in the 2x2
+                        // grid), then the branch above places it beside the villager. The table is part of
+                        // crafting, not a reason to rule crafting out.
+                        SkillResult got = BehaviorExecutor.executeChild(agent, villager, world, () -> {
+                            AgentGoal acquire = new AgentGoal("acquire_item", "Acquire a crafting table", goal.getPriority());
+                            acquire.setTargetItem("minecraft:crafting_table");
+                            acquire.setTargetQuantity(1);
+                            return acquire;
+                        });
+                        if (got == SkillResult.RUNNING || got == SkillResult.SUCCESS) return SkillResult.RUNNING;
+                        if (got == SkillResult.WAITING) return SkillResult.WAITING;
+                        goal.setLastFailure(FailureReason.MISSING_ITEM.with("minecraft:crafting_table"));
+                        return SkillResult.BLOCKED;
+                    }
+                }
+                net.minecraft.pathfinding.Path path = villager.getNavigation().createPath(state.table, 1);
+                if (path == null || !path.canReach()) { state.table = null; return SkillResult.WAITING; }
+                villager.getNavigation().moveTo(path, VillagerNavigationSupport.WALK_SPEED);
+                VillagerAction move = new VillagerAction(VillagerAction.ActionType.MOVE, "Walking to crafting table");
+                move.setTargetBlockPos(state.table); move.setGoalDriven(true); move.setPhase(VillagerAction.ActionPhase.WALKING);
                 agent.setCurrentAction(move);
             }
             if (villager.blockPosition().distSqr(state.table) > 4) {
@@ -95,11 +124,27 @@ public class CraftSkill implements VillagerSkill {
             VillagerAction work = new VillagerAction(VillagerAction.ActionType.CRAFT, "Crafting " + step.recipe.getId());
             work.setGoalDriven(true); work.setPhase(VillagerAction.ActionPhase.ACTING); agent.setCurrentAction(work);
         }
-        if (++state.workTicks < 20) return SkillResult.RUNNING;
+        boolean atTable = step.needsTable() && state.table != null;
+        if (atTable) {
+            // Visible crafting: stand still facing the table with the result floating on it for 3 s.
+            villager.getNavigation().stop();
+            villager.getLookControl().setLookAt(state.table.getX() + 0.5, state.table.getY() + 1.0, state.table.getZ() + 0.5);
+            long now = world.getGameTime();
+            if (state.display == null) {
+                state.displayStart = now;
+                state.display = com.github.AaronAA0721.villageragent.ai.CraftDisplay.show(world, state.table, step.recipe.getResultItem());
+            } else if (!com.github.AaronAA0721.villageragent.ai.CraftDisplay.isAlive(world, state.display)) {
+                // Display vanished (e.g. expired during a lag spike): put it back, keep the timer.
+                state.display = com.github.AaronAA0721.villageragent.ai.CraftDisplay.show(world, state.table, step.recipe.getResultItem());
+            }
+            if (now - state.displayStart < com.github.AaronAA0721.villageragent.ai.CraftDisplay.DURATION_TICKS) return SkillResult.RUNNING;
+            clearDisplay(state, world);
+        } else if (++state.workTicks < 20) return SkillResult.RUNNING;
         if (!step.apply(agent.getInventory(), world)) {
             // Inventory changed or capacity was lost: discard only the unexecuted plan and retry later.
             return SkillResult.WAITING;
         }
+        if (atTable) com.github.AaronAA0721.villageragent.ai.CraftDisplay.playPickupSound(world, villager);
         com.github.AaronAA0721.villageragent.ai.BrainLog.diagnostic(agent, "craft-step", "recipe=" + step.recipe.getId());
         goal.markProgress();
         if (step.recipe.getResultItem().getItem() == target && goal.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE)
@@ -117,6 +162,13 @@ public class CraftSkill implements VillagerSkill {
 
 
     @Override public String id() { return "craft"; }
+    @Override public double chanceFactor(VillagerAgentData agent, AgentGoal g, long now) {
+        // Suppress repeatable craft routines when we already have plenty of the target
+        // Routine stock crafting stops once the profession's stock target (craft_targets.json) is reached.
+        if (g.getLifecycle() == AgentGoal.Lifecycle.REPEATABLE && g.getTargetItem() != null
+                && com.github.AaronAA0721.villageragent.ai.DeterministicPlanGenerator.craftShortfall(agent, g.getTargetItem()) <= 0) return 0;
+        return 1.0;
+    }
 
     // NOTE: no requiredCapability()/minLevel() gate here on purpose. Whether a villager can craft
     // an item is decided by its UNLOCKED RECIPES (the per-skill unlock table in craft_unlocks.json
@@ -166,15 +218,7 @@ public class CraftSkill implements VillagerSkill {
         java.util.Map<String, Integer> shortages = NativeRecipeResolver.missingMaterialQuantities(
                 agent.getInventory(), recipe, Math.max(1, goal.getTargetQuantity()));
         if (!shortages.isEmpty()) {
-            if (goal.getMethodAttempt() != null) {
-                java.util.Map.Entry<String, Integer> need = shortages.entrySet().iterator().next();
-                goal.setLastFailure(FailureReason.MISSING_ITEM.with(need.getKey(), need.getValue()));
-                return SkillResult.BLOCKED;
-            }
-            for (java.util.Map.Entry<String, Integer> shortage : shortages.entrySet()) {
-                com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, shortage.getKey(),
-                    com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, shortage.getKey()) + shortage.getValue());
-            }
+            // Report only; acquisition is owned by the parent method or by failure recovery.
             java.util.Map.Entry<String, Integer> first = shortages.entrySet().iterator().next();
             goal.setLastFailure(FailureReason.MISSING_ITEM.with(first.getKey(), first.getValue()));
             return SkillResult.BLOCKED;
@@ -276,5 +320,42 @@ public class CraftSkill implements VillagerSkill {
             villager.getNavigation().moveTo(jobPos.getX() + 0.5, jobPos.getY(), jobPos.getZ() + 0.5, VillagerNavigationSupport.WALK_SPEED);
         }
         return SkillResult.RUNNING;
+    }
+
+    /** Check if the villager has a crafting table in inventory. */
+    private static boolean hasCraftingTable(VillagerAgentData agent) {
+        for (net.minecraft.item.ItemStack s : agent.getInventory().getItems())
+            if (!s.isEmpty() && s.getItem() == net.minecraft.item.Items.CRAFTING_TABLE) return true;
+        return false;
+    }
+
+    /**
+     * Find the nearest reachable crafting table using chunk memory + local scan.
+     * Chunk memory gives rough candidates; we verify they still exist.
+     */
+    public static net.minecraft.util.math.BlockPos findNearestWorkbench(
+            VillagerAgentData agent, net.minecraft.entity.merchant.villager.VillagerEntity villager,
+            net.minecraft.world.server.ServerWorld world) {
+        // First: check chunk memory for known crafting tables.
+        java.util.List<net.minecraft.util.math.BlockPos> candidates = agent.findWorkbenches();
+        net.minecraft.util.math.BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (net.minecraft.util.math.BlockPos p : candidates) {
+            if (!world.isLoaded(p) || !world.getBlockState(p).is(net.minecraft.block.Blocks.CRAFTING_TABLE)) continue;
+            double d = p.distSqr(villager.blockPosition());
+            if (d < bestDist && d < 128 * 128) { bestDist = d; best = p; }
+        }
+        if (best != null) return best;
+
+        // Fallback: quick scan nearby (8 blocks) in case chunk memory is stale.
+        net.minecraft.util.math.BlockPos origin = villager.blockPosition();
+        for (net.minecraft.util.math.BlockPos p : net.minecraft.util.math.BlockPos.betweenClosed(
+                origin.offset(-8, -3, -8), origin.offset(8, 3, 8))) {
+            if (world.getBlockState(p).is(net.minecraft.block.Blocks.CRAFTING_TABLE)) {
+                double d = p.distSqr(origin);
+                if (d < bestDist) { bestDist = d; best = p.immutable(); }
+            }
+        }
+        return best;
     }
 }

@@ -20,6 +20,8 @@ public final class AcquisitionTasks {
             this.parentAttempt = parentAttempt;
             target = context.target; desired = context.desired;
             cleanup = new AcquisitionMethods.Context(context.agent, context.villager, context.world, target, desired, false);
+            cleanup.requestCategory = context.requestCategory;
+            cleanup.units = context.units;
         }
     }
     private final Map<AgentGoal, Map<Item, Session>> roots = new IdentityHashMap<>();
@@ -29,17 +31,43 @@ public final class AcquisitionTasks {
                                AgentGoal goal, Item target, int desired) {
         AgentGoal root = agent.brain().tasks.root().goal;
         Map<Item, Session> sessions = roots.computeIfAbsent(root, key -> new HashMap<>());
+        String category = goal.getRequestCategory() != null && SupplyPolicy.isCategory(goal.getRequestCategory())
+                ? goal.getRequestCategory() : null;
+        int units = desired;
+        if (category != null) {
+            // Food categories are measured in hunger points; production plans whole items of the target.
+            SupplyPolicy.Spec spec = SupplyPolicy.Spec.category(category);
+            if (spec.unit() == SupplyPolicy.Unit.FOOD_POINTS)
+                desired = Math.max(1, SupplyPolicy.itemsToCover(spec, target, units));
+        }
         AcquisitionMethods.Context context = new AcquisitionMethods.Context(agent, villager, world, target, desired, true);
+        context.units = units;
+        // A request responder must produce, not re-request, the output it is supplying.
+        context.productionOnly=CooperativeSupply.RESPONSE_GOAL.equals(goal.getGoalType()) || goal.isSelfProductionOnly();
+        context.requestCategory=category;
+        // Everything below a village-request response may not re-request that request's item or its alternatives.
+        if (root != null && CooperativeSupply.RESPONSE_GOAL.equals(root.getGoalType())) {
+            Set<Item> blocked = new HashSet<>(RequestAlternatives.forbidden(SupplyPolicy.Spec.parse(root.getRequestSpec())));
+            Item output = root.getTargetItem() == null ? net.minecraft.item.Items.AIR
+                    : com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.item(root.getTargetItem());
+            if (output != net.minecraft.item.Items.AIR) blocked.add(output);
+            context.forbiddenRequests = blocked;
+            context.noToolRequests = true;
+        }
         // Check before looking up/replacing sessions: a cyclic child must never close its ancestor.
         if (executingItems.contains(target)) {
-            if (context.count(target) < desired) return SkillResult.FAIL;
+            if (!context.satisfied()) return SkillResult.FAIL;
             goal.setCompleted(true); return SkillResult.SUCCESS;
         }
         Session session = sessions.get(target);
         if (session != null && (session.desired != desired || !Objects.equals(session.parentAttempt, goal.getMethodAttempt()))) {
             session.execution.close(context); sessions.remove(target); session = null;
         }
-        if (context.count(target) >= desired) {
+        // A crafting table is wanted to craft at, not to own: a usable one nearby satisfies the goal and
+        // stops any crafting/request for it.
+        boolean tableNearby = target == net.minecraft.item.Items.CRAFTING_TABLE
+                && com.github.AaronAA0721.villageragent.ai.behavior.CraftSkill.findNearestWorkbench(agent, villager, world) != null;
+        if (context.satisfied() || tableNearby) {
             if (session != null) { session.execution.close(context); sessions.remove(target); }
             goal.setCompleted(true);
             return SkillResult.SUCCESS;
@@ -52,6 +80,8 @@ public final class AcquisitionTasks {
             status = session.execution.tick(context, world.getGameTime(), () -> AcquisitionMethods.candidates(context));
         } finally { executingItems.leave(target); }
         if (session.execution.progressVersion() != previousProgress) goal.markProgress();
+        // A method that finished on its own terms without meeting the objective gives way to the next method.
+        if (status == TaskMethod.Status.DONE && !context.satisfied()) session.execution.exhaustLast(world.getGameTime());
         if (session.logged != session.execution.transitions()) {
             BrainLog.diagnostic(agent, "task-method", "target=" + target.getRegistryName()
                     + " transition=" + session.execution.lastTransition() + " active=" + session.execution.activeId()
@@ -69,6 +99,14 @@ public final class AcquisitionTasks {
                 return session.execution.activeId() == null ? Double.POSITIVE_INFINITY : session.execution.remainingCost();
         }
         return Double.POSITIVE_INFINITY;
+    }
+    /** Root task whose subtree runs the method attempt {@code attempt}; null when no live session owns it. */
+    public AgentGoal rootOwning(UUID attempt) {
+        if (attempt == null) return null;
+        for (Map.Entry<AgentGoal, Map<Item, Session>> entry : roots.entrySet())
+            for (Session session : entry.getValue().values())
+                if (attempt.equals(session.execution.activeAttempt())) return entry.getKey();
+        return null;
     }
     /** Closing a method also closes its nested acquisition attempts, including off-scheduler waits. */
     public void cancelChildren(UUID parentAttempt) {
@@ -88,7 +126,11 @@ public final class AcquisitionTasks {
             for (Session session : new ArrayList<>(sessions.values())) {
                 AcquisitionMethods.Context context = new AcquisitionMethods.Context(agent, villager, world,
                         session.target, session.desired, false);
-                if (removed || session.cleanup.world != world || context.count(session.target) >= session.desired) {
+                context.requestCategory = session.cleanup.requestCategory;
+                context.units = session.cleanup.units;
+                boolean tableNearby = session.target == net.minecraft.item.Items.CRAFTING_TABLE && villager != null
+                        && com.github.AaronAA0721.villageragent.ai.behavior.CraftSkill.findNearestWorkbench(agent, villager, world) != null;
+                if (removed || session.cleanup.world != world || context.satisfied() || tableNearby) {
                     sessions.remove(session.target); session.execution.close(session.cleanup);
                 }
             }

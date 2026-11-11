@@ -1,5 +1,7 @@
 package com.github.AaronAA0721.villageragent.debug;
 
+import com.github.AaronAA0721.villageragent.ai.AgentGoal;
+import com.github.AaronAA0721.villageragent.ai.GoalScheduler;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentManager;
 import com.github.AaronAA0721.villageragent.ai.VillagerVisionSystem;
@@ -11,6 +13,7 @@ import com.github.AaronAA0721.villageragent.ai.world.WorldStructureIndex;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import com.github.AaronAA0721.villageragent.network.DebugDataPacket;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
+import com.github.AaronAA0721.villageragent.network.VillagerLabelPacket;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.util.math.AxisAlignedBB;
@@ -19,7 +22,10 @@ import net.minecraft.util.math.vector.Vector3d;
 import net.minecraft.world.server.ServerWorld;
 import net.minecraftforge.fml.network.PacketDistributor;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Server-side producer of the debug overlay snapshot.
@@ -42,10 +48,16 @@ public final class DebugSync {
         if (world.getGameTime() % INTERVAL != 0) return;
 
         int range = ModConfig.DEBUG_RENDER_RANGE.get();
+        boolean sendLabels = ModConfig.DEBUG_SHOW_VILLAGER_LABELS.get();
         for (ServerPlayerEntity player : world.getServer().getPlayerList().getPlayers()) {
             if (player.level != world) continue;
             DebugDataPacket pkt = build(world, player, range);
             ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), pkt);
+
+            if (sendLabels) {
+                VillagerLabelPacket labelPkt = buildLabels(world, player, range);
+                ModNetworking.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), labelPkt);
+            }
         }
     }
 
@@ -156,6 +168,49 @@ public final class DebugSync {
         if (villagers > 0)  pkt.frustumSamples.add("villager x" + villagers);
         if (players > 0)    pkt.frustumSamples.add("player x" + players);
         if (items > 0)      pkt.frustumSamples.add("item x" + items);
+    }
+
+    /**
+     * Build head-top label data for all nearby villagers: current goal + utility score breakdown.
+     * Aggregates by goal type so the bar stays readable (max ~8 segments).
+     */
+    private static VillagerLabelPacket buildLabels(ServerWorld world, ServerPlayerEntity player, int range) {
+        AxisAlignedBB area = new AxisAlignedBB(player.blockPosition()).inflate(range);
+        List<VillagerEntity> villagers = world.getEntitiesOfClass(VillagerEntity.class, area);
+        long now = world.getGameTime();
+
+        List<VillagerLabelPacket.VillagerLabel> labels = new ArrayList<>();
+        for (VillagerEntity v : villagers) {
+            VillagerAgentData agent = VillagerAgentManager.getAgent(v.getUUID());
+            if (agent == null) continue;
+
+            // Current goal — enrich acquire_item with target item and quantity.
+            String currentGoal = agent.getCurrentActivity() != null ? agent.getCurrentActivity() : "idle";
+            AgentGoal running = agent.getRunningGoal();
+            if (running != null && "acquire_item".equals(running.getGoalType())
+                    && running.getTargetItem() != null) {
+                String shortItem = running.getTargetItem();
+                int colon = shortItem.indexOf(':');
+                if (colon >= 0) shortItem = shortItem.substring(colon + 1);
+                currentGoal = "acquire " + shortItem + " x" + Math.max(1, running.getTargetQuantity());
+            }
+
+            // Compute utility for every goal, aggregate by type
+            Map<String, Double> byType = new LinkedHashMap<>();
+            for (AgentGoal g : agent.getGoals()) {
+                double u = GoalScheduler.utility(agent, g, now);
+                if (u <= 0) continue;
+                byType.merge(g.getGoalType(), u, Double::sum);
+            }
+
+            List<VillagerLabelPacket.GoalScore> scores = new ArrayList<>();
+            for (Map.Entry<String, Double> e : byType.entrySet()) {
+                scores.add(new VillagerLabelPacket.GoalScore(e.getKey(), e.getValue().floatValue()));
+            }
+
+            labels.add(new VillagerLabelPacket.VillagerLabel(v.getId(), agent.getName(), currentGoal, scores));
+        }
+        return new VillagerLabelPacket(labels);
     }
 
     /** Ray-ish test: nearest villager whose body is closest to the player's look ray. */

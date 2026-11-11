@@ -19,6 +19,8 @@ import java.util.UUID;
  *   TODO: goto house
  *   TODO: socialize
  *   TODO: trade
+ *   TODO: place minecraft:crafting_table 120 64 200   (walk there, then place)
+ *   TODO: place minecraft:crafting_table               (place next to self)
  * </pre>
  * These lines are stripped from the player-visible reply (see {@link #stripTodoLines}).
  */
@@ -48,7 +50,7 @@ public final class GoalParser {
                     if (tok.length >= 3 && tok[2].startsWith("x")) {
                         try { qty = Integer.parseInt(tok[2].substring(1)); } catch (NumberFormatException ignored) {}
                     }
-                    AgentGoal g = new AgentGoal(type, "TODO: " + type + " " + item, 5);
+                    AgentGoal g = new AgentGoal(type, type + " " + item, 5);
                     g.setTargetItem(item);
                     g.setTargetQuantity(qty);
                     if (!"craft".equals(type)) {
@@ -77,7 +79,7 @@ public final class GoalParser {
                         int x = Integer.parseInt(tok[1]);
                         int y = Integer.parseInt(tok[2]);
                         int z = Integer.parseInt(tok[3]);
-                        AgentGoal g = new AgentGoal(type, "TODO: " + type + " at " + x + "," + y + "," + z, 5);
+                        AgentGoal g = new AgentGoal(type, type + " at " + x + "," + y + "," + z, 5);
                         g.setTargetLocation(new BlockPos(x, y, z));
                         g.setImportance(6);
                         out.add(g);
@@ -87,7 +89,7 @@ public final class GoalParser {
                 case "goto": {
                     // Navigate to the nearest building of a given type (or any building).
                     String btype = tok.length >= 2 ? tok[1].toLowerCase() : "any";
-                    AgentGoal g = new AgentGoal("goto", "TODO: goto " + btype, 5);
+                    AgentGoal g = new AgentGoal("goto", "goto " + btype, 5);
                     g.setTargetBuildingType(btype);
                     g.setImportance(6);
                     out.add(g);
@@ -97,7 +99,7 @@ public final class GoalParser {
                     if (tok.length < 2) break;
                     String kind = tok[1].toLowerCase();
                     if (!kind.equals("player") && !kind.equals("villager")) break;
-                    AgentGoal g = new AgentGoal("converse", "TODO: converse " + kind, 5);
+                    AgentGoal g = new AgentGoal("converse", "converse " + kind, 5);
                     g.setTargetKind(kind);
                     g.setImportance(6);
                     if (tok.length >= 3 && !tok[2].equalsIgnoreCase("any")) {
@@ -110,15 +112,22 @@ public final class GoalParser {
                     out.add(g);
                     break;
                 }
+                case "rest":
+                case "wander": {
+                    AgentGoal g = new AgentGoal(type, type, 5);
+                    g.setImportance(5);
+                    out.add(g);
+                    break;
+                }
                 case "socialize": {
-                    AgentGoal g = new AgentGoal(type, "TODO: " + type, 5);
+                    AgentGoal g = new AgentGoal(type, type, 5);
                     g.setImportance(5);
                     out.add(g);
                     break;
                 }
                 case "trade": {
                     // Optional target: TODO: trade villager <profession-or-any>
-                    AgentGoal g = new AgentGoal("trade", "TODO: trade", 5);
+                    AgentGoal g = new AgentGoal("trade", "trade", 5);
                     g.setImportance(5);
                     if (tok.length >= 2) {
                         String kind = tok[1].toLowerCase();
@@ -132,12 +141,45 @@ public final class GoalParser {
                     out.add(g);
                     break;
                 }
+                case "place":
+                case "place_block":
+                case "place_near_self": {
+                    AgentGoal g = placeGoal(tok.length >= 2 ? tok[1] : null,
+                            tok.length >= 5 ? tok[2] : null, tok.length >= 5 ? tok[3] : null,
+                            tok.length >= 5 ? tok[4] : null);
+                    if (g != null) out.add(g);
+                    break;
+                }
                 default:
                     break; // unknown directive type — ignore
             }
         }
         for (AgentGoal goal : out) goal.setSource(AgentGoal.Source.LLM);
         return out;
+    }
+
+    /**
+     * Shared constructor for "place a block" requests. With coordinates → {@code place_block} (walk there and
+     * place); without → {@code place_near_self} (pick a free adjacent cell). Returns null on malformed input.
+     */
+    public static AgentGoal placeGoal(String item, String xs, String ys, String zs) {
+        if (item == null || item.trim().isEmpty()) return null;
+        String id = item.trim().toLowerCase();
+        if (!id.contains(":")) id = "minecraft:" + id;
+        AgentGoal g;
+        if (xs != null && ys != null && zs != null) {
+            int x, y, z;
+            try { x = Integer.parseInt(xs.trim()); y = Integer.parseInt(ys.trim()); z = Integer.parseInt(zs.trim()); }
+            catch (NumberFormatException e) { return null; }
+            g = new AgentGoal("place_block", "place " + id + " at " + x + "," + y + "," + z, 5);
+            g.setTargetLocation(new BlockPos(x, y, z));
+        } else {
+            g = new AgentGoal("place_near_self", "place " + id + " nearby", 5);
+        }
+        g.setTargetItem(id);
+        g.setTargetQuantity(1);
+        g.setImportance(6);
+        return g;
     }
 
     /** Remove TODO: lines so the player only sees the spoken reply. */

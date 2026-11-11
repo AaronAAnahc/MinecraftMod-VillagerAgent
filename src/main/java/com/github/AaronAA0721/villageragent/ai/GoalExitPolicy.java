@@ -13,7 +13,9 @@ public final class GoalExitPolicy {
             goal.resetFailures();
             if (goal.getLifecycle() != AgentGoal.Lifecycle.REPEATABLE) return false;
             goal.setTargetLocation(null);
-            goal.setCooldownUntilTick(now + Math.max(100, goal.getCooldownTicks()));
+            // A routine with its own short cooldown (e.g. the 40-tick wander pause) keeps it; 0 means 100.
+            goal.setCooldownUntilTick(now + (goal.getCooldownTicks() > 0
+                    ? Math.max(20, goal.getCooldownTicks()) : 100));
         } else if (result == SkillResult.WAITING
                 || (result == SkillResult.BLOCKED && goal.getLastFailure() != null
                     && goal.getLastFailure().reason.isItemRecoverable())) {

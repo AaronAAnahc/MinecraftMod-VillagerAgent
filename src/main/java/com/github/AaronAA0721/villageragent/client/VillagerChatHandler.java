@@ -42,6 +42,20 @@ public class VillagerChatHandler {
         }
     }
 
+    /** Receive the villager's goal list (answer to the chat panel's Goals button). */
+    public static void receiveGoals(UUID villagerId, List<String> lines) {
+        if (currentChatScreen != null && currentChatScreen.getVillagerId().equals(villagerId)) {
+            currentChatScreen.setGoalLines(lines);
+        }
+    }
+
+    /** Receive the villager's info snapshot (answer to the chat panel's Info button). */
+    public static void receiveInfo(UUID villagerId, List<String> lines) {
+        if (currentChatScreen != null && currentChatScreen.getVillagerId().equals(villagerId)) {
+            currentChatScreen.setInfoLines(lines);
+        }
+    }
+
     /**
      * Receive a trade result, including the post-trade inventory/armor snapshot
      * so the client UI refreshes immediately instead of showing stale data.
@@ -72,6 +86,22 @@ public class VillagerChatHandler {
         if (currentChatScreen != null && currentChatScreen.getVillagerId().equals(villagerId)) {
             currentChatScreen.showTradeResult(accepted, message);
         }
+    }
+
+    /**
+     * The villager offers a trade it agreed to in chat: open the trade panel pre-filled with it, so the player
+     * only has to press Accept or Decline. Ignored if the chat with that villager is no longer open.
+     */
+    public static void receiveTradeProposal(UUID villagerId, ItemStack give1, ItemStack give2,
+                                            ItemStack get1, ItemStack get2,
+                                            List<ItemStack> inventory, List<ItemStack> armor) {
+        if (currentChatScreen == null || !currentChatScreen.getVillagerId().equals(villagerId)) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.screen != currentChatScreen && !(mc.screen instanceof VillagerTradeScreen)) return;
+        currentChatScreen.updateVillagerData(inventory, armor);
+        LOGGER.info("Trade offer from " + currentChatScreen.getVillagerName());
+        mc.setScreen(VillagerTradeScreen.proposal(currentChatScreen, inventory, armor,
+                new ItemStack[]{give1, give2}, new ItemStack[]{get1, get2}));
     }
 
     /**

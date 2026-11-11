@@ -1,6 +1,22 @@
 {
+  "entity.villageragent.villager_bobber": "Villager Fishing Bobber",
   "block.villageragent.carpenter_table": "Carpenter Table",
   "block.villageragent.miner_workbench": "Miner Workbench",
   "entity.minecraft.villager.villageragent.lumberjack": "Lumberjack",
-  "entity.minecraft.villager.villageragent.miner": "Miner"
+  "entity.minecraft.villager.villageragent.miner": "Miner",
+  "block.villageragent.notice_board": "Village Notice Board",
+  "screen.villageragent.notice_board.title": "Village Notice Board",
+  "screen.villageragent.notice_board.buy": "Requests",
+  "screen.villageragent.notice_board.sell": "Shareable stock",
+  "screen.villageragent.notice_board.refresh": "Refresh",
+  "screen.villageragent.notice_board.count": "%s notices",
+  "screen.villageragent.notice_board.empty": "No current notices",
+  "screen.villageragent.notice_board.no_village": "This board is not in a village",
+  "screen.villageragent.notice_board.unknown": "Unknown villager",
+  "screen.villageragent.notice_board.author": "Posted by: %s",
+  "screen.villageragent.notice_board.unclaimed": "No delivery in progress",
+  "screen.villageragent.notice_board.claimed": "Delivering: %s",
+  "screen.villageragent.notice_board.page": "%s / %s",
+  "screen.villageragent.notice_board.category": "Any %s",
+  "screen.villageragent.notice_board.food_points": "hunger pts"
 }

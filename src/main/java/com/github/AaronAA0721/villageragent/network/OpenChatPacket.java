@@ -85,6 +85,9 @@ public class OpenChatPacket {
             // NO automatic greeting - wait for player to say something first
             // Only reply when player sends a message
 
+            // The villager stops what it is doing and faces the player while the panel is open (PlayerConversation).
+            com.github.AaronAA0721.villageragent.ai.PlayerConversation.begin(packet.villagerId, player.getUUID(),
+                    serverWorld.getGameTime());
             LOGGER.info("Player " + player.getName().getString() + " opened chat with " + agent.getName());
         });
         ctx.get().setPacketHandled(true);

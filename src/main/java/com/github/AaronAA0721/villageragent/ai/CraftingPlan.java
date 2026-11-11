@@ -162,6 +162,17 @@ public final class CraftingPlan {
         return false;
     }
 
+    /**
+     * True when every option of the ingredient can only be crafted from {@code target} (a hay bale for wheat,
+     * a coal block for coal). Such an ingredient is used from stock (unpacking a carried bale) but never
+     * planned or reported missing, so wheat is never turned into "acquire hay bale".
+     */
+    private boolean circular(Ingredient ingredient, Item target) {
+        for (ItemStack option : ingredient.getItems())
+            if (!VillageProducible.onlyMadeFrom(world, option.getItem(), target)) return false;
+        return true;
+    }
+
     /** Backtrack across tag alternatives and slot allocations; never reserve the same stock twice. */
     private boolean fill(ICraftingRecipe recipe, int slot, AgentInventory inv, CraftingInventory grid,
                          Set<Item> chain, int depth) {
@@ -175,6 +186,20 @@ public final class CraftingPlan {
         List<ItemStack> choices = new ArrayList<>();
         // Exact stacks first: Ingredient.test respects the recipe's matching semantics.
         for (ItemStack stock : inv.getItems()) if (!stock.isEmpty() && ingredient.test(stock)) choices.add(stock.copy());
+        if (circular(ingredient, recipe.getResultItem().getItem())) {
+            // Stock only: unpack what is carried, never craft or report the packed form.
+            for (ItemStack choice : choices) {
+                for (ItemStack stock : inv.getItems()) {
+                    if (stock.isEmpty() || stock.getItem() != choice.getItem() || !ingredient.test(stock)) continue;
+                    ItemStack one = stock.copy(); one.setCount(1); stock.shrink(1);
+                    grid.setItem(index, one);
+                    if (fill(recipe, slot + 1, inv, grid, chain, depth)) return true;
+                    stock.grow(1); grid.setItem(index, ItemStack.EMPTY);
+                    break;
+                }
+            }
+            return false;
+        }
         List<ItemStack> alternatives = new ArrayList<>(Arrays.asList(ingredient.getItems()));
         if (!preferredSources.isEmpty()) {
             Map<Item, Integer> ranks = new HashMap<>();

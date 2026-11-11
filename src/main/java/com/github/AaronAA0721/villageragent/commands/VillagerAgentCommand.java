@@ -102,6 +102,10 @@ public class VillagerAgentCommand {
                 .then(Commands.argument("item", StringArgumentType.word())
                     .then(Commands.argument("quantity", IntegerArgumentType.integer(1, 256))
                         .executes(VillagerAgentCommand::requestMaterial))))
+            .then(LlmPlanCommands.ask())
+            .then(LlmPlanCommands.preview())
+            .then(DemoCommands.build())
+            .then(ShowcaseCommands.build())
             .then(VillagerControlCommands.trade())
             .then(VillagerControlCommands.markets())
             .then(VillagerControlCommands.resetValues())
@@ -119,7 +123,8 @@ public class VillagerAgentCommand {
                                     net.minecraft.command.arguments.EntityArgument.getEntity(ctx, "to"),
                                     net.minecraft.command.arguments.ItemArgument.getItem(ctx, "item").createItemStack(
                                         IntegerArgumentType.getInteger(ctx, "count"), false))))))))
-            .then(Commands.literal("orders").executes(VillagerAgentCommand::showOrders));
+            .then(Commands.literal("orders").executes(VillagerAgentCommand::showOrders))
+            .then(Commands.literal("dumpstructures").executes(VillagerAgentCommand::dumpStructures));
     }
 
     private static int setOccupation(CommandContext<CommandSource> context) {
@@ -154,14 +159,14 @@ public class VillagerAgentCommand {
         String item = StringArgumentType.getString(context, "item");
         int quantity = IntegerArgumentType.getInteger(context, "quantity");
         ServerWorld world = (ServerWorld) context.getSource().getLevel();
-        com.github.AaronAA0721.villageragent.ai.work.WorkOrderBook.Order order =
+        com.github.AaronAA0721.villageragent.ai.AgentGoal goal =
                 com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, agent, item,
                     com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.count(agent, item) + quantity);
-        if (order == null) {
-            context.getSource().sendFailure(new StringTextComponent("Unsupported extraction item or economy disabled: " + item)); return 0;
+        if (goal == null) {
+            context.getSource().sendFailure(new StringTextComponent("Invalid item or quantity: " + item)); return 0;
         }
-        context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " requests " + order.remaining
-                + " " + item + " | order " + order.id), false);
+        context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " will acquire " + item
+                + " up to " + goal.getTargetQuantity()), false);
         return 1;
     }
 
@@ -218,6 +223,14 @@ public class VillagerAgentCommand {
                 ModConfig.ENABLE_DEBUG_OVERLAY.set(value);
                 optionName = "Debug Overlay";
                 break;
+            case "villagerlabels":
+                ModConfig.DEBUG_SHOW_VILLAGER_LABELS.set(value);
+                optionName = "Villager Labels";
+                break;
+            case "labelfixedsize":
+                ModConfig.DEBUG_LABELS_FIXED_SCREEN_SIZE.set(value);
+                optionName = "Fixed Screen Size Labels";
+                break;
             case "harness":
                 ModConfig.HARNESS_ENABLED.set(value);
                 optionName = "Decision Harness";
@@ -226,9 +239,41 @@ public class VillagerAgentCommand {
                 ModConfig.HARNESS_DRIVE_DAILY_GOAL.set(value);
                 optionName = "Harness Daily Goal";
                 break;
+            case "showcaselabels":
+                ModConfig.SHOWCASE_LABELS.set(value);
+                optionName = "Showcase Labels";
+                break;
+            case "showcaseboard":
+                ModConfig.SHOWCASE_BOARD.set(value);
+                optionName = "Showcase Board";
+                break;
+            case "nightcurfew":
+                ModConfig.NIGHT_CURFEW.set(value);
+                optionName = "Night Curfew";
+                break;
+            case "corejobs":
+                ModConfig.ENSURE_CORE_JOBS.set(value);
+                optionName = "Ensure Core Jobs";
+                break;
+            case "asyncpath":
+                ModConfig.ASYNC_PATHFINDING.set(value);
+                optionName = "Async Pathfinding";
+                break;
+            case "debugbuildings":
+                ModConfig.DEBUG_SHOW_BUILDINGS.set(value);
+                optionName = "Debug Building Boxes";
+                break;
+            case "debugseeds":
+                ModConfig.DEBUG_SHOW_SEEDS.set(value);
+                optionName = "Debug Building Seeds";
+                break;
+            case "debugfield":
+                ModConfig.DEBUG_SHOW_FIELD.set(value);
+                optionName = "Debug Building Field";
+                break;
             default:
                 source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Unknown option: " + option), false);
-                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay, debughud, thoughts, harness, harnessdaily"), false);
+                source.sendSuccess(new StringTextComponent(TextFormatting.YELLOW + "Options: autopickup, aiagents, villagerchat, worldinteraction, building, debugoverlay, debughud, villagerlabels, labelfixedsize, thoughts, harness, harnessdaily, showcaselabels, showcaseboard, nightcurfew, corejobs, asyncpath, debugbuildings, debugseeds, debugfield"), false);
                 success = false;
         }
         
@@ -280,6 +325,14 @@ public class VillagerAgentCommand {
                 value = ModConfig.ENABLE_DEBUG_OVERLAY.get();
                 optionName = "Debug Overlay";
                 break;
+            case "villagerlabels":
+                value = ModConfig.DEBUG_SHOW_VILLAGER_LABELS.get();
+                optionName = "Villager Labels";
+                break;
+            case "labelfixedsize":
+                value = ModConfig.DEBUG_LABELS_FIXED_SCREEN_SIZE.get();
+                optionName = "Fixed Screen Size Labels";
+                break;
             case "harness":
                 value = ModConfig.HARNESS_ENABLED.get();
                 optionName = "Decision Harness";
@@ -287,6 +340,38 @@ public class VillagerAgentCommand {
             case "harnessdaily":
                 value = ModConfig.HARNESS_DRIVE_DAILY_GOAL.get();
                 optionName = "Harness Daily Goal";
+                break;
+            case "showcaselabels":
+                value = ModConfig.SHOWCASE_LABELS.get();
+                optionName = "Showcase Labels";
+                break;
+            case "showcaseboard":
+                value = ModConfig.SHOWCASE_BOARD.get();
+                optionName = "Showcase Board";
+                break;
+            case "nightcurfew":
+                value = ModConfig.NIGHT_CURFEW.get();
+                optionName = "Night Curfew";
+                break;
+            case "corejobs":
+                value = ModConfig.ENSURE_CORE_JOBS.get();
+                optionName = "Ensure Core Jobs";
+                break;
+            case "asyncpath":
+                value = ModConfig.ASYNC_PATHFINDING.get();
+                optionName = "Async Pathfinding";
+                break;
+            case "debugbuildings":
+                value = ModConfig.DEBUG_SHOW_BUILDINGS.get();
+                optionName = "Debug Building Boxes";
+                break;
+            case "debugseeds":
+                value = ModConfig.DEBUG_SHOW_SEEDS.get();
+                optionName = "Debug Building Seeds";
+                break;
+            case "debugfield":
+                value = ModConfig.DEBUG_SHOW_FIELD.get();
+                optionName = "Debug Building Field";
                 break;
             default:
                 source.sendSuccess(new StringTextComponent(TextFormatting.RED + "Unknown option: " + option), false);
@@ -311,8 +396,18 @@ public class VillagerAgentCommand {
         sendConfigLine(source, "Debug HUD", ModConfig.DEBUG_SHOW_HUD.get());
         sendConfigLine(source, "Villager Thoughts", ModConfig.ENABLE_VILLAGER_THOUGHTS.get());
         sendConfigLine(source, "Debug Overlay", ModConfig.ENABLE_DEBUG_OVERLAY.get());
+        sendConfigLine(source, "Villager Labels", ModConfig.DEBUG_SHOW_VILLAGER_LABELS.get());
+        sendConfigLine(source, "Fixed Screen Size Labels", ModConfig.DEBUG_LABELS_FIXED_SCREEN_SIZE.get());
         sendConfigLine(source, "Decision Harness", ModConfig.HARNESS_ENABLED.get());
         sendConfigLine(source, "Harness Daily Goal", ModConfig.HARNESS_DRIVE_DAILY_GOAL.get());
+        sendConfigLine(source, "Showcase Labels", ModConfig.SHOWCASE_LABELS.get());
+        sendConfigLine(source, "Showcase Board", ModConfig.SHOWCASE_BOARD.get());
+        sendConfigLine(source, "Night Curfew", ModConfig.NIGHT_CURFEW.get());
+        sendConfigLine(source, "Ensure Core Jobs", ModConfig.ENSURE_CORE_JOBS.get());
+        sendConfigLine(source, "Async Pathfinding", ModConfig.ASYNC_PATHFINDING.get());
+        sendConfigLine(source, "Debug Building Boxes", ModConfig.DEBUG_SHOW_BUILDINGS.get());
+        sendConfigLine(source, "Debug Building Seeds", ModConfig.DEBUG_SHOW_SEEDS.get());
+        sendConfigLine(source, "Debug Building Field", ModConfig.DEBUG_SHOW_FIELD.get());
         source.sendSuccess(new StringTextComponent(TextFormatting.GOLD + "==========================="), false);
         return 1;
     }
@@ -575,5 +670,22 @@ public class VillagerAgentCommand {
                 + " non-routine goal(s) across " + cleared + " villager(s). "
                 + "Routine goals (farm/rest/restock) kept."), true);
         return removed > 0 ? 1 : 0;
+    }
+
+    /**
+     * /va dumpstructures — Export programmatic structure NBTs as .nbt files
+     * to the world's generated/ folder so the user can edit them with
+     * Structure Block, NBTExplorer, Amulet, etc.
+     */
+    private static int dumpStructures(CommandContext<CommandSource> ctx) {
+        CommandSource source = ctx.getSource();
+        ServerWorld world = source.getLevel();
+        java.io.File dir = new java.io.File(world.getServer().getServerDirectory(),
+                "generated/villageragent/structures");
+        int count = com.github.AaronAA0721.villageragent.content.VillageStructureInjector.exportNbt(dir);
+        source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "Exported " + count
+                + " structure .nbt files to: " + dir.getAbsolutePath()
+                + "\nYou can edit these with Structure Block in-game or NBTExplorer."), true);
+        return count;
     }
 }

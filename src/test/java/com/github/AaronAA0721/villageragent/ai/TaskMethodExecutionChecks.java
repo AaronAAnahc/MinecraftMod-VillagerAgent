@@ -93,6 +93,15 @@ public final class TaskMethodExecutionChecks {
 
         f = new Fixture(); f.tick(0); f.world.a = Double.POSITIVE_INFINITY; f.tick(1); f.tick(10);
         check("b".equals(f.execution.activeId()), "lost precondition bypasses minimum run at reevaluation");
+        // A board inspection completes a method step, not the acquisition objective.
+        f = new Fixture(); f.tick(0);
+        f.world.status = TaskMethod.Status.DONE; f.world.a = 9; f.world.b = 1;
+        check(f.tick(1) == TaskMethod.Status.DONE && f.execution.activeId() == null,
+                "inspection releases its attempt before any purchase commitment");
+        f.world.status = TaskMethod.Status.RUNNING; f.tick(2);
+        check("b".equals(f.execution.activeId()), "new board information triggers full comparison without minimum-run lock");
+        check(f.world.events.equals(Arrays.asList("start:a", "close:a", "start:b")),
+                "inspection cannot silently commit to its original method");
         System.out.println("TaskMethodExecutionChecks: " + assertions + " assertions passed");
     }
 }

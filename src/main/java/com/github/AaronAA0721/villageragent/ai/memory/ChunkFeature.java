@@ -30,7 +30,12 @@ public enum ChunkFeature {
     ORE_DIAMOND("minecraft:diamond_ore", "diamond ore"),
     ORE_EMERALD("minecraft:emerald_ore", "emerald ore"),
     ORE_REDSTONE("minecraft:redstone_ore", "redstone ore"),
-    ORE_LAPIS("minecraft:lapis_ore", "lapis ore");
+    ORE_LAPIS("minecraft:lapis_ore", "lapis ore"),
+    // Appended 2026-11-10 — blocks villagers walk to for work (memory-first block seeking, BlockSeek).
+    GRAVEL("minecraft:gravel", "gravel"),
+    SMOKER("minecraft:smoker", "a smoker"),
+    CAMPFIRE("minecraft:campfire", "a campfire"),
+    BLAST_FURNACE("minecraft:blast_furnace", "a blast furnace");
 
     private final String blockId;
     private final String display;
@@ -55,6 +60,6 @@ public enum ChunkFeature {
     }
 
     public boolean isOre() {
-        return ordinal() >= ORE_COAL.ordinal();
+        return ordinal() >= ORE_COAL.ordinal() && ordinal() <= ORE_LAPIS.ordinal();
     }
 }

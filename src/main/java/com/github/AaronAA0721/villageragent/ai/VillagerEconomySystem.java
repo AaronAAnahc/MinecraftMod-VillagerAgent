@@ -26,12 +26,11 @@ import java.util.Map;
 /**
  * LLM-free village economy.
  *
- * <p>Each villager broadcasts supply/demand onto the shared {@link VillageSignalBoard} (a pure-Java
- * message pipe): surplus of a profession-essential above its minimum becomes a {@code TRADE_HAVE},
- * a deficit becomes a {@code TRADE_WANT}. The system pairs wants with haves, then makes both
- * villagers walk to each other and exchange items on contact — an emergent "villager goes to trade"
- * behaviour that needs no LLM. Player↔villager barter uses the same value table (see
- * {@code TradeRequestPacket}).
+ * <p>Villager-to-villager supply is free and demand-driven: villagers physically visit the notice board,
+ * publish requests for their actual shortage, and read other residents' requests. A reader delivers
+ * shareable stock or creates non-exclusive request-linked production ({@link CooperativeSupply}). No price,
+ * payment or affordability check controls cooperation. The value tables below remain for the isolated
+ * player barter path ({@code TradeRequestPacket}).
  */
 public final class VillagerEconomySystem {
 
@@ -39,8 +38,12 @@ public final class VillagerEconomySystem {
     private static final Gson GSON = new Gson();
 
     // ── Loaded content data (item_values / profession_essentials / item_sources) ──
-    /** profession -> (item -> buy/sell price). Only items the profession actually trades appear here. */
-    private static final Map<String, Map<String, Price>> ITEM_VALUES = new HashMap<>();
+    /** profession -> (item -> subjective value). Missing entries are not tradable. */
+    private static final Map<String, Map<String, Double>> ITEM_VALUES = new HashMap<>();
+    private static final Map<String,Double> JUNK=new HashMap<>(), MODIFIERS=new HashMap<>();
+    private static final Map<String,Map<String,PaymentRule>> PAYMENT=new HashMap<>();
+    private static final Map<String,List<String>> ACTIVE_OFFERS=new HashMap<>();
+    public static final class PaymentRule { public int priority; public boolean retain; }
     private static final Map<String, List<Essential>> PROFESSION_ESSENTIALS = new HashMap<>();
     private static final Map<String, String> ITEM_SOURCES = new HashMap<>();
     private static boolean loaded = false;
@@ -51,11 +54,7 @@ public final class VillagerEconomySystem {
         public int minQty;
     }
 
-    /**
-     * Per-profession buy/sell price of one item (anchor: 1 emerald = 10.0).
-     * {@code buy} is what this profession pays to acquire one unit, {@code sell} what it charges
-     * to part with one unit; sell > buy except for emerald itself (currency trades at par).
-     */
+    /** Compatibility DTO: both fields hold the same subjective value; player prices are derived. */
     public static final class Price {
         public double buy;
         public double sell;
@@ -77,8 +76,8 @@ public final class VillagerEconomySystem {
         long now = world.getGameTime();
         List<VillageMarkets.Market> markets = VillageMarkets.loaded(world);
         for (VillageMarkets.Market market : markets) {
+            VillageNoticeBoards.ensure(world, market);
             market.board.clearExpiredMessages(now);
-            runMatchedExchanges(world, market.board);
         }
 
         if (now - lastScanTicks.getOrDefault(world, -10000L) < ModConfig.ECONOMY_TICK_INTERVAL.get()) return;
@@ -90,163 +89,49 @@ public final class VillagerEconomySystem {
     //  Scan: post supply/demand, then match
     // ─────────────────────────────────────────────────────────────────────────────
 
+    public static void visitMarket(ServerWorld w,VillagerEntity v,VillagerAgentData a) {
+        if(!ModConfig.ENABLE_ECONOMY.get() || !VillageNoticeBoards.atBoard(w,v)) return;
+        VillageSignalBoard board=VillageMarkets.board(w,a.getVillagerId());if(board==null) return;
+        VillageMarkets.market(w,a.getVillagerId()).lastNoticeVisits.put(a.getVillagerId(),w.getGameTime());
+        // Requests first: an open request of this villager may be filled by a neighbour's offer right now.
+        CooperativeSupply.claimOffersForOwnRequests(w,a,board);
+        advertiseSurplus(w,v,a);
+        CooperativeSupply.inspect(w,v,a,board);
+    }
     private static void runScan(ServerWorld world, VillageMarkets.Market market, long now) {
         VillageSignalBoard board = market.board;
+        pruneStaleOffers(market);
         for (VillagerAgentData agent : market.members()) {
             if (agent == null) continue;
             VillagerEntity villager = entityOf(world, agent);
             if (villager == null || !villager.isAlive()) continue;
-            advertiseSurplus(world, villager, agent);
-
-            List<Essential> essentials = getEssentials(agent.getProfession());
-            if (essentials == null) continue;
-
-            for (Essential e : essentials) {
-                ItemStack stack = new ItemStack(registryItem(e.item), 1);
-                int count = agent.getInventory().countItem(stack);
-                if (count > e.minQty) {
-                    postOffer(world, villager, agent, rl(e.item), count - e.minQty);
-                } else if (count < e.minQty) {
-                    boolean queued = agent.getGoals().stream().anyMatch(g -> !g.isCompleted()
-                            && "acquire_item".equals(g.getGoalType()) && e.item.equals(g.getTargetItem()));
-                    if (!queued && agent.getGoals().size() < 10) {
-                        AgentGoal goal = new AgentGoal("acquire_item", "Acquire essential " + e.item, 6);
-                        goal.setTargetItem(e.item); goal.setTargetQuantity(e.minQty);
-                        goal.setOutcomeItems(java.util.Collections.singleton(e.item));
-                        goal.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
-                        agent.getGoals().add(goal);
-                    }
+            // Board checks are a standing routine goal (RoutineScheduler "trade"); no visit is queued here.
+            // Profession tools are protected by category: any suitable tool satisfies the requirement.
+            for (String category : CooperativeSupply.requiredToolCategories(agent)) {
+                SupplyPolicy.Spec spec = SupplyPolicy.Spec.category(category);
+                if (agent.getInventory().getItems().stream().anyMatch(spec::matches)) continue;
+                String item = null;
+                for (String id : essentialItems(agent.getProfession()))
+                    if (category.equals(SupplyPolicy.toolCategory(registryItem(id)))) { item = id; break; }
+                if (item == null || !VillageProducible.producible(world, item)) continue;
+                final String target = item;
+                boolean queued = agent.getGoals().stream().anyMatch(g -> !g.isCompleted()
+                        && "acquire_item".equals(g.getGoalType()) && target.equals(g.getTargetItem()));
+                if (!queued && agent.getGoals().size() < 10) {
+                    AgentGoal goal = new AgentGoal("acquire_item", "Acquire profession tool " + category, 6);
+                    goal.setTargetItem(target); goal.setTargetQuantity(1);
+                    goal.setRequestCategory(category);
+                    goal.setOutcomeItems(java.util.Collections.singleton(target));
+                    goal.setLifecycle(AgentGoal.Lifecycle.ONE_SHOT);
+                    agent.getGoals().add(goal);
                 }
             }
         }
-        offerDemandProduction(world, board, now);
-        runMatching(world, board);
-    }
-
-    /** Turn unmet demand into production opportunities and advertise non-essential surplus too. */
-    private static void offerDemandProduction(ServerWorld world, VillageSignalBoard board, long now) {
-        for (VillageSignalBoard.VillageMessage want : board.messagesOfType(VillageSignalBoard.MsgType.TRADE_WANT)) {
-            if (want.resolved || want.item == null || want.matchedWith != null || want.ownerAttempt != null) continue;
-            VillagerAgentData requester = VillagerAgentManager.getAgent(want.author);
-            VillagerEntity customer = entityOf(world, requester);
-            if (customer == null) continue;
-            String itemId = want.item.toString();
-            int stock = requester.getInventory().countItem(new ItemStack(registryItem(itemId)));
-            boolean pendingExtraction = false;
-            for (com.github.AaronAA0721.villageragent.ai.work.WorkOrderBook.Order o :
-                    com.github.AaronAA0721.villageragent.ai.work.WorkOrderSavedData.get(world).book.all()) {
-                if (o.active() && o.requester.equals(want.author) && o.item.equals(itemId)) { pendingExtraction = true; break; }
-            }
-            if (!pendingExtraction) com.github.AaronAA0721.villageragent.ai.work.ResourceWorkSystem.request(world, requester, itemId, stock + want.quantity);
-            boolean productionQueued = false;
-            for (VillagerAgentData producer : VillageMarkets.residents(world, want.author)) {
-                if (producer == requester) continue;
-                VillagerEntity worker = entityOf(world, producer);
-                if (worker == null || worker.distanceToSqr(customer) > 4096) continue;
-                int available = producer.getInventory().countItem(new ItemStack(registryItem(itemId)));
-                java.util.List<Essential> reserves = getEssentials(producer.getProfession());
-                if (reserves != null) for (Essential reserve : reserves)
-                    if (itemId.equals(reserve.item)) available = Math.max(0, available - reserve.minQty);
-                if (available > 0) {
-                    postOffer(world, worker, producer, want.item, available);
-                }
-                if (available >= want.quantity || want.matchedWith != null || productionQueued) continue;
-                for (AgentGoal g : producer.getGoals()) {
-                    if (!g.isCompleted() && "craft".equals(g.getGoalType()) && itemId.equals(g.getTargetItem())) {
-                        productionQueued = true; break;
-                    }
-                }
-                if (productionQueued || producer.getGoals().size() >= 10
-                        || !SkillCraftCatalog.isUnlockedFor(producer.getCapabilityPool(), producer.getProfession(), itemId)) continue;
-                ResolvedRecipe recipe = NativeRecipeResolver.resolveRecipe(world, itemId);
-                if (recipe == null) continue;
-                int output = recipe.kind == ResolvedRecipe.Kind.VANILLA ? recipe.vanilla.getResultItem().getCount() : recipe.custom.outputCount;
-                AgentGoal craft = new AgentGoal("craft", "Produce requested " + itemId, 6);
-                craft.setTargetItem(itemId); craft.setTargetQuantity(Math.max(1, (want.quantity + Math.max(1, output) - 1) / Math.max(1, output)));
-                craft.setLifecycle(AgentGoal.Lifecycle.EXPIRING); craft.setDeadlineTick(now + 2400);
-                producer.getGoals().add(craft); productionQueued = true;
-                BrainLog.goalAdded(producer, craft, "material-demand:production");
-            }
-        }
-    }
-
-    private static void runMatching(ServerWorld world, VillageSignalBoard board) {
-        List<VillageSignalBoard.VillageMessage> wants = board.messagesOfType(VillageSignalBoard.MsgType.TRADE_WANT);
-        List<VillageSignalBoard.VillageMessage> haves = board.messagesOfType(VillageSignalBoard.MsgType.TRADE_HAVE);
-        for (VillageSignalBoard.VillageMessage want : wants) {
-            if (want.matchedWith != null || want.resolved || want.ownerAttempt != null) continue;
-            if (TradeCoordinator.busy(want.author) || want.unitPrice <= 0) continue;
-            VillagerEntity buyer = entityOf(world, VillagerAgentManager.getAgent(want.author));
-            if (buyer == null) continue;
-            VillageSignalBoard.VillageMessage best = null;
-            for (VillageSignalBoard.VillageMessage have : haves) {
-                if (have.matchedWith != null || have.resolved || TradeCoordinator.busy(have.author)
-                        || have.unitPrice <= 0 || have.unitPrice > want.unitPrice) continue;
-                VillagerEntity seller = entityOf(world, VillagerAgentManager.getAgent(have.author));
-                if (seller == null || buyer.distanceToSqr(seller) > 4096) continue;
-                if (want.item.equals(have.item) && have.quantity >= want.quantity
-                        && !want.author.equals(have.author)
-                        && quoteCost(want,want.quantity)>0
-                        && TradeInventory.count(VillagerAgentManager.getAgent(want.author).getInventory().getItems(),
-                            new ItemStack(Items.EMERALD))>=quoteCost(want,want.quantity)) {
-                    if (best == null || have.unitPrice < best.unitPrice) best = have;
-                }
-            }
-            if (best != null) acceptTrade(world, want, best, want.unitPrice);
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    //  Walk-to-trade + exchange
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    private static void runMatchedExchanges(ServerWorld world, VillageSignalBoard board) {
-        for (VillageSignalBoard.VillageMessage want : board.messagesOfType(VillageSignalBoard.MsgType.TRADE_WANT)) {
-            if (want.matchedWith == null || want.resolved) continue;
-            VillageSignalBoard.VillageMessage have = board.find(want.matchedWith);
-            if (have == null || have.resolved) continue;
-            if (!validateTradeFunds(want, have)) continue;
-            if (!TradeCoordinator.enqueue(world, want, have)) board.unmatch(want.id);
-        }
-    }
-
-    public static int completeMatchedExchange(ServerWorld world, java.util.UUID wantId) {
-        if (!TradeCoordinator.canSettle(wantId)) return 0;
-        VillageSignalBoard board = VillageSignalBoard.get();
-        VillageSignalBoard.VillageMessage want = board.find(wantId);
-        if (want == null || want.resolved || want.matchedWith == null) return 0;
-        VillageSignalBoard.VillageMessage have = board.find(want.matchedWith);
-        if (have == null || have.resolved) return 0;
-        VillagerAgentData buyer = VillagerAgentManager.getAgent(want.author), seller = VillagerAgentManager.getAgent(have.author);
-        VillagerEntity b = entityOf(world, buyer), s = entityOf(world, seller);
-        if (b == null || s == null || b.distanceToSqr(s) > 9) return 0;
-        if (!validateTradeFunds(want, have)) return 0;
-        int moved = want.quantity;
-        int payment = want.agreedPayment;
-        Item goods = registryItem(want.item.toString());
-        if (goods == Items.AIR) return 0;
-        TradeInventory.Plan plan = TradeInventory.plan(buyer.getInventory().getItems(),
-                seller.getInventory().getItems(), java.util.Collections.emptyList(),
-                tradeStacks(Items.EMERALD, payment), tradeStacks(goods, moved));
-        if (plan == null) return 0;
-        for (int i = 0; i < plan.player.size(); i++) buyer.getInventory().setStackInSlot(i, plan.player.get(i));
-        for (int i = 0; i < plan.villager.size(); i++) seller.getInventory().setStackInSlot(i, plan.villager.get(i));
-        want.quantity -= moved;
-        if (want.quantity <= 0) board.resolveTrade(want.id);
-        else board.unmatch(want.id);
-        return moved;
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  Item transfer helpers
     // ─────────────────────────────────────────────────────────────────────────────
-
-    /** Move up to {@code qty} of {@code regName} from {@code from} to {@code to}; returns amount moved. */
-    private static int transfer(VillagerAgentData from, VillagerAgentData to, String regName, int qty) {
-        Item item = registryItem(regName);
-        if (item == Items.AIR) return 0;
-        return InventoryTransfer.move(from.getInventory(), to.getInventory(), item, qty);
-    }
 
     public static int emeraldCost(VillagerAgentData seller, String item, int quantity) {
         if (seller == null || quantity <= 0) return -1;
@@ -259,116 +144,204 @@ public final class VillagerEconomySystem {
 
     public static boolean hasPrice(VillagerAgentData agent, String item) {
         ensurePersonalValueTable(agent);
-        return agent != null && personalPriceOf(agent, item) != null
-                && personalPriceOf(agent, "minecraft:emerald") != null;
+        return agent != null && villagerValue(agent,item)>0;
     }
 
-    /** Read nearby surplus as quotes without posting a demand or committing a purchase. */
-    public static void advertiseAcquisitionStock(ServerWorld world, VillagerEntity buyer, java.util.Set<Item> items) {
-        VillageSignalBoard local = VillageMarkets.board(world, buyer.getUUID());
-        for (VillagerAgentData seller : VillageMarkets.residents(world, buyer.getUUID())) {
-            VillagerEntity entity = entityOf(world, seller);
-            if (entity == null || !entity.isAlive() || entity == buyer || buyer.distanceToSqr(entity) > 4096) continue;
-            for (Item item : items) {
-                String id = item.getRegistryName().toString();
-                if (!hasPrice(seller, id)) continue;
-                int available = TradeInventory.count(seller.getInventory().getItems(), new ItemStack(item));
-                List<Essential> reserves = getEssentials(seller.getProfession());
-                if (reserves != null) for (Essential essential : reserves)
-                    if (id.equals(essential.item)) available = Math.max(0, available - essential.minQty);
-                if (available <= 0) continue;
-                boolean matched = local.messagesOfType(VillageSignalBoard.MsgType.TRADE_HAVE).stream()
-                        .anyMatch(m -> !m.resolved && m.author.equals(seller.getVillagerId())
-                                && m.item.toString().equals(id) && m.matchedWith != null);
-                if (!matched) postOffer(world, entity, seller, item.getRegistryName(), available);
-            }
-        }
-    }
-
-    private static boolean canAffordTrade(VillagerAgentData buyer, VillagerAgentData seller,
-                                         String item, int quantity) {
-        int cost = emeraldCost(seller, item, quantity);
-        return buyer != null && cost > 0 && TradeInventory.count(buyer.getInventory().getItems(),
-                new ItemStack(Items.EMERALD)) >= cost;
-    }
-
-    /** Recheck before movement and settlement; stale matches must not start unfunded deliveries. */
-    public static boolean validateTradeFunds(VillageSignalBoard.VillageMessage want,
-                                             VillageSignalBoard.VillageMessage have) {
-        VillagerAgentData buyer = VillagerAgentManager.getAgent(want.author), seller = VillagerAgentManager.getAgent(have.author);
-        if (want.market == have.market && want.agreedPayment > 0 && buyer != null && seller != null
-                && TradeInventory.count(buyer.getInventory().getItems(), new ItemStack(Items.EMERALD)) >= want.agreedPayment
-                && TradeInventory.count(seller.getInventory().getItems(), new ItemStack(registryItem(want.item.toString()))) >= want.quantity) return true;
-        VillageSignalBoard.get().unmatch(want.id);
-        return false;
-    }
-
-    public static int quoteCost(VillageSignalBoard.VillageMessage offer, int quantity) {
-        double price = Math.ceil(offer.unitPrice * quantity);
-        return Double.isFinite(price) && price > 0 && price <= Integer.MAX_VALUE ? (int) price : -1;
-    }
-    public static boolean acceptTrade(ServerWorld world, VillageSignalBoard.VillageMessage want,
-                                      VillageSignalBoard.VillageMessage have, double unitPrice) {
-        VillagerAgentData buyer=VillagerAgentManager.getAgent(want.author), seller=VillagerAgentManager.getAgent(have.author);
-        VillagerEntity b=entityOf(world,buyer), s=entityOf(world,seller);
-        double payment=Math.ceil(unitPrice*want.quantity);
-        if (b==null||s==null||buyer.isSocializing()||seller.isSocializing()||TradeDemo.isActive(want.author)||TradeDemo.isActive(have.author)
-                || !VillageMarkets.same(world,want.author,have.author) || want.market!=VillageMarkets.board(world,want.author)
-                || have.market!=want.market || want.expireTick<=world.getGameTime() || have.expireTick<=world.getGameTime()
-                || have.unitPrice<=0 || want.unitPrice<=0 || unitPrice<have.unitPrice || unitPrice>want.unitPrice
-                || !Double.isFinite(payment)||payment<=0||payment>Integer.MAX_VALUE
-                || TradeInventory.count(buyer.getInventory().getItems(),new ItemStack(Items.EMERALD))<payment
-                || TradeInventory.count(seller.getInventory().getItems(),new ItemStack(registryItem(have.item.toString())))<want.quantity) return false;
-        if (!want.market.matchTrade(want.id,have.id)) return false;
-        want.agreedPayment=(int)payment;
-        if (!TradeCoordinator.enqueue(world,want,have)) { want.market.unmatch(want.id); return false; }
-        return true;
-    }
     private static double unitPrice(VillagerAgentData a,String item,boolean buying) {
-        if (!hasPrice(a,item)) return -1;
-        double currency=sellValue(a,"minecraft:emerald");
-        double value=(buying?buyValue(a,item):sellValue(a,item))/currency;
-        return currency>0 && Double.isFinite(value) && value>0 ? value : -1;
+        return villagerValue(a,item);
     }
+    /** Informational stock notice (no price): what this villager could share right now. */
     public static void postOffer(ServerWorld world,VillagerEntity v,VillagerAgentData a,ResourceLocation item,int quantity) {
-        double price=unitPrice(a,item.toString(),false); if(price<=0||quantity<=0) return;
+        if (!VillageNoticeBoards.atBoard(world,v) || quantity<=0) return;
         VillageSignalBoard board=VillageMarkets.board(world,a.getVillagerId());
-        java.util.UUID id=board.post(a.getVillagerId(),v.blockPosition(),VillageSignalBoard.MsgType.TRADE_HAVE,item,quantity,world.getGameTime());
-        VillageSignalBoard.VillageMessage m=board.find(id); if(m.matchedWith==null) m.unitPrice=price;
+        if(board==null) return;
+        board.post(a.getVillagerId(),v.blockPosition(),VillageSignalBoard.MsgType.TRADE_HAVE,item,quantity,world.getGameTime());
     }
-    public static java.util.UUID postDemand(ServerWorld world,VillagerEntity v,VillagerAgentData a,ResourceLocation item,int quantity) {
-        VillageSignalBoard board=VillageMarkets.board(world,a.getVillagerId());
-        java.util.UUID id=board.post(a.getVillagerId(),v.blockPosition(),VillageSignalBoard.MsgType.TRADE_WANT,item,quantity,world.getGameTime());
-        VillageSignalBoard.VillageMessage m=board.find(id); if(m.matchedWith==null) m.unitPrice=unitPrice(a,item.toString(),true);
-        return id;
-    }
-    /** Listing is bookkeeping, not a SOCIAL-gated walk-to-barter routine. */
+    /** Publish actual shareable stock (tools beyond the protected one, uncommitted goods) while at the board. */
+    /**
+     * Post this villager's "for sale" notices: only items its profession produces ({@code active_offers.json}),
+     * only stock it can share right now ({@link CooperativeSupply#shareable}, which already holds back stock
+     * reserved for claimed offers and claimed requests), minus what it plans to hand over for requests it has
+     * taken on ({@code supply_request} responses). Its own notices for items no longer on offer are removed, so
+     * the board never shows stock that is promised elsewhere.
+     */
     private static void advertiseSurplus(ServerWorld world,VillagerEntity v,VillagerAgentData a) {
+        VillageSignalBoard board=VillageMarkets.board(world,a.getVillagerId());
+        if(board==null) return;
+        java.util.Set<ResourceLocation> advertised=new java.util.HashSet<>();
         java.util.Set<Item> seen=new java.util.HashSet<>();
         for(ItemStack stack:a.getInventory().getItems()) {
-            if(stack.isEmpty()||stack.getItem()==Items.EMERALD||stack.hasTag()||!seen.add(stack.getItem())) continue;
-            String id=stack.getItem().getRegistryName().toString();
-            int available=TradeInventory.count(a.getInventory().getItems(),new ItemStack(stack.getItem()));
-            List<Essential> reserves=getEssentials(a.getProfession());
-            if(reserves!=null) for(Essential e:reserves) if(id.equals(e.item)) available=Math.max(0,available-e.minQty);
-            if(available>0) postOffer(world,v,a,stack.getItem().getRegistryName(),available);
+            if(stack.isEmpty()||stack.getItem()==Items.EMERALD||!seen.add(stack.getItem())) continue;
+            ResourceLocation id=stack.getItem().getRegistryName();
+            if(id==null||!offers(a,id.toString())) continue;
+            SupplyPolicy.Spec spec=SupplyPolicy.Spec.exact(id.toString());
+            int available=SupplyPolicy.units(spec,CooperativeSupply.shareable(a,spec,null))-promisedToRequests(a,stack.getItem());
+            if(available>0) { postOffer(world,v,a,id,available); advertised.add(id); }
+        }
+        for(VillageSignalBoard.VillageMessage m:board.messagesOfType(VillageSignalBoard.MsgType.TRADE_HAVE)) {
+            if(m.resolved||m.ownerAttempt!=null||!m.author.equals(a.getVillagerId())||m.item==null) continue;
+            if(!advertised.contains(m.item)) board.removeByAuthor(a.getVillagerId(),VillageSignalBoard.MsgType.TRADE_HAVE,m.item);
         }
     }
 
-    private static ItemStack[] tradeStacks(Item item, int quantity) {
-        List<ItemStack> stacks = new ArrayList<>();
-        while (quantity > 0) {
-            int count = Math.min(quantity, item.getMaxStackSize());
-            stacks.add(new ItemStack(item, count));
-            quantity -= count;
-        }
-        return stacks.toArray(new ItemStack[0]);
+    /** Common things a player pays with; always listed in the chat price block. */
+    private static final String[] PLAYER_CURRENCIES = {
+            "minecraft:emerald", "minecraft:iron_ingot", "minecraft:gold_ingot", "minecraft:diamond"};
+
+    /**
+     * Price block for the chat prompt: the exact values the trade screen ({@code TradeRequestPacket}) uses, in
+     * "points", so what the villager quotes in conversation matches what the trade screen will accept.
+     * Lists the sell price of every item it holds and the value it gives to the usual player payments and to
+     * the items it is currently trying to get.
+     */
+    public static String describePricesForPlayer(VillagerAgentData a) {
+        return describePricesForPlayer(a, java.util.Collections.emptyList());
     }
 
-    private static void steer(VillagerEntity villager, net.minecraft.util.math.BlockPos target) {
-        // A sleeping villager is not steered to a trading partner (would drag it while lying).
-        if (villager.isSleeping()) return;
-        villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.4);
+    /**
+     * As above, plus a value for every kind of item {@code playerItems} (the player's inventory) holds, so the
+     * villager can price whatever the player offers instead of guessing about unlisted items.
+     */
+    public static String describePricesForPlayer(VillagerAgentData a, List<ItemStack> playerItems) {
+        ensurePersonalValueTable(a);
+        java.util.LinkedHashMap<String, String> sells = new java.util.LinkedHashMap<>();
+        for (ItemStack stack : a.getInventory().getItems()) {
+            if (stack.isEmpty() || stack.getItem().getRegistryName() == null) continue;
+            String id = stack.getItem().getRegistryName().toString();
+            if (sells.containsKey(id)) continue;
+            double v = sellPriceForPlayer(a, id);
+            if (Double.isFinite(v) && v > 0) sells.put(id, fmt(v));
+        }
+        java.util.LinkedHashSet<String> payIds = new java.util.LinkedHashSet<>(java.util.Arrays.asList(PLAYER_CURRENCIES));
+        for (AgentGoal g : a.getGoals())
+            if (!g.isCompleted() && "acquire_item".equals(g.getGoalType()) && g.getTargetItem() != null
+                    && g.getTargetItem().contains(":")) payIds.add(g.getTargetItem());
+        java.util.List<String> worthless = new ArrayList<>();
+        java.util.Set<String> playerIds = new java.util.LinkedHashSet<>();
+        for (ItemStack stack : playerItems)
+            if (!stack.isEmpty() && stack.getItem().getRegistryName() != null && playerIds.size() < 16)
+                playerIds.add(stack.getItem().getRegistryName().toString());
+        payIds.addAll(playerIds);
+        java.util.LinkedHashMap<String, String> buys = new java.util.LinkedHashMap<>();
+        for (String id : payIds) {
+            double v = buyPriceForPlayer(a, id);
+            if (Double.isFinite(v) && v > 0) buys.put(id, fmt(v));
+            else if (playerIds.contains(id)) worthless.add(LongTermAgenda.shortName(id));
+        }
+        if (sells.isEmpty() && buys.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("YOUR PRICES (points per item; the trade screen enforces exactly these): ");
+        if (!sells.isEmpty()) {
+            sb.append("you SELL ");
+            sells.forEach((id, v) -> sb.append(LongTermAgenda.shortName(id)).append("=").append(v).append(", "));
+            sb.setLength(sb.length() - 2);
+            sb.append(". ");
+        }
+        if (!buys.isEmpty()) {
+            sb.append("Payment you RECEIVE is worth: ");
+            buys.forEach((id, v) -> sb.append(LongTermAgenda.shortName(id)).append("=").append(v).append(", "));
+            sb.setLength(sb.length() - 2);
+            sb.append(". ");
+        }
+        if (!playerIds.isEmpty()) {
+            sb.append("The player is carrying: ");
+            for (String id : playerIds) sb.append(LongTermAgenda.shortName(id)).append(", ");
+            sb.setLength(sb.length() - 2);
+            sb.append(". ");
+        }
+        if (!worthless.isEmpty()) sb.append("Worth nothing to you: ").append(String.join(", ", worthless)).append(". ");
+        sb.append(minimumQuotes(a, sells.keySet(), playerIds.isEmpty() ? payIds : playerIds));
+        sb.append("Normally do not agree to less than these minimums; if the player offers less, haggle or name the ")
+          .append("minimum. For trades with several items, or anything you are unsure about, use \"check_trade\" ")
+          .append("to get the exact values of both sides before you answer. ");
+        return sb.toString();
+    }
+
+    /**
+     * "MINIMUM PRICES" lines with the arithmetic already done: for each item the villager sells, the least of each
+     * payment item it accepts (at {@link #DEAL_FLOOR}). Cheap goods are quoted as "up to N per payment item".
+     * At most 10 goods x 4 payment items, so the LLM picks a number instead of multiplying.
+     */
+    private static String minimumQuotes(VillagerAgentData a, java.util.Collection<String> goods, java.util.Collection<String> payments) {
+        StringBuilder sb = new StringBuilder();
+        int goodsListed = 0;
+        for (String good : goods) {
+            if (goodsListed >= 10) break;
+            double need = sellPriceForPlayer(a, good) * DEAL_FLOOR;
+            if (!Double.isFinite(need) || need <= 0) continue;
+            Item goodItem = registryItem(good);
+            if (goodItem == null || goodItem == Items.AIR) continue;
+            int have = a.getInventory().countItem(new ItemStack(goodItem));
+            List<String> options = new ArrayList<>();
+            for (String pay : payments) {
+                if (pay.equals(good) || options.size() >= 4) continue;
+                double value = buyPriceForPlayer(a, pay);
+                if (!Double.isFinite(value) || value <= 0) continue;
+                String payName = LongTermAgenda.shortName(pay), goodName = LongTermAgenda.shortName(good);
+                if (value >= need) {
+                    int upTo = Math.max(1, Math.min(have, (int) Math.floor(value / need + 1e-9)));
+                    options.add("1 " + payName + " buys up to " + upTo + " " + goodName);
+                } else {
+                    options.add((int) Math.ceil(need / value - 1e-9) + " " + payName + " per 1 " + goodName);
+                }
+            }
+            if (options.isEmpty()) continue;
+            if (goodsListed++ == 0) sb.append("MINIMUM PRICES (already calculated; use these numbers): ");
+            sb.append(LongTermAgenda.shortName(good)).append(": ").append(String.join(" | ", options)).append("; ");
+        }
+        return sb.length() == 0 ? "" : sb.append(". ").toString();
+    }
+
+    /** A negotiated deal may undercut the value table, but never below this fraction of the fair price. */
+    public static final double DEAL_FLOOR = 0.7;
+
+    private static String fmt(double v) {
+        return v >= 10 ? String.valueOf(Math.round(v)) : String.format(Locale.ROOT, "%.2f", v);
+    }
+
+    /**
+     * Keep "for sale" notices honest between board visits: a notice whose author no longer holds the stock
+     * (cooked it, ate it, used it, handed it over) or whose item is no longer on the profession's sell list is
+     * removed, and an over-stated quantity is lowered. Runs on the economy scan, so the author does not have
+     * to walk back to the board for the notice to disappear.
+     */
+    private static void pruneStaleOffers(VillageMarkets.Market market) {
+        VillageSignalBoard board = market.board;
+        for (VillageSignalBoard.VillageMessage m : board.messagesOfType(VillageSignalBoard.MsgType.TRADE_HAVE)) {
+            if (m.resolved || m.ownerAttempt != null || m.item == null) continue;
+            VillagerAgentData author = VillagerAgentManager.getAgent(m.author);
+            if (author == null) continue;
+            String id = m.item.toString();
+            int available = 0;
+            if (offers(author, id)) {
+                SupplyPolicy.Spec spec = SupplyPolicy.Spec.exact(id);
+                Item item = registryItem(id);
+                available = SupplyPolicy.units(spec, CooperativeSupply.shareable(author, spec, null))
+                        - (item == null ? 0 : promisedToRequests(author, item));
+            }
+            if (available <= 0) board.removeByAuthor(m.author, VillageSignalBoard.MsgType.TRADE_HAVE, m.item);
+            else if (available < m.quantity) m.quantity = available;
+        }
+    }
+
+    /** Items this villager's profession sells on the board (what it produces); empty for other professions. */
+    public static boolean offers(VillagerAgentData a,String item) {
+        ensureLoaded();
+        String key=normalizeProfession(a.getProfession());
+        List<String> list=key==null?null:ACTIVE_OFFERS.get(professionRegistryKey(key));
+        return list!=null&&list.contains(item);
+    }
+
+    /** Output this villager still plans to deliver for requests it has taken on (unclaimed supply_request goals). */
+    private static int promisedToRequests(VillagerAgentData a,Item item) {
+        int n=0;
+        for(AgentGoal g:a.getGoals()) {
+            if(g.isCompleted()||!CooperativeSupply.RESPONSE_GOAL.equals(g.getGoalType())||g.getClaimId()!=null) continue;
+            Item target=registryItem(g.getTargetItem()==null?"minecraft:air":g.getTargetItem());
+            if(target!=item) continue;
+            SupplyPolicy.Spec spec=SupplyPolicy.Spec.parse(g.getRequestSpec());
+            n+=spec==null?g.getRequestUnits():Math.max(1,SupplyPolicy.itemsToCover(spec,item,g.getRequestUnits()));
+        }
+        return n;
     }
 
     private static VillagerEntity entityOf(ServerWorld world, VillagerAgentData agent) {
@@ -381,23 +354,54 @@ public final class VillagerEconomySystem {
     //  Value / registry helpers
     // ─────────────────────────────────────────────────────────────────────────────
 
-    /**
-     * What this individual villager is willing to pay to acquire one unit of the item, per its
-     * <b>personal</b> value table (initialised as a deep copy of its profession template, then
-     * individually editable). Items absent from that personal table are worth 0.01 — this villager
-     * simply does not deal in them.
-     */
-    public static double buyValue(VillagerAgentData agent, String regName) {
+    /** Missing prices are absent, never implicitly cheap. */
+    public static double villagerValue(VillagerAgentData agent,String item) {
         ensurePersonalValueTable(agent);
-        Price p = personalPriceOf(agent, regName);
-        return p != null ? p.buy : 0.01;
+        Price p=personalPriceOf(agent,item);
+        return p!=null&&Double.isFinite(p.buy)&&p.buy>0?p.buy:0;
     }
-
-    /** What this individual villager charges to sell one unit of the item (0.01 if it doesn't trade it). */
-    public static double sellValue(VillagerAgentData agent, String regName) {
-        ensurePersonalValueTable(agent);
-        Price p = personalPriceOf(agent, regName);
-        return p != null ? p.sell : 0.01;
+    public static double buyValue(VillagerAgentData agent,String item) { return buyPriceForPlayer(agent,item); }
+    public static double sellValue(VillagerAgentData agent,String item) { return sellPriceForPlayer(agent,item); }
+    public static double buyPriceForPlayer(VillagerAgentData agent,String item) { return villagerValue(agent,item)/modifier("playerMargin",1.8); }
+    public static double sellPriceForPlayer(VillagerAgentData agent,String item) {
+        double value=villagerValue(agent,item);return value>0?value*modifier("playerMargin",1.8):Double.POSITIVE_INFINITY;
+    }
+    public static int reserve(VillagerAgentData a,String item) {
+        List<Essential> list=getEssentials(a.getProfession());int n=0;
+        if(list!=null) for(Essential e:list) if(item.equals(e.item)) n=Math.max(n,e.minQty);
+        return n;
+    }
+    /** Configured profession essentials; tool entries define the protected tool categories. */
+    public static List<String> essentialItems(String profession) {
+        List<String> result=new ArrayList<>();
+        List<Essential> list=getEssentials(profession);
+        if(list!=null) for(Essential e:list) if(e!=null&&e.item!=null) result.add(e.item);
+        return result;
+    }
+    /** Non-tool essentials keep their configured minimum; tools are protected per category instead. */
+    public static Map<String,Integer> nonToolReserves(VillagerAgentData a) {
+        Map<String,Integer> result=new HashMap<>();
+        List<Essential> list=getEssentials(a.getProfession());
+        if(list!=null) for(Essential e:list) {
+            if(e==null||e.item==null||e.minQty<=0) continue;
+            Item item=registryItem(e.item);
+            if(item==null||item==Items.AIR||SupplyPolicy.toolCategory(item)!=null) continue;
+            result.merge(e.item,e.minQty,Math::max);
+        }
+        return result;
+    }
+    private static PaymentRule paymentRule(VillagerAgentData a,String item) {
+        ensureLoaded();Map<String,PaymentRule> rules=PAYMENT.get(professionRegistryKey(normalizeProfession(a.getProfession())));
+        PaymentRule rule=rules==null?null:rules.get(item);
+        if(rule==null&&PAYMENT.containsKey("default")) rule=PAYMENT.get("default").get(item);
+        return rule;
+    }
+    public static boolean retained(VillagerAgentData a,String item) {
+        PaymentRule rule=paymentRule(a,item);return rule!=null?rule.retain:reserve(a,item)>0;
+    }
+    public static int paymentPriority(VillagerAgentData a,String item) { PaymentRule r=paymentRule(a,item);return r==null?0:r.priority; }
+    private static double modifier(String key,double fallback) {
+        ensureLoaded();Double n=MODIFIERS.get(key);return n!=null&&Double.isFinite(n)&&n>0?n:fallback;
     }
 
     private static Price personalPriceOf(VillagerAgentData agent, String regName) {
@@ -414,19 +418,18 @@ public final class VillagerEconomySystem {
     public static void ensurePersonalValueTable(VillagerAgentData agent) {
         if (agent == null || agent.hasPersonalValueTable()) return;
         ensureLoaded();
-        Map<String, Price> tpl = new HashMap<>();
-        Map<String, Price> defaults = ITEM_VALUES.get("default");
-        if (defaults != null) tpl.putAll(defaults);
-        Map<String, Price> profession = getValueTable(agent.getProfession());
-        if (profession != null) tpl.putAll(profession);
-        Map<String, Price> copy = new HashMap<>();
-        if (tpl != null) {
-            for (Map.Entry<String, Price> e : tpl.entrySet()) {
-                Price p = new Price();
-                p.buy = e.getValue().buy;
-                p.sell = e.getValue().sell;
-                copy.put(e.getKey(), p);
-            }
+        Map<String, Double> tpl = new HashMap<>(JUNK);
+        Map<String,Double> defaults=ITEM_VALUES.get("default");if(defaults!=null) tpl.putAll(defaults);
+        Map<String,Double> profession=getValueTable(agent.getProfession());if(profession!=null) tpl.putAll(profession);
+        Map<String,Price> copy=new HashMap<>();
+        for(Map.Entry<String,Double> e:tpl.entrySet()) {
+            if(e.getValue()==null||!Double.isFinite(e.getValue())||e.getValue()<=0) continue;
+            double value=e.getValue();
+            com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.Source source=
+                com.github.AaronAA0721.villageragent.ai.work.ResourceCatalog.get(e.getKey());
+            if((source!=null&&source.skilled(agent))||SkillCraftCatalog.isUnlockedFor(agent.getCapabilityPool(),agent.getProfession(),e.getKey()))
+                value*=modifier("selfProduceDiscount",0.7);
+            Price price=new Price();price.buy=value;price.sell=value;copy.put(e.getKey(),price);
         }
         agent.setPersonalValueTable(copy);
     }
@@ -437,21 +440,18 @@ public final class VillagerEconomySystem {
         ensurePersonalValueTable(agent);
     }
 
-    /**
-     * Override one item's buy/sell price on this villager's personal table (creating the table first
-     * if needed). Use to model individual preferences / learned prices; trades then use the personal
-     * value, never the profession template.
-     */
+    /** Legacy setter: the first value is authoritative; a separate selling value is no longer stored. */
     public static void setPrice(VillagerAgentData agent, String regName, double buy, double sell) {
         ensurePersonalValueTable(agent);
         Price p = new Price();
+        if(!Double.isFinite(buy)||buy<=0) return;
         p.buy = buy;
-        p.sell = sell;
+        p.sell = buy;
         agent.getPersonalValueTable().put(regName, p);
     }
 
     /** Resolve the profession template map for a profession string (any case / prefix form). */
-    private static Map<String, Price> getValueTable(String profession) {
+    private static Map<String, Double> getValueTable(String profession) {
         String key = normalizeProfession(profession);
         return key != null ? ITEM_VALUES.get(professionRegistryKey(key)) : null;
     }
@@ -490,6 +490,7 @@ public final class VillagerEconomySystem {
     }
 
     private static List<Essential> getEssentials(String profession) {
+        ensureLoaded();
         String key = normalizeProfession(profession);
         return key != null ? PROFESSION_ESSENTIALS.get(professionRegistryKey(key)) : null;
     }
@@ -502,7 +503,11 @@ public final class VillagerEconomySystem {
         if (loaded) return;
         loaded = true; // set early so a failure doesn't retry-spam every tick
         loadJson("item_values.json",
-                new TypeToken<Map<String, Map<String, Price>>>() {}, ITEM_VALUES);
+                new TypeToken<Map<String, Map<String, Double>>>() {}, ITEM_VALUES);
+        loadJson("junk_values.json",new TypeToken<Map<String,Double>>() {},JUNK);
+        loadJson("price_modifiers.json",new TypeToken<Map<String,Double>>() {},MODIFIERS);
+        loadJson("payment_accepts.json",new TypeToken<Map<String,Map<String,PaymentRule>>>() {},PAYMENT);
+        loadJson("active_offers.json",new TypeToken<Map<String,List<String>>>() {},ACTIVE_OFFERS);
         loadJson("profession_essentials.json",
                 new TypeToken<Map<String, List<Essential>>>() {}, PROFESSION_ESSENTIALS);
         loadJson("item_sources.json",

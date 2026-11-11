@@ -190,7 +190,7 @@ public class VillagerAgentData {
      */
     private final LinkedHashMap<Long, ChunkMemory> chunkMemories = new LinkedHashMap<>();
     /** Maximum number of chunks to remember. */
-    private static final int MAX_KNOWN_CHUNKS = 512;
+    public static final int MAX_KNOWN_CHUNKS = 512;
     /** The chunk the villager was in last tick — used to detect chunk transitions. */
     private long lastChunkKey = Long.MIN_VALUE;
 
@@ -380,7 +380,7 @@ public class VillagerAgentData {
 
         String systemPrompt = "You are a creative assistant that generates unique medieval villager characters. " +
                 "Respond ONLY with a JSON object in this exact format: {\"name\":\"VillagerName\",\"personality\":\"personality description\"}. " +
-                "The name should be a single medieval-style first name. " +
+                "The name should be a medieval-style first name and surname separated by one space. " +
                 "The personality should be a short phrase (3-6 words) describing their character traits.";
 
         String userPrompt = "Generate a unique villager character with a medieval name and interesting personality.";
@@ -388,7 +388,7 @@ public class VillagerAgentData {
         // Fire-and-forget: the network call already runs on LLMService's own pool,
         // so .thenAccept / .exceptionally execute off the server thread.
         try {
-            LLMService.queryLLM(systemPrompt, userPrompt)
+            LLMService.queryLLMJson(systemPrompt, userPrompt)
                     .thenAccept(this::applyLLMResponse)
                     .exceptionally(ex -> {
                         LOGGER.error("Error generating villager with LLM: " + ex.getMessage());
@@ -463,13 +463,9 @@ public class VillagerAgentData {
         return traits[new Random().nextInt(traits.length)];
     }
 
+    /** First and last name, unique among loaded villagers; village uniqueness is kept by {@link VillagerNames#ensureUnique}. */
     private String generateRandomName() {
-        String[] names = {
-            "Aldric", "Beatrice", "Cedric", "Diana", "Edmund", "Fiona",
-            "Gregory", "Helena", "Isaac", "Juliana", "Kenneth", "Lydia",
-            "Marcus", "Natalia", "Oliver", "Penelope", "Quentin", "Rosalind"
-        };
-        return names[new Random().nextInt(names.length)];
+        return VillagerNames.random();
     }
     
     // Getters and setters
@@ -485,12 +481,15 @@ public class VillagerAgentData {
     private final BrainRuntime brainRuntime = new BrainRuntime();
     private com.github.AaronAA0721.villageragent.ai.work.ResourceProfession resourceProfession =
             com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.NONE;
-    private boolean resourceStarterGiven;
+    /** True once this villager received the one-time joining grant. Persisted; never reset. */
+    private boolean emeraldGrantGiven;
+    /** True once the one-time hobby tool kit was handed out (see {@link #grantHobbyTools()}). Persisted. */
+    private boolean hobbyToolsGiven;
     public BrainRuntime brain() { return brainRuntime; }
     public com.github.AaronAA0721.villageragent.ai.work.ResourceProfession getResourceProfession() { return resourceProfession; }
     public void setResourceProfession(com.github.AaronAA0721.villageragent.ai.work.ResourceProfession role) { resourceProfession = role; }
-    public boolean hasResourceStarter() { return resourceStarterGiven; }
-    public void markResourceStarterGiven() { resourceStarterGiven = true; }
+    public boolean hasEmeraldGrant() { return emeraldGrantGiven; }
+    public void markEmeraldGrantGiven() { emeraldGrantGiven = true; }
     public AgentGoal getRunningGoal() { return runningGoal; }
     public void setRunningGoal(AgentGoal goal) { this.runningGoal = goal; }
     public int getBlockedStreak() { return blockedStreak; }
@@ -597,10 +596,43 @@ public class VillagerAgentData {
      * never re-rolls on every world load. Nitwits are cleared to all-0 later, in updateProfession.
      */
     private void seedInitialCapabilities() {
+        capabilityPool.setLevel(hobbyCapability(), 1);
+    }
+
+    /** Wooden tool for a resource hobby the villager still has (axe, pickaxe, hoe); null otherwise. */
+    public net.minecraft.item.Item hobbyTool() {
+        CapabilityId hobby = hobbyCapability();
+        if (capabilityPool.levelOf(hobby) < 1) return null;
+        switch (hobby) {
+            case WOODCUTTING: return net.minecraft.item.Items.WOODEN_AXE;
+            case MINING: case QUARRYING: return net.minecraft.item.Items.WOODEN_PICKAXE;
+            case FARMING: return net.minecraft.item.Items.WOODEN_HOE;
+            default: return null;
+        }
+    }
+
+    /** The villager's birth hobby: deterministic from its UUID, so it can be recomputed at any time. */
+    public CapabilityId hobbyCapability() {
         Random r = new Random(villagerId.getMostSignificantBits() ^ villagerId.getLeastSignificantBits());
         CapabilityId[] all = CapabilityId.values();
-        CapabilityId hobby = all[r.nextInt(all.length)];
-        capabilityPool.setLevel(hobby, 1);
+        return all[r.nextInt(all.length)];
+    }
+
+    /**
+     * One-time hobby kit: a villager whose hobby is woodcutting, mining/quarrying or farming gets the matching
+     * wooden tool (axe, pickaxe, hoe) unless it already carries one of that kind. Persisted flag; villagers from
+     * older saves receive it once on their next tick. Nitwits (whose capabilities are cleared) get nothing.
+     */
+    public void grantHobbyTools() {
+        if (hobbyToolsGiven) return;
+        hobbyToolsGiven = true;
+        net.minecraft.item.Item tool = hobbyTool();
+        if (tool == null) return;
+        String category = SupplyPolicy.toolCategory(tool);
+        for (ItemStack stack : inventory.getItems())
+            if (!stack.isEmpty() && category.equals(SupplyPolicy.toolCategory(stack.getItem()))) return;
+        boolean added = inventory.addItem(new ItemStack(tool));
+        BrainLog.diagnostic(this, "hobby-tool", "hobby=" + hobbyCapability() + " tool=" + tool.getRegistryName() + " added=" + added);
     }
 
     public long getLastGoalPruneDay() { return lastGoalPruneDay; }
@@ -676,10 +708,99 @@ public class VillagerAgentData {
     public java.util.Collection<ChunkMemory> getAllChunkMemories() { return chunkMemories.values(); }
 
     /**
+     * Import village shared chunk memories as initial knowledge.
+     * Only imports chunks the villager doesn't already know about.
+     * Each imported entry is a shallow copy so personal divergence is safe.
+     */
+    public void importSharedMemories(java.util.List<ChunkMemory> shared) {
+        int imported = 0;
+        for (ChunkMemory src : shared) {
+            if (chunkMemories.containsKey(src.chunkKey)) continue;
+            if (chunkMemories.size() >= MAX_KNOWN_CHUNKS) break;
+            // Deep-copy via NBT round-trip so personal edits don't mutate the shared store.
+            ChunkMemory copy = ChunkMemory.readNBT(src.writeNBT());
+            chunkMemories.put(copy.chunkKey, copy);
+            imported++;
+        }
+        if (imported > 0) {
+            org.apache.logging.log4j.LogManager.getLogger("VillagerAgentData")
+                .debug("{} imported {} shared chunk memories", getName(), imported);
+        }
+    }
+
+    /**
+     * Second LLM round for trades. Returns {@code first} unchanged when it neither asks for a check nor offers a
+     * trade that fails one; otherwise the reply written after seeing the exact check results.
+     */
+    /**
+     * Set when the last chat reply was written after a trade-check round (the LLM saw the exact values), so its
+     * trade is offered as written. Read and cleared by {@link #consumeReplyPriceDecided}.
+     */
+    private volatile boolean replyPriceDecided;
+
+    /** True (once) if the last chat reply came from a trade-check round. */
+    public boolean consumeReplyPriceDecided() {
+        boolean v = replyPriceDecided;
+        replyPriceDecided = false;
+        return v;
+    }
+
+    private CompletableFuture<String> tradeCheckRound(String first, String sysPrompt, String firstPrompt, long tick,
+                                                      VillagerEntity entity, UUID playerUuid) {
+        if (LLMService.isFailure(first) || playerUuid == null) return CompletableFuture.completedFuture(first);
+        LLMResponseParser.ParsedResponse parsed = LLMResponseParser.parse(first, this, tick);
+        java.util.List<TradeProposal.Draft> asked = parsed.checks;
+        TradeProposal.Draft offered = parsed.trade;
+        if (asked.isEmpty() && offered == null) return CompletableFuture.completedFuture(first);
+        net.minecraft.server.MinecraftServer server = net.minecraftforge.fml.server.ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return CompletableFuture.completedFuture(first);
+        UUID id = getVillagerId();
+        return CompletableFuture.supplyAsync(() -> {
+            // Server thread: read both inventories and evaluate exactly like the trade panel.
+            net.minecraft.entity.player.ServerPlayerEntity player = server.getPlayerList().getPlayer(playerUuid);
+            VillagerEntity villager = entity != null ? entity : VillagerAgentManager.findVillagerEntity(id);
+            if (player == null || villager == null) return null;
+            java.util.List<String> lines = new ArrayList<>();
+            for (TradeProposal.Draft d : asked) lines.add(TradeProposal.check(d, this, villager, player));
+            if (offered != null) {
+                // An offer that passes as it stands needs no second round.
+                if (asked.isEmpty() && TradeProposal.acceptable(offered, this, villager, player)) return null;
+                lines.add("The trade you were about to offer: " + TradeProposal.check(offered, this, villager, player));
+            }
+            return lines;
+        }, server).thenCompose(lines -> {
+            if (lines == null || lines.isEmpty()) return CompletableFuture.completedFuture(first);
+            StringBuilder report = new StringBuilder("\n\nTRADE VALUES (exact, from the trade system, as YOU value things; "
+                    + "the player cannot see this):\n");
+            for (String l : lines) report.append("- ").append(l).append("\n");
+            report.append("Now decide and write your actual reply. Usually you want the player's side to be worth at least "
+                    + "as much as yours; you may accept less if you like the player, haggle for more, or refuse. "
+                    + "A trade marked NOT POSSIBLE cannot happen. Whatever you put in \"trade\" now is offered to the "
+                    + "player exactly as written. Do not use \"check_trade\" again.");
+            LOGGER.info("[Chat] {} trade check round: {}", name, lines);
+            return LLMGuard.queryJson(id, tick, sysPrompt, firstPrompt + report)
+                    .thenApply(second -> {
+                        if (!LLMService.isFailure(second)) {
+                            // Written after seeing the exact values: its trade is the villager's decision.
+                            replyPriceDecided = true;
+                            return second;
+                        }
+                        // Second call failed: keep the first reply (its trade is still price-checked, with a
+                        // counter-offer fallback) unless it was only a check request with nothing to say.
+                        return LLMResponseParser.spokenText(first).trim().isEmpty() ? second : first;
+                    });
+        });
+    }
+
+    /** Re-read a known chunk's features on entry when the last visit is older than this (half a day). */
+    private static final long FEATURE_REFRESH_TICKS = 12000;
+
+    /**
      * Called when the villager enters a new chunk.
      * Samples the entered chunk the first time it is seen (via {@link ChunkContentSampler}),
      * and marks the 8 surrounding chunks as merely "known" (cheap placeholder, no sampling).
      * Does nothing if the villager is still in the same chunk as the previous tick.
+     * A known chunk not visited for {@link #FEATURE_REFRESH_TICKS} has its features re-read on entry.
      */
     public void updateChunkMemory(LivingEntity villager, World world, int chunkX, int chunkZ) {
         long key = ChunkPos.asLong(chunkX, chunkZ);
@@ -690,6 +811,9 @@ public class VillagerAgentData {
         if (!chunkMemories.containsKey(key) || chunkMemories.get(key).lastVisitedTick == 0) {
             if (chunkMemories.size() >= MAX_KNOWN_CHUNKS) evictLowestSaliency();
             chunkMemories.put(key, ChunkContentSampler.sample(villager, world, chunkX, chunkZ));
+        } else if (world.getGameTime() - chunkMemories.get(key).lastVisitedTick > FEATURE_REFRESH_TICKS) {
+            // Known chunk not visited for a while: pick up stations / blocks placed or removed since.
+            ChunkContentSampler.refreshFeatures(world, chunkMemories.get(key), villager.blockPosition().getY());
         }
 
         chunkMemories.get(key).lastVisitedTick = world.getGameTime();
@@ -708,13 +832,20 @@ public class VillagerAgentData {
         }
     }
 
-    /** Evict the lowest-saliency chunk to make room (keeps important chunks longer). */
+    /**
+     * Evict the oldest chunk memory (by lastVisitedTick) to make room.
+     * Prefers chunks not recently visited; ties broken by lowest saliency.
+     */
     private void evictLowestSaliency() {
         long worstKey = -1;
+        long oldestTick = Long.MAX_VALUE;
         float worstSal = Float.MAX_VALUE;
         for (java.util.Map.Entry<Long, ChunkMemory> e : chunkMemories.entrySet()) {
-            if (e.getValue().saliency < worstSal) {
-                worstSal = e.getValue().saliency;
+            long tick = e.getValue().lastVisitedTick;
+            float sal = e.getValue().saliency;
+            if (tick < oldestTick || (tick == oldestTick && sal < worstSal)) {
+                oldestTick = tick;
+                worstSal = sal;
                 worstKey = e.getKey();
             }
         }
@@ -974,9 +1105,21 @@ public class VillagerAgentData {
                 .append("use the conversation history below to give a consistent, contextual reply. ")
                 .append("If the player asks whether you have an item, or wants to buy or trade something, ")
                 .append("answer strictly from your ACTUAL inventory: if it is there, say so and discuss a deal; ")
-                .append("if it is not, say you do not have it. Never guess from your profession. ");
+                .append("if it is not, say you do not have it. Never guess from your profession. ")
+                .append("TRADING WITH THE PLAYER: when you and the player agree on a trade (or you want to make a concrete ")
+                .append("offer), add a top-level field to your JSON: \"trade\": {\"player_gives\": [{\"item\":\"minecraft:iron_ingot\", \"qty\":2}], ")
+                .append("\"player_gets\": [{\"item\":\"minecraft:chicken\", \"qty\":1}]}. At most 2 kinds of item per side, ")
+                .append("full item ids, quantities up to one stack. This opens the trade panel showing your offer; the player ")
+                .append("presses Accept or Decline, so say something like \"here's my offer\" rather than claiming it is done. ")
+                .append("Only offer items you actually hold, and only ask for what the player said they have. ")
+                .append("Omit \"trade\" when no concrete trade has been agreed or offered. ")
+                .append("CHECKING A TRADE: if you are not sure a trade is fair (several items, items not in your minimum ")
+                .append("price list, a haggle), do not reply yet: return {\"thought\": \"...\", \"check_trade\": [ up to 4 ")
+                .append("candidate trades, same format as \"trade\" ]} with no \"reply\". The system answers with the exact ")
+                .append("values of both sides, then you decide and reply. Any \"trade\" you send is also checked, and if ")
+                .append("it is below your minimum you are shown the values and asked again. ");
 
-        // Inject the craftable catalog + the TODO directive protocol so the villager can turn
+        // Inject the craftable catalog (the response format, JSON goals or TODO: lines, is appended last) so the villager can turn
         // conversation into executable goals (craft / move / gather / socialize / trade).
         // Only capability-unlocked items are listed, so the villager never claims to make
         // something it is not yet skilled enough for.
@@ -985,23 +1128,16 @@ public class VillagerAgentData {
             systemPromptBuilder.append(" As a ").append(profession)
                     .append(", you are ABLE TO CRAFT the following (this is a CRAFTING CAPABILITY only, ")
                     .append("NOT what you currently hold): ").append(String.join(", ", craftable)).append(". ");
-            systemPromptBuilder.append("If you decide to act — now, or as a task to remember — append one or more "
-                    + "lines starting with TODO: (each on its own line): ")
-                    .append("TODO: craft minecraft:<item_id> x<qty>  |  TODO: move <x> <y> <z>  |  "
-                            + "TODO: harvest <x> <y> <z>  |  TODO: plant <x> <y> <z>  |  TODO: till <x> <y> <z>  |  TODO: collect_crops <x> <y> <z>  |  TODO: pickup_item minecraft:<item> x<n>  |  TODO: drop_item minecraft:<item> x<n>  |  TODO: goto house  |  TODO: goto cave_house  |  "
-                            + "TODO: socialize  |  TODO: trade villager <profession-or-any>  |  "
-                            + "TODO: converse player <uuid>  |  TODO: converse villager <profession-or-any> . ")
-                    .append("Use the exact minecraft:<id> form for items you can make. ")
-                    .append("To go to a nearby building, use TODO: goto <type> where <type> is one of the building "
-                            + "types you see in your environment (e.g. house, cave_house) or just 'building'. ")
-                    .append("These TODO lines are hidden from the player, so write your spoken reply first, "
-                            + "then the TODO lines.");
         }
 
         // Centralised, ground-truth snapshot of the villager's full current state.
         // One method = one source of truth, so future state fields can't accidentally
         // be left out of the prompt the way the backpack once was.
         systemPromptBuilder.append(" ").append(buildVillagerStateBlock(entity, playerName, playerUuid));
+
+        // Response format goes LAST so it is the final instruction the model reads: JSON when the
+        // provider supports it, otherwise the plain-text TODO:/REMEMBER: protocol.
+        systemPromptBuilder.append(PromptTemplates.responseFormatInstruction());
 
         String systemPrompt = systemPromptBuilder.toString();
 
@@ -1013,7 +1149,7 @@ public class VillagerAgentData {
             context.append("Recent memories: ");
             int start = Math.max(0, memories.size() - 5);
             for (int i = start; i < memories.size(); i++) {
-                context.append(memories.get(i)).append(". ");
+                context.append(PromptTemplates.scrubDirectives(memories.get(i))).append(". ");
             }
             context.append("\n");
         }
@@ -1022,7 +1158,8 @@ public class VillagerAgentData {
         if (!conversationHistory.isEmpty()) {
             context.append("Conversation history from today:\n");
             for (TimestampedMessage msg : conversationHistory) {
-                context.append("- ").append(msg.getText()).append("\n");
+                // Older saves stored raw replies (JSON blobs / TODO: lines); feed back only the words.
+                context.append("- ").append(PromptTemplates.scrubDirectives(historyLine(msg.getText()))).append("\n");
             }
             context.append("\n");
         }
@@ -1037,7 +1174,13 @@ public class VillagerAgentData {
 
         final long tick = gameTick; // capture for lambda
         UUID id = getVillagerId();
-        return LLMGuard.query(id, tick, systemPrompt, userPrompt)
+        final String sysPrompt = systemPrompt, firstPrompt = userPrompt;
+        replyPriceDecided = false;
+        return LLMGuard.queryJson(id, tick, sysPrompt, firstPrompt)
+                // Trade check round: if the reply asks to check trades ("check_trade") or offers a trade that
+                // fails the exact check, the system evaluates them on the server thread and asks the LLM once
+                // more with the results, so what the villager says matches what the trade panel will accept.
+                .thenCompose(first -> tradeCheckRound(first, sysPrompt, firstPrompt, tick, entity, playerUuid))
                 .thenApply(response -> {
                     // P0 fix: a failure sentinel is never the villager's actual speech.
                     if (LLMService.isFailure(response)) {
@@ -1051,7 +1194,7 @@ public class VillagerAgentData {
                     DecisionJournal.record(id, DecisionJournal.Kind.CHAT, tick, userPrompt, response, "ok");
                     // Store both sides of the exchange with the current game tick
                     addConversation(playerName + ": " + (playerMessage != null ? playerMessage : "[greeting]"), tick);
-                    addConversation(name + ": " + response, tick);
+                    addConversation(name + ": " + LLMResponseParser.spokenText(response), tick);
                     return response;
                 })
                 .exceptionally(e -> {
@@ -1059,6 +1202,14 @@ public class VillagerAgentData {
                             + " (player=" + playerName + ")", e);
                     return "Hmm... I seem to have lost my train of thought.";
                 });
+    }
+
+    /** A stored "Speaker: text" history line with any raw JSON / directive lines reduced to the spoken words. */
+    private static String historyLine(String line) {
+        if (line == null) return "";
+        int colon = line.indexOf(": ");
+        if (colon < 0) return LLMResponseParser.spokenText(line);
+        return line.substring(0, colon + 2) + LLMResponseParser.spokenText(line.substring(colon + 2));
     }
 
     /**
@@ -1101,6 +1252,17 @@ public class VillagerAgentData {
      * @param playerName the player currently talking (for the familiarity line)
      * @param playerUuid the player's UUID (for the greet-count lookup)
      */
+    /** The talking player's main inventory (empty if unknown or offline), for the chat price block. */
+    private static java.util.List<net.minecraft.item.ItemStack> playerItems(UUID playerUuid) {
+        net.minecraft.server.MinecraftServer server = net.minecraftforge.fml.server.ServerLifecycleHooks.getCurrentServer();
+        if (playerUuid == null || server == null) return java.util.Collections.emptyList();
+        net.minecraft.entity.player.ServerPlayerEntity player = server.getPlayerList().getPlayer(playerUuid);
+        if (player == null) return java.util.Collections.emptyList();
+        java.util.List<net.minecraft.item.ItemStack> items = new java.util.ArrayList<>();
+        for (net.minecraft.item.ItemStack s : player.inventory.items) if (!s.isEmpty()) items.add(s.copy());
+        return items;
+    }
+
     private String buildVillagerStateBlock(VillagerEntity entity, String playerName, UUID playerUuid) {
         StringBuilder sb = new StringBuilder();
 
@@ -1124,6 +1286,10 @@ public class VillagerAgentData {
 
         // ACTUAL inventory (ground truth, not profession stereotype)
         sb.append(buildInventoryDescription()).append(" ");
+
+        // Real prices (the same numbers the trade screen enforces), so quotes in chat are honest.
+        String prices = VillagerEconomySystem.describePricesForPlayer(this, playerItems(playerUuid));
+        if (!prices.isEmpty()) sb.append(prices);
 
         // Equipped armor / gear (lives on the entity, NOT in AgentInventory)
         if (entity != null) {
@@ -1193,6 +1359,13 @@ public class VillagerAgentData {
               .append(", z=").append(p.getZ()).append(". ");
         }
 
+        // Clock (for timed goals) and the villagers this one can name in converse/invite goals
+        if (entity != null && entity.level instanceof net.minecraft.world.server.ServerWorld) {
+            net.minecraft.world.server.ServerWorld sw = (net.minecraft.world.server.ServerWorld) entity.level;
+            sb.append("Current time: ").append(GameClock.format(sw.getDayTime())).append(". ");
+            sb.append(KnownVillagers.promptBlock(this, entity, sw));
+        }
+
         // Environment snapshot (refreshed each chat by ChatMessagePacket)
         if (lastEnvironmentSummary != null && !lastEnvironmentSummary.isEmpty()) {
             sb.append("Environment around you: ").append(lastEnvironmentSummary).append(" ");
@@ -1238,7 +1411,8 @@ public class VillagerAgentData {
         nbt.putString("Name", name);
         nbt.putString("Profession", profession);
         nbt.putString("ResourceProfession", resourceProfession.name());
-        nbt.putBoolean("ResourceStarterGiven", resourceStarterGiven);
+        nbt.putBoolean("EmeraldGrantGiven", emeraldGrantGiven);
+        nbt.putBoolean("HobbyToolsGiven", hobbyToolsGiven);
         nbt.putString("Personality", personality);
         nbt.putString("CurrentActivity", currentActivity);
         nbt.putLong("LastThinkTime", lastThinkTime);
@@ -1318,6 +1492,11 @@ public class VillagerAgentData {
             nbt.put("GreetCount", countList);
         }
 
+        // ── Requested goals (LLM / player): routine goals are re-seeded, these are not ──
+        ListNBT goalList = new ListNBT();
+        for (AgentGoal g : goals) if (GoalNbt.isPersistent(g)) goalList.add(GoalNbt.write(g));
+        if (!goalList.isEmpty()) nbt.put("Goals", goalList);
+
         // ── Long-term agendas (persistent intentions: debts, deals, acquisitions) ──
         if (!agendas.isEmpty()) {
             ListNBT agendaList = new ListNBT();
@@ -1361,6 +1540,7 @@ public class VillagerAgentData {
                 pvList.add(pNBT);
             }
             nbt.put("PersonalValueTable", pvList);
+            nbt.putInt("PriceVersion",2);
         }
 
         // ── Current mood (derived from needs; cheap to restore, avoids a NEUTRAL flicker) ──
@@ -1374,7 +1554,8 @@ public class VillagerAgentData {
         this.name = nbt.getString("Name");
         this.profession = nbt.contains("Profession") ? nbt.getString("Profession") : "Villager";
         resourceProfession = com.github.AaronAA0721.villageragent.ai.work.ResourceProfession.parse(nbt.getString("ResourceProfession"));
-        resourceStarterGiven = nbt.getBoolean("ResourceStarterGiven");
+        emeraldGrantGiven = nbt.getBoolean("EmeraldGrantGiven");
+        hobbyToolsGiven = nbt.getBoolean("HobbyToolsGiven");
         this.personality = nbt.getString("Personality");
         this.currentActivity = nbt.getString("CurrentActivity");
         this.lastThinkTime = nbt.getLong("LastThinkTime");
@@ -1484,6 +1665,20 @@ public class VillagerAgentData {
             }
         }
 
+        // ── Requested goals (LLM / player) ──
+        goals.clear();
+        if (nbt.contains("Goals")) {
+            ListNBT goalList = nbt.getList("Goals", 10);
+            for (int i = 0; i < goalList.size(); i++) {
+                try {
+                    AgentGoal g = GoalNbt.read(goalList.getCompound(i));
+                    if (!goals.add(g)) LOGGER.warn("Dropped saved goal with no runnable handler: " + g.getGoalType());
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to load goal from NBT: " + e.getMessage());
+                }
+            }
+        }
+
         // ── Persisted home bed ──
         homeBedPos = nbt.contains("HomeBed") ? BlockPos.of(nbt.getLong("HomeBed")) : null;
 
@@ -1512,7 +1707,7 @@ public class VillagerAgentData {
 
         // ── Personal value table (null until the villager uses it again) ──
         personalValueTable = null;
-        if (nbt.contains("PersonalValueTable")) {
+        if (nbt.getInt("PriceVersion")==2 && nbt.contains("PersonalValueTable")) {
             Map<String, VillagerEconomySystem.Price> pv = new HashMap<>();
             ListNBT pvList = nbt.getList("PersonalValueTable", 10);
             for (int i = 0; i < pvList.size(); i++) {

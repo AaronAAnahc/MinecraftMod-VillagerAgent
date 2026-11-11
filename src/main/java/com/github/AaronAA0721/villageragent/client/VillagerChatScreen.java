@@ -2,6 +2,8 @@ package com.github.AaronAA0721.villageragent.client;
 
 import com.github.AaronAA0721.villageragent.network.ChatMessagePacket;
 import com.github.AaronAA0721.villageragent.network.ModNetworking;
+import com.github.AaronAA0721.villageragent.network.VillagerGoalsRequestPacket;
+import com.github.AaronAA0721.villageragent.network.VillagerInfoRequestPacket;
 import com.mojang.blaze3d.matrix.MatrixStack;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screen.Screen;
@@ -17,12 +19,16 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Visual Novel style communication screen.
+ * Genshin-style borderless dialogue screen.
  *
- * Layout:
- * - Bottom of screen: Dialog box with speaker name and message
- * - Text input for player messages
- * - "End Talk" and "Trade" buttons
+ * Layout (bottom-up):
+ * - Player input box: borderless, semi-transparent solid background, MC-vanilla style
+ * - Villager dialog area: semi-transparent gradient (opaque at top → transparent at bottom)
+ * - Top-left: villager name    Top-right: Trade button
+ * - Exit button: small "X" next to the trade button
+ * - Goals button: left of X; toggles a scrollable list of every goal in the villager's brain
+ * - Info button: left of Goals; toggles needs / skills / inventory / relationships / chunk memory
+ * - While Goals or Info is open the game is paused (singleplayer)
  */
 public class VillagerChatScreen extends Screen {
     private static final Logger LOGGER = LogManager.getLogger();
@@ -42,9 +48,31 @@ public class VillagerChatScreen extends Screen {
     private boolean isWaitingForResponse = false;
 
     // Layout constants
-    private static final int DIALOG_BOX_HEIGHT = 120;
-    private static final int DIALOG_BOX_MARGIN = 40;
-    private static final int NAME_TAG_HEIGHT = 24;
+    private static final int SIDE_MARGIN = 60;
+    private static final int BOTTOM_MARGIN = 24;
+    private static final int INPUT_HEIGHT = 20;
+    private static final int GAP = 6;
+    // Name row sits above dialog; dialog fills from screen midpoint down to input box.
+    private static final int NAME_ROW_HEIGHT = 16;
+
+    // Side panels (Goals / Info): toggled by their buttons, fill the upper half of the screen.
+    // Only one is open at a time. While either is open the game is paused (singleplayer).
+    private enum Panel { NONE, GOALS, INFO }
+    private Panel panel = Panel.NONE;
+    private Button goalsButton;
+    private Button infoButton;
+    private List<String> goalLines = new ArrayList<>();
+    private List<String> infoLines = new ArrayList<>();
+    private boolean goalsLoading = false;
+    private boolean infoLoading = false;
+    private int goalScroll = 0;      // first visible row
+    private int infoScroll = 0;
+    private int panelRefreshTicks = 0;
+    private static final int PANEL_REFRESH_TICKS = 40; // re-query every 2 s while open
+    private static final int PANEL_TOP = 16;
+    private static final int LINE_H = 10;
+    private static final int HEADER_H = 15;
+    private static final int BAR_LABEL_W = 92;
 
     public VillagerChatScreen(UUID villagerId, String villagerName, String profession, String personality,
                               List<ItemStack> inventory, List<ItemStack> armorItems) {
@@ -60,56 +88,242 @@ public class VillagerChatScreen extends Screen {
     public String getProfession() {
         return profession;
     }
-    
+
     @Override
     protected void init() {
         super.init();
 
-        // Dialog box position (bottom of screen)
-        int dialogBoxY = this.height - DIALOG_BOX_HEIGHT - DIALOG_BOX_MARGIN;
-        int dialogBoxWidth = this.width - DIALOG_BOX_MARGIN * 2;
+        int contentWidth = this.width - SIDE_MARGIN * 2;
 
-        // Chat input field (below dialog box)
-        int inputY = this.height - DIALOG_BOX_MARGIN + 5;
-        int inputWidth = dialogBoxWidth - 70;  // More space since no Send button
+        // All UI lives in the bottom half of the screen.
+        // dialogTop = screen midpoint; dialogBottom sits just above input box.
+        int inputY = this.height - BOTTOM_MARGIN - INPUT_HEIGHT;
+        int dialogTop = this.height / 2;
 
-        this.chatInput = new TextFieldWidget(this.font, DIALOG_BOX_MARGIN, inputY, inputWidth, 18, new StringTextComponent(""));
+        // ── Player input field (bottom, borderless MC style) ──
+        this.chatInput = new TextFieldWidget(this.font, SIDE_MARGIN + 4, inputY + 1, contentWidth - 8, INPUT_HEIGHT - 2,
+                new StringTextComponent(""));
         this.chatInput.setMaxLength(200);
         this.chatInput.setVisible(true);
+        this.chatInput.setBordered(false);
         this.addWidget(this.chatInput);
         this.setInitialFocus(this.chatInput);
 
-        // Trade button - opens trade screen
-        this.addButton(new Button(DIALOG_BOX_MARGIN + inputWidth + 5, inputY - 1, 55, 20,
-            new StringTextComponent("Trade"), button -> openTradeScreen()));
+        // ── Trade button (top-right, just above dialog area) ──
+        int btnW = 50;
+        int btnH = 16;
+        this.addButton(new Button(
+                SIDE_MARGIN + contentWidth - btnW, dialogTop - btnH - 2,
+                btnW, btnH,
+                new StringTextComponent("\u00A76Trade"),
+                button -> openTradeScreen()));
 
-        // End Talk button (top right corner)
-        this.addButton(new Button(this.width - DIALOG_BOX_MARGIN - 80, dialogBoxY - 30, 80, 20,
-            new StringTextComponent("End Talk"), button -> onClose()));
+        // ── Exit button ("X", left of Trade) ──
+        this.addButton(new Button(
+                SIDE_MARGIN + contentWidth - btnW - 22, dialogTop - btnH - 2,
+                20, btnH,
+                new StringTextComponent("\u00A7cX"),
+                button -> onClose()));
+
+        // ── Goals button (left of X): toggles the brain's goal list ──
+        this.goalsButton = this.addButton(new Button(
+                SIDE_MARGIN + contentWidth - btnW - 22 - 52, dialogTop - btnH - 2,
+                50, btnH,
+                goalsLabel(),
+                button -> togglePanel(Panel.GOALS)));
+
+        // ── Info button (left of Goals): toggles the villager state panel ──
+        this.infoButton = this.addButton(new Button(
+                SIDE_MARGIN + contentWidth - btnW - 22 - 52 - 46, dialogTop - btnH - 2,
+                44, btnH,
+                infoLabel(),
+                button -> togglePanel(Panel.INFO)));
+    }
+
+    private StringTextComponent goalsLabel() {
+        return new StringTextComponent(panel == Panel.GOALS ? "\u00A7bGoals \u25B4" : "\u00A7bGoals");
+    }
+
+    private StringTextComponent infoLabel() {
+        return new StringTextComponent(panel == Panel.INFO ? "\u00A7aInfo \u25B4" : "\u00A7aInfo");
+    }
+
+    /** Open {@code which} (closing the other one), or close it if it is already open. */
+    private void togglePanel(Panel which) {
+        panel = panel == which ? Panel.NONE : which;
+        if (goalsButton != null) goalsButton.setMessage(goalsLabel());
+        if (infoButton != null) infoButton.setMessage(infoLabel());
+        if (panel == Panel.GOALS) goalScroll = 0;
+        if (panel == Panel.INFO) infoScroll = 0;
+        if (panel != Panel.NONE) requestPanel();
+    }
+
+    private void requestPanel() {
+        panelRefreshTicks = 0;
+        if (panel == Panel.GOALS) {
+            goalsLoading = goalLines.isEmpty();
+            ModNetworking.CHANNEL.sendToServer(new VillagerGoalsRequestPacket(villagerId));
+        } else if (panel == Panel.INFO) {
+            infoLoading = infoLines.isEmpty();
+            ModNetworking.CHANNEL.sendToServer(new VillagerInfoRequestPacket(villagerId));
+        }
+    }
+
+    /** Called by {@link VillagerChatHandler} when the server answers. */
+    public void setGoalLines(List<String> lines) {
+        this.goalLines = new ArrayList<>(lines);
+        this.goalsLoading = false;
+    }
+
+    /** Called by {@link VillagerChatHandler} when the server answers the Info request. */
+    public void setInfoLines(List<String> lines) {
+        this.infoLines = new ArrayList<>(lines);
+        this.infoLoading = false;
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (chatInput != null) chatInput.tick();
+        if (panel != Panel.NONE && ++panelRefreshTicks >= PANEL_REFRESH_TICKS) requestPanel();
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (panel != Panel.NONE && mouseY < this.height / 2.0 - NAME_ROW_HEIGHT) {
+            int step = (int) Math.signum(delta) * 3;
+            if (panel == Panel.GOALS) goalScroll = Math.max(0, goalScroll - step);
+            else infoScroll = Math.max(0, infoScroll - step);
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, delta);
+    }
+
+    private static boolean isHeader(String row) { return row.startsWith("#H|"); }
+    private static boolean isBar(String row)    { return row.startsWith("#B|"); }
+    private static int rowHeight(String row)    { return isHeader(row) ? HEADER_H : LINE_H; }
+
+    /** Draw the open panel in the upper half of the screen (above the name row). */
+    private void renderPanel(MatrixStack matrixStack, int contentWidth, int dialogTop) {
+        boolean goals = panel == Panel.GOALS;
+        int top = PANEL_TOP;
+        int bottom = dialogTop - NAME_ROW_HEIGHT - 6;
+        if (bottom - top < 30) return;
+        int left = SIDE_MARGIN, right = SIDE_MARGIN + contentWidth;
+        int accent = goals ? 0xFF55FFFF : 0xFF55FF55;
+        fill(matrixStack, left, top, right, bottom, 0xC0101018);
+        fill(matrixStack, left, top, right, top + 1, accent);
+
+        String title = goals ? villagerName + "'s goals" : villagerName + " \u2014 villager info";
+        this.font.drawShadow(matrixStack, title, left + 6, top + 4, accent);
+        String hint = "scroll \u2195  \u00B7  auto-refresh 2s";
+        if (Minecraft.getInstance().isPaused()) hint = "\u00A7eGAME PAUSED\u00A7r  \u00B7  " + hint;
+        this.font.drawShadow(matrixStack, hint, right - 6 - this.font.width(hint), top + 4, 0x80AAAAAA);
+
+        // Flatten into rows: plain text is word-wrapped, headers / bars are single rows.
+        List<String> rows = new ArrayList<>();
+        if (goals ? goalsLoading : infoLoading) {
+            rows.add("\u00A77Loading...");
+        } else {
+            for (String line : goals ? goalLines : infoLines) {
+                if (isHeader(line) || isBar(line)) { rows.add(line); continue; }
+                String color = line.startsWith("\u00A7") && line.length() > 1 ? line.substring(0, 2) : "";
+                boolean first = true;
+                for (String w : wrapText(line, contentWidth - 16)) {
+                    rows.add(first ? w : color + "     " + w);
+                    first = false;
+                }
+            }
+        }
+
+        int textTop = top + 16;
+        int avail = bottom - 4 - textTop;
+        // Largest start row such that the tail still fills the panel.
+        int maxScroll = rows.size();
+        int acc = 0;
+        while (maxScroll > 0 && acc + rowHeight(rows.get(maxScroll - 1)) <= avail) {
+            acc += rowHeight(rows.get(--maxScroll));
+        }
+        int scroll = Math.min(goals ? goalScroll : infoScroll, maxScroll);
+        if (goals) goalScroll = scroll; else infoScroll = scroll;
+
+        int y = textTop;
+        int visibleRows = 0;
+        for (int i = scroll; i < rows.size(); i++) {
+            String row = rows.get(i);
+            int h = rowHeight(row);
+            if (y + h > bottom - 4) break;
+            if (isHeader(row)) drawHeaderRow(matrixStack, row, left, right, y, i == scroll);
+            else if (isBar(row)) drawBarRow(matrixStack, row, left, right, y);
+            else this.font.drawShadow(matrixStack, row, left + 8, y, 0xFFFFFFFF);
+            y += h;
+            visibleRows++;
+        }
+        if (maxScroll > 0) {
+            int barH = Math.max(8, avail * visibleRows / Math.max(1, rows.size()));
+            int barY = textTop + (avail - barH) * scroll / maxScroll;
+            fill(matrixStack, right - 4, barY, right - 2, barY + barH, 0xA0AAAAAA);
+        }
+    }
+
+    /** {@code #H|Title|right text} — section title with a thin rule under it. */
+    private void drawHeaderRow(MatrixStack ms, String row, int left, int right, int y, boolean firstVisible) {
+        String[] p = row.split("\\|", -1);
+        String title = p.length > 1 ? p[1] : "";
+        String rt = p.length > 2 ? p[2] : "";
+        int ty = y + (firstVisible ? 1 : 4);
+        this.font.drawShadow(ms, "\u00A7l" + title, left + 6, ty, 0xFFFFD27F);
+        if (!rt.isEmpty()) this.font.drawShadow(ms, rt, right - 8 - this.font.width(rt), ty, 0xFF888888);
+        fill(ms, left + 6, ty + 9, right - 8, ty + 10, 0x50FFFFFF);
+    }
+
+    /** {@code #B|label|value|max|RRGGBB|right text} — label, progress bar, then text. */
+    private void drawBarRow(MatrixStack ms, String row, int left, int right, int y) {
+        String[] p = row.split("\\|", -1);
+        if (p.length < 6) { this.font.drawShadow(ms, row, left + 8, y, 0xFFFFFFFF); return; }
+        String label = p[1];
+        float value, max;
+        int rgb;
+        try {
+            value = Float.parseFloat(p[2]);
+            max = Float.parseFloat(p[3]);
+            rgb = Integer.parseInt(p[4], 16);
+        } catch (NumberFormatException e) {
+            value = 0; max = 1; rgb = 0xAAAAAA;
+        }
+        String rt = p.length > 5 ? p[5] : "";
+
+        this.font.drawShadow(ms, label, left + 12, y, 0xFFDDDDDD);
+        int barX = left + 12 + BAR_LABEL_W;
+        int barW = Math.max(40, Math.min(150, (right - left) / 3));
+        float frac = max <= 0 ? 0 : Math.max(0f, Math.min(1f, value / max));
+        fill(ms, barX - 1, y, barX + barW + 1, y + 8, 0xFF000000);
+        fill(ms, barX, y + 1, barX + barW, y + 7, 0xFF2A2A36);
+        int filled = Math.round(barW * frac);
+        if (filled > 0) {
+            fill(ms, barX, y + 1, barX + filled, y + 7, 0xFF000000 | rgb);
+            fill(ms, barX, y + 1, barX + filled, y + 2, 0x60FFFFFF); // highlight
+        }
+        if (!rt.isEmpty()) this.font.drawShadow(ms, rt, barX + barW + 8, y, 0xFFFFFFFF);
     }
 
     private void openTradeScreen() {
-        // Open the trade screen, passing villager info including armor
         Minecraft.getInstance().setScreen(new VillagerTradeScreen(
-            villagerId, villagerName, profession, personality, villagerInventory, villagerArmor, this));
+                villagerId, villagerName, profession, personality, villagerInventory, villagerArmor, this));
     }
 
     private void sendMessage() {
         String message = chatInput.getValue().trim();
         if (!message.isEmpty() && !isWaitingForResponse) {
-            // Show player's message briefly
             currentSpeaker = "You";
             currentMessage = message;
             isPlayerSpeaking = true;
 
-            // Send to server
             ModNetworking.CHANNEL.sendToServer(new ChatMessagePacket(villagerId, message));
 
-            // Clear input and wait for response
             chatInput.setValue("");
             isWaitingForResponse = true;
 
-            // Show thinking indicator
             currentSpeaker = villagerName;
             currentMessage = "...";
             isPlayerSpeaking = false;
@@ -117,7 +331,6 @@ public class VillagerChatScreen extends Screen {
     }
 
     public void addMessage(String sender, String message, boolean isPlayer) {
-        // Update the current displayed message (visual novel style - one message at a time)
         currentSpeaker = sender;
         currentMessage = message;
         isPlayerSpeaking = isPlayer;
@@ -125,33 +338,26 @@ public class VillagerChatScreen extends Screen {
     }
 
     public void showTradeResult(boolean accepted, String message) {
-        // Show the trade result as dialog
         currentSpeaker = villagerName;
         currentMessage = message;
         isPlayerSpeaking = false;
         isWaitingForResponse = false;
     }
 
-    public UUID getVillagerId() {
-        return villagerId;
+    public UUID getVillagerId() { return villagerId; }
+    public String getVillagerName() { return villagerName; }
+    public String getPersonality() { return personality; }
+    public List<ItemStack> getVillagerInventory() { return villagerInventory; }
+    public String getProfessionName() { return profession; }
+    public List<ItemStack> getVillagerArmor() { return villagerArmor; }
+
+    /** Closing the panel (X / Escape) ends the conversation: the villager gets back to work. */
+    @Override
+    public void onClose() {
+        ModNetworking.CHANNEL.sendToServer(new com.github.AaronAA0721.villageragent.network.ConversationEndPacket(villagerId));
+        super.onClose();
     }
 
-    public String getVillagerName() {
-        return villagerName;
-    }
-
-    public String getPersonality() {
-        return personality;
-    }
-
-    public List<ItemStack> getVillagerInventory() {
-        return villagerInventory;
-    }
-
-    /**
-     * Refresh the cached villager inventory/armor in place (e.g. after a trade),
-     * so re-opening the trade screen shows the updated contents immediately.
-     */
     public void updateVillagerData(List<ItemStack> inventory, List<ItemStack> armor) {
         this.villagerInventory = new ArrayList<>(inventory);
         this.villagerArmor = new ArrayList<>(armor);
@@ -159,74 +365,67 @@ public class VillagerChatScreen extends Screen {
 
     @Override
     public void render(MatrixStack matrixStack, int mouseX, int mouseY, float partialTicks) {
-        // Semi-transparent background (player can still see world)
-        fill(matrixStack, 0, 0, this.width, this.height, 0x60000000);
+        int contentWidth = this.width - SIDE_MARGIN * 2;
+        int inputY = this.height - BOTTOM_MARGIN - INPUT_HEIGHT;
+        int dialogTop = this.height / 2;           // topmost edge = screen midpoint
+        int dialogBottom = inputY - GAP;            // bottom edge = just above input
+        int dialogHeight = dialogBottom - dialogTop;
 
-        // === VISUAL NOVEL STYLE DIALOG BOX (bottom of screen) ===
-        int dialogBoxY = this.height - DIALOG_BOX_HEIGHT - DIALOG_BOX_MARGIN - 30;
-        int dialogBoxWidth = this.width - DIALOG_BOX_MARGIN * 2;
-
-        // Dialog box background (dark semi-transparent with slight blue tint)
-        fill(matrixStack, DIALOG_BOX_MARGIN, dialogBoxY,
-             DIALOG_BOX_MARGIN + dialogBoxWidth, dialogBoxY + DIALOG_BOX_HEIGHT, 0xE01a1a2e);
-
-        // Dialog box border (golden, like Genshin)
-        drawBorder(matrixStack, DIALOG_BOX_MARGIN, dialogBoxY, dialogBoxWidth, DIALOG_BOX_HEIGHT, 0xFFc9a227);
-
-        // Inner border for depth
-        drawBorder(matrixStack, DIALOG_BOX_MARGIN + 2, dialogBoxY + 2,
-                   dialogBoxWidth - 4, DIALOG_BOX_HEIGHT - 4, 0x40c9a227);
-
-        // Name tag (top-left corner of dialog box, overlapping border)
-        if (!currentSpeaker.isEmpty()) {
-            int nameTagWidth = this.font.width(currentSpeaker) + 24;
-            int nameTagX = DIALOG_BOX_MARGIN + 10;
-            int nameTagY = dialogBoxY - NAME_TAG_HEIGHT / 2;
-
-            // Name tag background
-            fill(matrixStack, nameTagX, nameTagY, nameTagX + nameTagWidth, nameTagY + NAME_TAG_HEIGHT, 0xE01a1a2e);
-            drawBorder(matrixStack, nameTagX, nameTagY, nameTagWidth, NAME_TAG_HEIGHT, 0xFFc9a227);
-
-            // Name text (cyan for player, gold for villager)
-            int nameColor = isPlayerSpeaking ? 0xFF55FFFF : 0xFFFFD700;
-            this.font.draw(matrixStack, currentSpeaker, nameTagX + 12, nameTagY + 7, nameColor);
+        // ═══════════════════════════════════════════════════════════
+        //  Villager dialog area: gradient (top semi-opaque → bottom transparent)
+        // ═══════════════════════════════════════════════════════════
+        int steps = 24;
+        int stepH = Math.max(1, dialogHeight / steps);
+        for (int i = 0; i < steps; i++) {
+            int alpha = (int) (0xA0 * (1.0 - (double) i / steps));
+            int color = (alpha << 24) | 0x1a1a2e;
+            int y0 = dialogTop + i * stepH;
+            int y1 = (i == steps - 1) ? dialogBottom : dialogTop + (i + 1) * stepH;
+            fill(matrixStack, SIDE_MARGIN, y0, SIDE_MARGIN + contentWidth, y1, color);
         }
 
-        // Message text with word wrap
+        // ── Villager name (top-left, above dialog area) ──
+        String nameDisplay = villagerName;
+        int nameColor = 0xFFFFD700; // gold
+        this.font.drawShadow(matrixStack, nameDisplay, SIDE_MARGIN + 4, dialogTop - 14, nameColor);
+
+        // ── Profession tag (smaller, next to name) ──
+        int nameW = this.font.width(nameDisplay);
+        this.font.drawShadow(matrixStack, " " + profession, SIDE_MARGIN + 4 + nameW, dialogTop - 14, 0x80AAAAAA);
+
+        // ── Dialog text (inside gradient area) ──
         if (!currentMessage.isEmpty()) {
-            List<String> lines = wrapText(currentMessage, dialogBoxWidth - 40);
-            int textY = dialogBoxY + 20;
+            // Speaker indicator for multi-line clarity
+            int speakerColor = isPlayerSpeaking ? 0xFF55FFFF : 0xFFFFD700;
+            String speakerTag = isPlayerSpeaking ? "" : ""; // no prefix needed — name is already above
+
+            List<String> lines = wrapText(currentMessage, contentWidth - 24);
+            int textY = dialogTop + 12;
             for (String line : lines) {
-                this.font.draw(matrixStack, line, DIALOG_BOX_MARGIN + 20, textY, 0xFFFFFFFF);
-                textY += 14;
+                this.font.drawShadow(matrixStack, line, SIDE_MARGIN + 12, textY, 0xFFFFFFFF);
+                textY += 12;
             }
         }
 
-        // Profession and personality indicator (small text in corner)
-        String infoText = profession + " - " + personality;
-        int infoWidth = this.font.width(infoText);
-        this.font.draw(matrixStack, infoText,
-            DIALOG_BOX_MARGIN + dialogBoxWidth - infoWidth - 10,
-            dialogBoxY + 8, 0x80AAAAAA);
+        // ═══════════════════════════════════════════════════════════
+        //  Player input area: semi-transparent solid background, no border
+        //  Like MC vanilla chat input
+        // ═══════════════════════════════════════════════════════════
+        fill(matrixStack, SIDE_MARGIN, inputY - 2, SIDE_MARGIN + contentWidth, inputY + INPUT_HEIGHT + 2, 0x80000000);
 
-        // Render chat input
+        // Render the text field
         this.chatInput.render(matrixStack, mouseX, mouseY, partialTicks);
 
-        // Hint text for input
+        // Placeholder hint
         if (chatInput.getValue().isEmpty() && !chatInput.isFocused()) {
-            this.font.draw(matrixStack, "Press Enter to send...",
-                DIALOG_BOX_MARGIN + 5, this.height - DIALOG_BOX_MARGIN + 10, 0x80AAAAAA);
+            this.font.drawShadow(matrixStack, "Type a message...",
+                    SIDE_MARGIN + 6, inputY + 5, 0x60AAAAAA);
         }
 
-        // Render buttons
-        super.render(matrixStack, mouseX, mouseY, partialTicks);
-    }
+        if (panel != Panel.NONE) renderPanel(matrixStack, contentWidth, dialogTop);
 
-    private void drawBorder(MatrixStack matrixStack, int x, int y, int width, int height, int color) {
-        fill(matrixStack, x, y, x + width, y + 1, color);
-        fill(matrixStack, x, y + height - 1, x + width, y + height, color);
-        fill(matrixStack, x, y, x + 1, y + height, color);
-        fill(matrixStack, x + width - 1, y, x + width, y + height, color);
+        // Render buttons (Trade, Goals, Info, X)
+        super.render(matrixStack, mouseX, mouseY, partialTicks);
     }
 
     private List<String> wrapText(String text, int maxWidth) {
@@ -253,23 +452,25 @@ public class VillagerChatScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        // Enter key sends message
-        if (keyCode == 257 && chatInput.isFocused()) { // 257 = Enter
+        if (keyCode == 257 && chatInput.isFocused()) { // Enter
             sendMessage();
             return true;
         }
-
-        // Escape closes screen
-        if (keyCode == 256) { // 256 = Escape
+        if (keyCode == 256) { // Escape
             this.onClose();
             return true;
         }
-
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
+    /**
+     * Plain chat keeps the world running; while the Goals or Info panel is open the game is
+     * frozen so the snapshot can be read calmly. Minecraft re-checks this every tick, so the
+     * pause follows the panel toggles. Only effective in singleplayer (vanilla never pauses a
+     * multiplayer or LAN-published world).
+     */
     @Override
     public boolean isPauseScreen() {
-        return false;
+        return panel != Panel.NONE;
     }
 }

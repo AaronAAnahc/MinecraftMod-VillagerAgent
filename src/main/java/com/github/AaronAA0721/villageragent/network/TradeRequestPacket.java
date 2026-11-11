@@ -1,6 +1,7 @@
 package com.github.AaronAA0721.villageragent.network;
 
 import com.github.AaronAA0721.villageragent.ai.DebtAgenda;
+import com.github.AaronAA0721.villageragent.ai.TradeProposal;
 import com.github.AaronAA0721.villageragent.ai.LongTermAgenda;
 import com.github.AaronAA0721.villageragent.ai.VillagerAgentData;
 import com.github.AaronAA0721.villageragent.ai.VillagerEconomySystem;
@@ -85,6 +86,8 @@ public class TradeRequestPacket {
             }
 
 
+            com.github.AaronAA0721.villageragent.ai.PlayerConversation.touch(packet.villagerId, player.getUUID(),
+                    serverWorld.getGameTime());
             // Build trade description for logging
             String tradeDescription = buildTradeDescription(packet, agent);
             LOGGER.info("Trade request: " + tradeDescription);
@@ -195,11 +198,17 @@ public class TradeRequestPacket {
                                                    TradeRequestPacket packet, VillagerEntity villager) {
         double offered = buyValueOf(packet.offerItem1, agent) + buyValueOf(packet.offerItem2, agent);
         double requested = sellValueOf(packet.requestItem1, agent) + sellValueOf(packet.requestItem2, agent);
-        boolean accepted = offered >= requested * ModConfig.BARTER_FAIRNESS_TOLERANCE.get();
+        boolean fair = Double.isFinite(offered) && Double.isFinite(requested) && requested>0
+                && offered >= requested * ModConfig.BARTER_FAIRNESS_TOLERANCE.get();
+        // The trade the villager itself offered in chat (accepted on the pre-filled panel) goes through at the
+        // agreed price; it was checked against both inventories and the price floor when it was offered.
+        TradeProposal offer = TradeProposal.take(packet.villagerId, player.getUUID(), player.level.getGameTime(),
+                packet.offerItem1, packet.offerItem2, packet.requestItem1, packet.requestItem2);
+        boolean accepted = fair || offer != null;
 
         String reason;
         if (accepted) {
-            reason = "That's a fair trade.";
+            reason = offer != null ? "As we agreed, here you go." : "That's a fair trade.";
             if (!executeTrade(player, agent, packet, villager)) {
                 reason = "Items changed or there is not enough inventory space. Nothing was taken.";
                 accepted = false;
@@ -208,8 +217,11 @@ public class TradeRequestPacket {
             reason = "That's not worth it for me.";
         }
 
+        if (accepted && offer != null)
+            agent.addMemory("Kept my word: traded " + offer.describe() + " with " + player.getName().getString() + " as I offered");
         LOGGER.info("Trade " + (accepted ? "ACCEPTED" : "REJECTED")
-                + " (offered " + offered + " >= requested " + requested + "): " + reason);
+                + " (offered " + offered + " vs requested " + requested
+                + (offer != null ? ", villager's own offer: " + offer.describe() : "") + "): " + reason);
 
         sendResult(player, packet.villagerId, accepted, reason, agent, villager);
     }
@@ -224,14 +236,14 @@ public class TradeRequestPacket {
     /** What this villager would pay for the stack, per its personal value table (0.01/unit if it doesn't trade in it). */
     private static double buyValueOf(ItemStack stack, VillagerAgentData agent) {
         if (stack.isEmpty()) return 0.0;
-        return VillagerEconomySystem.buyValue(agent,
+        return VillagerEconomySystem.buyPriceForPlayer(agent,
                 stack.getItem().getRegistryName().toString()) * stack.getCount();
     }
 
     /** What this villager would charge for the stack, per its personal value table (0.01/unit if it doesn't trade in it). */
     private static double sellValueOf(ItemStack stack, VillagerAgentData agent) {
         if (stack.isEmpty()) return 0.0;
-        return VillagerEconomySystem.sellValue(agent,
+        return VillagerEconomySystem.sellPriceForPlayer(agent,
                 stack.getItem().getRegistryName().toString()) * stack.getCount();
     }
 
@@ -300,7 +312,7 @@ public class TradeRequestPacket {
     /**
      * Snapshot the villager's current inventory (post-trade) for client display refresh.
      */
-    private static List<ItemStack> collectInventorySnapshot(VillagerAgentData agent) {
+    static List<ItemStack> collectInventorySnapshot(VillagerAgentData agent) {
         List<ItemStack> items = new ArrayList<>();
         for (ItemStack stack : agent.getInventory().getItems()) {
             if (!stack.isEmpty()) {
@@ -313,7 +325,7 @@ public class TradeRequestPacket {
     /**
      * Snapshot the villager's currently equipped armor (HEAD, CHEST, LEGS, FEET).
      */
-    private static List<ItemStack> collectArmorSnapshot(VillagerEntity villager) {
+    static List<ItemStack> collectArmorSnapshot(VillagerEntity villager) {
         List<ItemStack> armor = new ArrayList<>();
         if (villager != null) {
             armor.add(villager.getItemBySlot(EquipmentSlotType.HEAD).copy());

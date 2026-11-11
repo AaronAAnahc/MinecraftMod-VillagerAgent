@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai.vision;
 
 import com.github.AaronAA0721.villageragent.ai.memory.BlockObservation;
 import com.github.AaronAA0721.villageragent.ai.memory.BlockCategory;
+import com.github.AaronAA0721.villageragent.ai.memory.ChunkFeature;
 import com.github.AaronAA0721.villageragent.ai.memory.EntityCategory;
 import com.github.AaronAA0721.villageragent.ai.memory.EntityObservation;
 import net.minecraft.block.BlockState;
@@ -10,6 +11,7 @@ import net.minecraft.entity.LivingEntity;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.RayTraceContext;
 import net.minecraft.util.math.vector.Vector3d;
 import net.minecraft.world.World;
 
@@ -72,7 +74,12 @@ public final class DetailedViewRecorder {
                     BlockState st = world.getBlockState(p);
                     BlockCategory cat = ChunkContentSampler.classify(st);
                     if (cat == null) continue;                       // air / ignored
-                    if (ChunkContentSampler.featureOf(st) == null) continue;  // not a notable POI in view
+                    ChunkFeature poi = ChunkContentSampler.featureOf(st);
+                    // Not a notable POI in view; gravel is remembered for work only (it would crowd out the rest).
+                    if (poi == null || poi == ChunkFeature.GRAVEL) continue;
+                    // The cone test is geometry only; without this the villager would report
+                    // ore and chests straight through walls and solid stone.
+                    if (!hasLineOfSight(villager, world, eye, p)) continue;
                     BlockObservation bo = new BlockObservation(
                             new BlockPos(x - x0, y, z - z0),
                             st.getBlock().getRegistryName().toString(),
@@ -98,6 +105,13 @@ public final class DetailedViewRecorder {
 
     private static Vector3d center(BlockPos p) {
         return new Vector3d(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5);
+    }
+
+    /** True if the ray from the villager's eye to the block centre lands on that very block. */
+    private static boolean hasLineOfSight(LivingEntity villager, World world, Vector3d eye, BlockPos p) {
+        return world.clip(new RayTraceContext(eye, center(p),
+                RayTraceContext.BlockMode.COLLIDER, RayTraceContext.FluidMode.NONE, villager))
+                .getBlockPos().equals(p);
     }
 
     private static String noteFor(BlockCategory cat, BlockState st) {

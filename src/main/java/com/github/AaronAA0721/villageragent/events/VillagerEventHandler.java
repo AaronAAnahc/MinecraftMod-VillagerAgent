@@ -90,7 +90,8 @@ public class VillagerEventHandler {
                 LOGGER.info("AI Agent created for villager: " + villager.getUUID()
                         + " (" + agent.getName() + ", " + agent.getProfession() + ")");
             }
-        } else if (event.getEntity() instanceof ItemEntity && !event.getWorld().isClientSide) {
+        } else if (event.getEntity() instanceof ItemEntity && !event.getWorld().isClientSide
+                && !com.github.AaronAA0721.villageragent.ai.CraftDisplay.isDisplay(event.getEntity())) {
             // World event: an item dropped into the world (perception-gated consumption, not pickup itself)
             ItemEntity item = (ItemEntity) event.getEntity();
             WorldEventBus.instance((ServerWorld) event.getWorld())
@@ -186,6 +187,8 @@ public class VillagerEventHandler {
                 LOGGER.info("Villager " + agent.getName() + " died and dropped all items");
             }
 
+            if (villager.level instanceof ServerWorld)
+                com.github.AaronAA0721.villageragent.ai.work.MiningWorldData.get((ServerWorld) villager.level).forget(villager.getUUID());
             VillagerAgentManager.removeAgent(villager.getUUID());
             LOGGER.info("AI Agent removed for villager: " + villager.getUUID());
         }
@@ -196,8 +199,10 @@ public class VillagerEventHandler {
      */
     @SubscribeEvent
     public void onWorldTick(TickEvent.WorldTickEvent event) {
-        if (event.phase == TickEvent.Phase.END && !event.world.isClientSide)
+        if (event.phase == TickEvent.Phase.END && !event.world.isClientSide) {
             TradeDemo.tick((ServerWorld) event.world);
+            com.github.AaronAA0721.villageragent.ai.ShowcaseScenario.tick((ServerWorld) event.world);
+        }
         if (!ModConfig.ENABLE_AI_AGENTS.get()) return;
 
         if (event.phase == TickEvent.Phase.END && !event.world.isClientSide) {
@@ -224,6 +229,9 @@ public class VillagerEventHandler {
 
             // Debug overlay — stream perception/agent snapshots to clients (gated by config)
             DebugSync.tick((ServerWorld) event.world);
+
+            // Showcase overlay — villager cards, request tags, notice-board panel (gated by config)
+            com.github.AaronAA0721.villageragent.debug.ShowcaseSync.tick((ServerWorld) event.world);
 
             // Item attraction & pickup — runs every tick for smooth item magnetism
             handleVillagerItemPickup(event.world);
@@ -354,8 +362,18 @@ public class VillagerEventHandler {
             TradeDemo.clear(world);
             com.github.AaronAA0721.villageragent.ai.TradeCoordinator.unload(world);
             com.github.AaronAA0721.villageragent.ai.VillageMarkets.unload(world);
+            com.github.AaronAA0721.villageragent.content.MiningWellPlacer.onWorldUnload(world);
             for (VillagerAgentData agent : VillagerAgentManager.getAllAgents())
                 agent.brain().acquisitions.closeWorld(world);
+        }
+    }
+
+    @SubscribeEvent
+    public void onMiningChunkUnload(ChunkEvent.Unload event) {
+        if (event.getWorld() instanceof ServerWorld) {
+            ServerWorld world = (ServerWorld) event.getWorld();
+            net.minecraft.util.math.ChunkPos pos = event.getChunk().getPos();
+            com.github.AaronAA0721.villageragent.ai.work.MiningWorldData.get(world).releaseChunk(pos.x, pos.z, world);
         }
     }
 
@@ -428,8 +446,13 @@ public class VillagerEventHandler {
             index.onBedRemoved(pos);
         } else {
             index.onBlockChanged(pos);
-            WorldEventBus.instance((ServerWorld) event.getWorld())
-                    .publish(WorldEventBus.Type.BLOCK_CHANGED, pos, ((ServerWorld) event.getWorld()).getGameTime());
+            WorldEventBus bus = WorldEventBus.instance((ServerWorld) event.getWorld());
+            long tick = ((ServerWorld) event.getWorld()).getGameTime();
+            bus.publish(WorldEventBus.Type.BLOCK_CHANGED, pos, tick);
+            // Farmland destroyed → emit dedicated event so farmers can prioritize re-tilling
+            if (event.getState().getBlock() == net.minecraft.block.Blocks.FARMLAND) {
+                bus.publish(WorldEventBus.Type.FARMLAND_DESTROYED, pos, tick);
+            }
         }
     }
 

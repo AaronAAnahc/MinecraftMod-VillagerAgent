@@ -41,7 +41,7 @@ public final class WorldEventBus {
     public static final int EVENT_CAPACITY = 256;
 
     /** Event kinds. Append new kinds at the end — ordinals are not persisted (events are not saved). */
-    public enum Type { BLOCK_CHANGED, ITEM_DROPPED, NEW_VILLAGER }
+    public enum Type { BLOCK_CHANGED, ITEM_DROPPED, NEW_VILLAGER, FARMLAND_DESTROYED }
 
     /** A single immutable environment event. */
     public static final class Event {

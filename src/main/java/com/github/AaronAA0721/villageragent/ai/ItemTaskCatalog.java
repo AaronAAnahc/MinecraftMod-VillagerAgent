@@ -3,12 +3,15 @@ package com.github.AaronAA0721.villageragent.ai;
 import com.github.AaronAA0721.villageragent.ai.proficiency.CapabilityId;
 import com.github.AaronAA0721.villageragent.ai.work.*;
 import net.minecraft.item.Items;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import java.util.*;
 import java.util.function.*;
 import static com.github.AaronAA0721.villageragent.ai.AcquisitionMethods.Context;
 
 /** Output-indexed method providers. Bind an item demand once; agents need no personal method lists. */
 public final class ItemTaskCatalog {
+    private static final Logger LOGGER = LogManager.getLogger("VillagerBrain");
     public static final class Definition {
         public final String id;
         private final Predicate<Context> matches;
@@ -27,12 +30,12 @@ public final class ItemTaskCatalog {
                 ItemTaskCatalog::craftContract, c -> new AcquisitionMethods.Produce(false)));
         register(new Definition("extract", c -> ResourceCatalog.get(c.target.getRegistryName().toString()) != null,
                 ItemTaskCatalog::extractionContract, c -> new AcquisitionMethods.Produce(true).bind(c)));
-        // Wildcard output: discovery does not imply a seller exists, a price is known, or cash is sufficient.
-        register(new Definition("buy_product", c -> c.target != Items.AIR, ItemTaskCatalog::outputContract, c -> new AcquisitionMethods.Buy()));
-        register(new Definition("cooperative_supply", c -> {
-            ResourceCatalog.Source source = ResourceCatalog.get(c.target.getRegistryName().toString());
-            return source != null && source.profession != ResourceProfession.NONE;
-        }, ItemTaskCatalog::outputContract, AcquisitionMethods.Supply::new));
+        register(new Definition("smelt", c -> com.github.AaronAA0721.villageragent.ai.behavior.SmeltSkill.oreFor(c.target) != Items.AIR,
+                ItemTaskCatalog::smeltContract, c -> new AcquisitionMethods.Produce(false, true)));
+        // Wildcard output: a free village request is a waiting dependency even when no supplier exists yet.
+        register(new Definition(AcquisitionMethods.RequestSupply.ID, c -> c.target != Items.AIR,
+                ItemTaskCatalog::outputContract, c -> new AcquisitionMethods.RequestSupply()));
+
     }
     public static void register(Definition definition) {
         if (DEFINITIONS.putIfAbsent(definition.id, definition) != null) throw new IllegalArgumentException("Duplicate method " + definition.id);
@@ -44,8 +47,49 @@ public final class ItemTaskCatalog {
     }
     public static List<TaskMethod<Context>> discover(Context c) {
         List<TaskMethod<Context>> result = new ArrayList<>();
-        for (Definition d : matching(c)) if (d.bind(c).levelsMet(c.agent.getCapabilityPool()::levelOf)) result.add(d.factory.apply(c));
+        List<Definition> matched = matching(c);
+        for (Definition d : matched) {
+            TaskContract contract = d.bind(c);
+            if (contract.levelsMet(c.agent.getCapabilityPool()::levelOf)) {
+                result.add(d.factory.apply(c));
+            } else {
+                LOGGER.debug("{} | DIAG | method-rejected | item={} method={} reason=capability_gate capabilities={}",
+                        c.agent.getName(), c.target.getRegistryName(), d.id,
+                        c.agent.getCapabilityPool().snapshot());
+            }
+        }
+        if (result.isEmpty() && c.executing) {
+            // Log why no method was found at all — helps diagnose stuck acquire loops.
+            StringBuilder sb = new StringBuilder();
+            for (Definition d : DEFINITIONS.values()) {
+                boolean matches = d.matches.test(c);
+                boolean produces = matches && d.bind(c).produces(c.target.getRegistryName().toString());
+                boolean leveled = produces && d.bind(c).levelsMet(c.agent.getCapabilityPool()::levelOf);
+                sb.append(d.id).append("(match=").append(matches)
+                        .append(",produce=").append(produces)
+                        .append(",level=").append(leveled).append(") ");
+            }
+            LOGGER.info("{} | DIAG | discover-empty | item={} profession={} methods=[{}]",
+                    c.agent.getName(), c.target.getRegistryName(), c.agent.getProfession(), sb);
+        }
         return result;
+    }
+    /**
+     * True when a registered production method (crafting, extraction, smelting) exists for this villager
+     * and its capability gates are met. Missing ingredients do not make the output unproducible.
+     */
+    public static boolean canProduce(Context c) {
+        String id = c.target.getRegistryName().toString();
+        for (Definition d : matching(c)) {
+            if (AcquisitionMethods.RequestSupply.ID.equals(d.id)) continue;
+            if (!d.bind(c).levelsMet(c.agent.getCapabilityPool()::levelOf)) continue;
+            if ("extract".equals(d.id)) {
+                ResourceCatalog.Source source = ResourceCatalog.get(id);
+                if (source == null || !source.skilled(c.agent)) continue;
+            }
+            return true;
+        }
+        return false;
     }
     public static TaskContract outputContract(Context c) {
         return new TaskContract(Collections.emptyList(), Collections.emptyMap(),
@@ -59,6 +103,32 @@ public final class ItemTaskCatalog {
         return new TaskContract(items, Collections.singletonMap(source.capability, 1), outputContract(c).outputs,
                 Collections.singletonMap(source.capability, 1));
     }
+    /** A physical batch needs one ore. Existing furnace fuel/output avoids needless purchases. */
+    public static TaskContract smeltContract(Context c) {
+        net.minecraft.item.Item ore = com.github.AaronAA0721.villageragent.ai.behavior.SmeltSkill.oreFor(c.target);
+        List<TaskContract.ItemNeed> items = new ArrayList<>();
+        net.minecraft.util.math.BlockPos pos = c.furnace();
+        net.minecraft.tileentity.AbstractFurnaceTileEntity furnace = pos == null ? null
+                : (net.minecraft.tileentity.AbstractFurnaceTileEntity) c.world.getBlockEntity(pos);
+        boolean ready = furnace != null && !furnace.getItem(2).isEmpty()
+                && furnace.getItem(2).getItem() == c.target
+                && InventoryTransfer.spaceFor(c.agent.getInventory(), furnace.getItem(2)) > 0;
+        if (!ready) {
+            boolean pending = furnace != null && !furnace.getItem(0).isEmpty()
+                    && net.minecraft.item.ItemStack.isSame(furnace.getItem(0), new net.minecraft.item.ItemStack(ore))
+                    && net.minecraft.item.ItemStack.tagMatches(furnace.getItem(0), new net.minecraft.item.ItemStack(ore));
+            if (!pending) items.add(new TaskContract.ItemNeed(ore.getRegistryName().toString(), 1, true));
+            boolean fuel = furnace != null && (FurnaceInventory.burning(furnace)
+                    || net.minecraft.tileentity.AbstractFurnaceTileEntity.isFuel(furnace.getItem(1)));
+            for (net.minecraft.item.ItemStack stack : c.agent.getInventory().getItems())
+                if (FurnaceInventory.carriedFuel(stack)) fuel = true;
+            if (!fuel) items.add(new TaskContract.ItemNeed("minecraft:coal", 1, true));
+        }
+        return new TaskContract(items, Collections.singletonMap(CapabilityId.SMITHING, 1),
+                Collections.singletonMap(c.target.getRegistryName().toString(), 1),
+                Collections.singletonMap(CapabilityId.SMITHING, 1));
+    }
+
     public static TaskContract craftContract(Context c) {
         if (c.craftingContract != null) return c.craftingContract;
         List<TaskContract.ItemNeed> items = new ArrayList<>();

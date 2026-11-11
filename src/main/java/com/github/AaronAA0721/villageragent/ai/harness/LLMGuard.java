@@ -20,7 +20,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Resilience layer for every LLM call (plan: Technical Capability Improvement Plan §1.3 — {@code LLMGuard}).
  *
- * <p>Wraps {@link LLMService#queryLLM(String, String)} so that a flaky / slow / down API
+ * <p>Wraps {@link LLMService#queryLLM(String, String)} ({@link #queryText}: prompts that ask for plain
+ * text or a line protocol) and {@link LLMService#queryLLMJson(String, String)} ({@link #queryJson}: prompts
+ * that ask for a JSON object) so that a flaky / slow / down API
  * can never stall or crash the game thread, and an API outage cannot cascade into a
  * village-wide freeze:
  * <ul>
@@ -65,7 +67,8 @@ public final class LLMGuard {
     }
 
     /**
-     * Guarded LLM call.
+     * Guarded plain-text call: for prompts that ask for free text or a line protocol (greetings,
+     * villager-to-villager dialogue "Name: message", trade GIVE/WANT lines).
      *
      * @param villagerId identity of the calling villager (for per-villager circuit state)
      * @param gameTick   current world game tick (for cooldown bookkeeping)
@@ -74,11 +77,26 @@ public final class LLMGuard {
      * @return future resolving to real content, or an {@link LLMService#fail(String)} marker on
      *         timeout / error / circuit-open.
      */
-    public static CompletableFuture<String> query(UUID villagerId, long gameTick, String system, String user) {
+    public static CompletableFuture<String> queryText(UUID villagerId, long gameTick, String system, String user) {
+        return guarded(villagerId, gameTick, () -> LLMService.queryLLM(system, user));
+    }
+
+    /**
+     * Guarded structured call: for prompts that ask for a JSON object (player chat, harness decisions,
+     * invitation answers). Requests native JSON output when the provider supports it.
+     * Never use it for a prompt that asks for plain text: JSON mode makes the model invent a wrapper
+     * object around the text (e.g. {"lines":[...]}) that the text parser then shows verbatim.
+     */
+    public static CompletableFuture<String> queryJson(UUID villagerId, long gameTick, String system, String user) {
+        return guarded(villagerId, gameTick, () -> LLMService.queryLLMJson(system, user));
+    }
+
+    private static CompletableFuture<String> guarded(UUID villagerId, long gameTick,
+                                                     java.util.function.Supplier<CompletableFuture<String>> call) {
         if (!ModConfig.HARNESS_ENABLED.get()) {
             // Harness disabled — behave exactly as before, but still log the call.
             LOGGER.debug("[LLMGuard] harness disabled; calling LLM directly for {}", villagerId);
-            return LLMService.queryLLM(system, user);
+            return call.get();
         }
 
         if (isCircuitOpen(villagerId, gameTick)) {
@@ -86,7 +104,7 @@ public final class LLMGuard {
             return CompletableFuture.completedFuture(LLMService.fail("circuit-open"));
         }
 
-        CompletableFuture<String> inner = LLMService.queryLLM(system, user);
+        CompletableFuture<String> inner = call.get();
 
         // Manual timeout watchdog (Java 8 compatible).
         long timeoutMs = ModConfig.HARNESS_TIMEOUT_MS.get();

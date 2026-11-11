@@ -24,16 +24,21 @@ public final class TaskMethodExecution<C> {
     private final Map<String, Long> cooldowns = new HashMap<>();
     private final Map<String, Integer> failures = new HashMap<>();
     private TaskMethod<C> active;
+    private UUID activeAttempt;
     private long lastTick, elapsed, progressAt, reconsiderAt;
     private TaskMethod.Status previous = TaskMethod.Status.RUNNING;
     private String lastTransition = "none";
     private String pendingExit;
+    /** Method that last returned DONE, for {@link #exhaustLast}. */
+    private String lastDone;
     private int transitions;
     private double lastScore, lastRemainingCost;
     private long progressVersion;
 
     public TaskMethodExecution(Policy policy) { this.policy = policy; }
     public String activeId() { return active == null ? null : active.id(); }
+    /** Attempt id passed to the active method's {@code start}; null when idle. */
+    public UUID activeAttempt() { return active == null ? null : activeAttempt; }
     public String lastTransition() { return lastTransition; }
     public int transitions() { return transitions; }
     public double score() { return lastScore; }
@@ -53,6 +58,7 @@ public final class TaskMethodExecution<C> {
             if (update.progressed) { progressAt = elapsed; progressVersion++; }
             if (update.status == TaskMethod.Status.DONE) {
                 failures.remove(active.id());
+                lastDone = active.id();
                 finish(context, now, "done", false, false);
                 return TaskMethod.Status.DONE; // The parent still checks its own completion predicate.
             }
@@ -87,7 +93,8 @@ public final class TaskMethodExecution<C> {
         }
         if (best == null) return TaskMethod.Status.WAITING;
         active = best;
-        active.start(context, UUID.randomUUID());
+        activeAttempt = UUID.randomUUID();
+        active.start(context, activeAttempt);
         lastTick = now; elapsed = progressAt = 0; previous = TaskMethod.Status.RUNNING;
         lastScore = bestScore;
         lastRemainingCost = bestScore - failures.getOrDefault(best.id(), 0) * policy.failurePenalty;
@@ -95,6 +102,19 @@ public final class TaskMethodExecution<C> {
         pendingExit = null; transitions++;
         return TaskMethod.Status.RUNNING;
     }
+    /**
+     * The method that last returned DONE reached its own exit condition, but the parent objective is still unmet
+     * (a farm session ended with nothing left to harvest, till or pick up): cool it down without a failure
+     * penalty so the next selection tries another method.
+     */
+    public void exhaustLast(long now) {
+        if (lastDone == null) return;
+        cooldowns.put(lastDone, now + policy.cooldownTicks);
+        lastTransition = "exhausted:" + lastDone; pendingExit = lastTransition; transitions++;
+        reconsiderAt = now;
+        lastDone = null;
+    }
+
     public void close(C context) {
         if (active != null) active.close(context);
         active = null;

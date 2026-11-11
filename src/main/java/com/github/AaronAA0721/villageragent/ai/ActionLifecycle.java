@@ -21,12 +21,24 @@ public final class ActionLifecycle {
         ResourceWorkSystem.release(world, agent, frame.goal);
     }
     public static void clearBody(VillagerAgentData agent, VillagerEntity villager, ServerWorld world) {
+        com.github.AaronAA0721.villageragent.ai.work.MiningWorldData.get(world).release(villager.getUUID());
         VillagerAction action = agent.getCurrentAction();
         if (action != null && action.getTargetBlockPos() != null && action.getActionType() == VillagerAction.ActionType.BREAK)
             world.destroyBlockProgress(villager.getId(), action.getTargetBlockPos(), -1);
         agent.setCurrentAction(null);
         villager.getNavigation().stop();
         if (villager.isSleeping()) villager.stopSleeping();
+    }
+    /**
+     * Drop whatever the villager is doing and run {@code goal} now (operator commands and showcase scenes).
+     * The goal is added to the brain if it is not there yet; the scheduler may still preempt it later as usual.
+     */
+    public static void startNow(VillagerAgentData agent, VillagerEntity villager, ServerWorld world, AgentGoal goal) {
+        cancel(agent, villager, world);
+        if (!agent.getGoals().contains(goal)) agent.getGoals().add(goal);
+        agent.setRunningGoal(goal);
+        agent.brain().goalStartedTick = world.getGameTime();
+        agent.setCurrentActivity(goal.getGoalType());
     }
     private ActionLifecycle() {}
 }

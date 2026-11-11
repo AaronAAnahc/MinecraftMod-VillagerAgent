@@ -33,6 +33,8 @@ public final class NativeRecipeResolver {
     public static IRecipe<?> findRecipe(ServerWorld world, Item target) {
         if (target == null) return null;
         for (IRecipe<?> recipe : world.getRecipeManager().getRecipes()) {
+            // Cooking recipes must run in their real tile entity, never in an inventory craft.
+            if (recipe.getType() != net.minecraft.item.crafting.IRecipeType.CRAFTING) continue;
             ItemStack result = recipe.getResultItem();
             if (result != null && !result.isEmpty() && result.getItem() == target) {
                 return recipe;
@@ -48,7 +50,7 @@ public final class NativeRecipeResolver {
 
     /**
      * Resolve a craftable item to a {@link ResolvedRecipe}. Tries the game's own vanilla recipe
-     * (crafting table / furnace) first; if none exists, falls back to a {@link CustomRecipe}
+     * (crafting grid) first; if none exists, falls back to a {@link CustomRecipe}
      * loaded from {@code custom_recipes.json}. Returns null when neither applies.
      */
     public static ResolvedRecipe resolveRecipe(ServerWorld world, String itemId) {
@@ -73,7 +75,7 @@ public final class NativeRecipeResolver {
      * @return true if the craft succeeded, false if materials were insufficient
      */
     public static boolean consumeAndProduce(AgentInventory inv, IRecipe<?> recipe, int qty) {
-        if (recipe == null) return false;
+        if (recipe == null || recipe.getType() != net.minecraft.item.crafting.IRecipeType.CRAFTING) return false;
         if (qty < 1) qty = 1;
 
         // Resolve each ingredient slot to a concrete item, preferring one the villager already has.

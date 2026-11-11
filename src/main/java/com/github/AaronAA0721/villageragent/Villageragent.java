@@ -37,6 +37,7 @@ public class Villageragent {
 
     public Villageragent() {
         com.github.AaronAA0721.villageragent.content.Workstations.register(FMLJavaModLoadingContext.get().getModEventBus());
+        com.github.AaronAA0721.villageragent.content.ModEntities.register(FMLJavaModLoadingContext.get().getModEventBus());
         // Register the setup method for modloading
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
         // Register the enqueueIMC method for modloading
@@ -86,6 +87,7 @@ public class Villageragent {
         VillagerAgentConfigDir.extractDefault("custom_recipes.json");
         VillagerAgentConfigDir.extractDefault("proficiency.json");
         VillagerAgentConfigDir.extractDefault("craft_unlocks.json");
+        VillagerAgentConfigDir.extractDefault("craft_targets.json");
         VillagerAgentConfigDir.extractDefault("default_chat_lines.json");
         LOGGER.info("VillagerAgent editable configs are in config/villageragent/");
 
@@ -93,12 +95,17 @@ public class Villageragent {
         event.enqueueWork(() -> {
             ModNetworking.register();
             LOGGER.info("VillagerAgent network packets registered!");
+
+            // Inject lumberjack/miner huts into vanilla village house pools
+            com.github.AaronAA0721.villageragent.content.VillageStructureInjector.inject();
         });
     }
 
     private void doClientStuff(final FMLClientSetupEvent event) {
         // do something that can only be done on the client
         LOGGER.info("Got game settings {}", event.getMinecraftSupplier().get().options);
+        // Entity renderers (the villager fishing bobber and its line).
+        com.github.AaronAA0721.villageragent.client.ClientSetup.registerRenderers();
     }
 
     private void enqueueIMC(final InterModEnqueueEvent event) {
@@ -117,7 +124,9 @@ public class Villageragent {
     // You can use SubscribeEvent and let the Event Bus discover methods to call
     @SubscribeEvent
     public void onServerStarting(FMLServerStartingEvent event) {
-        // do something when the server starts
+        // Register programmatic structure templates into the server's StructureManager
+        com.github.AaronAA0721.villageragent.content.VillageStructureInjector.registerTemplates(
+                event.getServer().getStructureManager());
         LOGGER.info("HELLO from server starting");
     }
 

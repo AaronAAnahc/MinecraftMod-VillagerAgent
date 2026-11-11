@@ -82,6 +82,108 @@ public class AgentGoal {
      *  planner scans existing goals' outcome sets for X and boosts that goal's priority instead
      *  of spawning a duplicate. Empty set = "outcome not item-producing" (e.g. sleep, move). */
     private Set<String> outcomeItems = new HashSet<>();
+    // ── Timed priority boost (scheduled goals) ──
+    /** Game tick at which this goal's effective priority is temporarily raised to
+     *  {@link #scheduledPriority}. Before that tick, the goal uses its normal priority.
+     *  {@code Long.MAX_VALUE} means no schedule. Combined with the tether system, this
+     *  lets a villager come back to a workstation after a wait without a dedicated timer. */
+    private long scheduledTick = Long.MAX_VALUE;
+    /** Priority applied once {@code scheduledTick} is reached. Should be below combat (9) and
+     *  rest (8); the recommended value is 7 ("time-sensitive but not life-threatening"). */
+    private int scheduledPriority = 7;
+    public long getScheduledTick() { return scheduledTick; }
+    public void setScheduledTick(long tick) { this.scheduledTick = tick; }
+    public int getScheduledPriority() { return scheduledPriority; }
+    public void setScheduledPriority(int priority) { this.scheduledPriority = priority; }
+    /** Effective priority: the higher of normal and scheduled (if the time has come). */
+    public int effectivePriority(long gameTick) {
+        if (scheduledTick != Long.MAX_VALUE && gameTick >= scheduledTick)
+            return Math.max(priority, scheduledPriority);
+        return priority;
+    }
+    /** Appointment mode for {@link #scheduledTick}: the goal is not pickable at all before that tick
+     *  (instead of merely running at normal priority). Set for LLM goals with an "at"/"in_seconds" time. */
+    private boolean holdUntilScheduled;
+    public boolean isHoldUntilScheduled() { return holdUntilScheduled; }
+    public void setHoldUntilScheduled(boolean hold) { this.holdUntilScheduled = hold; }
+    /** True while an appointment goal is still waiting for its start tick. */
+    public boolean isHeldUntilScheduled(long gameTick) {
+        return holdUntilScheduled && scheduledTick != Long.MAX_VALUE && gameTick < scheduledTick;
+    }
+    /** True once an appointment goal's start tick has come: it is booked and goes first when the villager is free. */
+    public boolean isScheduledDue(long gameTick) {
+        return holdUntilScheduled && scheduledTick != Long.MAX_VALUE && gameTick >= scheduledTick;
+    }
+    /**
+     * Called when the scheduler hands this goal the running slot. An appointment's deadline is a
+     * <em>start-by</em> deadline: once it has started it must not expire mid-way.
+     */
+    public void markStarted() {
+        if (holdUntilScheduled && lifecycle == Lifecycle.EXPIRING) {
+            lifecycle = Lifecycle.ONE_SHOT;
+            deadlineTick = Long.MAX_VALUE;
+        }
+    }
+
+    // ── Goal sequence ("sequence"): ordered steps run back-to-back by SequenceSkill ──
+    /** Ordered child goals; non-empty only for a {@code sequence} goal. Steps are never roots. */
+    private java.util.List<AgentGoal> steps = new java.util.ArrayList<>();
+    /** Index of the step currently being executed (== steps.size() when all are done). */
+    private int stepIndex;
+    public java.util.List<AgentGoal> getSteps() { return steps; }
+    public boolean hasSteps() { return !steps.isEmpty(); }
+    public int getStepIndex() { return stepIndex; }
+    public void setStepIndex(int index) { stepIndex = Math.max(0, index); }
+    /** The step to run now, or null when the sequence is finished. */
+    public AgentGoal currentStep() { return stepIndex < steps.size() ? steps.get(stepIndex) : null; }
+
+    // ── Invitation ("invite"): visit each invitee and propose a shared plan ──
+    private java.util.List<UUID> invitees = new java.util.ArrayList<>();
+    private int inviteIndex;
+    /** The activity being proposed (single goal or sequence, usually timed). Copied into each brain that accepts. */
+    private AgentGoal invitePlan;
+    private String inviteMessage;
+    public java.util.List<UUID> getInvitees() { return invitees; }
+    public int getInviteIndex() { return inviteIndex; }
+    public void setInviteIndex(int index) { inviteIndex = Math.max(0, index); }
+    public AgentGoal getInvitePlan() { return invitePlan; }
+    public void setInvitePlan(AgentGoal plan) { invitePlan = plan; }
+    public String getInviteMessage() { return inviteMessage; }
+    public void setInviteMessage(String message) { inviteMessage = message; }
+    /** Shared id of one group activity: every villager's copy of an accepted plan carries the same id. */
+    private UUID groupId;
+    public UUID getGroupId() { return groupId; }
+    public void setGroupId(UUID id) { groupId = id; }
+    /** Short human-readable name of a planned activity ("Dinner", "Cook meat"); shown in the goals panel. */
+    private String title;
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title == null || title.trim().isEmpty() ? null : title.trim(); }
+    /**
+     * For an invitation's plan: true when the inviter takes part too ({@code invite}: "dinner together"),
+     * false when the inviter only asked the others to do it ({@code ask}: "please cook in an hour").
+     */
+    private boolean shared;
+    public boolean isShared() { return shared; }
+    public void setShared(boolean shared) { this.shared = shared; }
+    /** Who proposed the plan (the inviter or asker); in a shared plan the others follow this villager, e.g. on a stroll. */
+    private UUID leaderId;
+    public UUID getLeaderId() { return leaderId; }
+    public void setLeaderId(UUID id) { leaderId = id; }
+
+    // ── Activity end ("until"/"for_minutes"): an appointment that lasts until a set tick ──
+    /** Tick at which a timed activity ends ({@code Long.MAX_VALUE} = ends when its steps are done). */
+    private long endTick = Long.MAX_VALUE;
+    public long getEndTick() { return endTick; }
+    public void setEndTick(long tick) { endTick = tick; }
+    public boolean hasEndTime() { return endTick != Long.MAX_VALUE; }
+    /** True once the activity's end time has passed. */
+    public boolean isPastEnd(long gameTick) { return endTick != Long.MAX_VALUE && gameTick >= endTick; }
+    /**
+     * An "activity" is a plan that is about being somewhere with someone for a while: it has an end
+     * time or belongs to a group. Activities wait out WAITING steps and gather before starting.
+     */
+    public boolean isActivity() { return endTick != Long.MAX_VALUE || groupId != null; }
+
     /** Most recent failure recorded by the executing skill (runtime only; not NBT-persisted).
      *  Read by {@code FailureRecoveryPlanner} after a BLOCKED/FAIL return. */
     private Failure lastFailure = null;
@@ -96,11 +198,45 @@ public class AgentGoal {
     private UUID tradeMessageId;
     public UUID getTradeMessageId() { return tradeMessageId; }
     public void setTradeMessageId(UUID id) { tradeMessageId = id; }
+    /** Runtime-only: any tool/food of this supply category satisfies the target (see SupplyPolicy). */
+    private String requestCategory;
+    public String getRequestCategory() { return requestCategory; }
+    public void setRequestCategory(String category) { requestCategory = category; }
+    /** Runtime-only: remembered request spec key and units, as last read on the board (supply responses). */
+    private String requestSpec;
+    private int requestUnits;
+    public String getRequestSpec() { return requestSpec; }
+    public void setRequestSpec(String key) { requestSpec = key; }
+    public int getRequestUnits() { return requestUnits; }
+    public void setRequestUnits(int units) { requestUnits = Math.max(0, units); }
+    /** Runtime-only: the delivery meeting this supply task is waiting on after claiming its request. */
+    private UUID claimId;
+    public UUID getClaimId() { return claimId; }
+    public void setClaimId(UUID id) { claimId = id; }
+    /** Runtime-only: acquisition may produce but must not publish a request for this exact output. */
+    private boolean selfProductionOnly;
+    public boolean isSelfProductionOnly() { return selfProductionOnly; }
+    public void setSelfProductionOnly(boolean value) { selfProductionOnly = value; }
     private int failureCount;
     public UUID getWorkOrderId() { return workOrderId; }
     public void setWorkOrderId(UUID id) { workOrderId = id; }
     public int recordFailure() { return ++failureCount; }
+    public int getFailureCount() { return failureCount; }
     public void resetFailures() { failureCount = 0; }
+
+    // ── Child-goal dependency: acquire blocks itself while a spawned child (craft/trade) runs ──
+    /** ID of a child goal that must complete before this goal re-enters scheduling.
+     *  Null means no active child dependency. Set by AcquireItemSkill when it spawns
+     *  a production/trade goal; cleared when that child completes or is removed. */
+    private String childGoalType;
+    private String childTargetItem;
+    public String getChildGoalType() { return childGoalType; }
+    public String getChildTargetItem() { return childTargetItem; }
+    public void setChildDependency(String goalType, String targetItem) {
+        this.childGoalType = goalType; this.childTargetItem = targetItem;
+    }
+    public void clearChildDependency() { childGoalType = null; childTargetItem = null; }
+    public boolean hasChildDependency() { return childGoalType != null; }
 
     public AgentGoal(String goalType, String description, int priority) {
         this.goalType = goalType;
@@ -113,6 +249,7 @@ public class AgentGoal {
     // Getters and setters
     public String getGoalType() { return goalType; }
     public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
     public int getPriority() { return priority; }
     public void setPriority(int priority) { this.priority = priority; }
     public BlockPos getTargetLocation() { return targetLocation; }

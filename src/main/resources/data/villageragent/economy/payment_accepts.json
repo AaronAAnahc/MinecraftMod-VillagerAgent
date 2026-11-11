@@ -1,0 +1,220 @@
+{
+  "default": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 5, "retain": false},
+    "minecraft:wheat": {"priority": 4, "retain": false},
+    "minecraft:iron_ingot": {"priority": 3, "retain": false},
+    "minecraft:gold_ingot": {"priority": 3, "retain": false},
+    "minecraft:stick": {"priority": 6, "retain": false},
+    "minecraft:cobblestone": {"priority": 7, "retain": false}
+  },
+
+  "minecraft:farmer": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:wooden_hoe": {"priority": 1, "retain": false},
+    "minecraft:wheat_seeds": {"priority": 2, "retain": false},
+    "minecraft:wheat": {"priority": 3, "retain": false},
+    "minecraft:bread": {"priority": 6, "retain": false},
+    "minecraft:hay_block": {"priority": 7, "retain": false},
+    "minecraft:carrot": {"priority": 9, "retain": false},
+    "minecraft:potato": {"priority": 9, "retain": false},
+    "minecraft:beetroot": {"priority": 9, "retain": false},
+    "minecraft:melon_slice": {"priority": 9, "retain": false},
+    "minecraft:pumpkin": {"priority": 9, "retain": false},
+    "minecraft:sweet_berries": {"priority": 9, "retain": false},
+    "minecraft:pumpkin_pie": {"priority": 9, "retain": false},
+    "minecraft:cake": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:fisherman": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:wooden_axe": {"priority": 1, "retain": false},
+    "minecraft:string": {"priority": 2, "retain": false},
+    "minecraft:apple": {"priority": 3, "retain": false},
+    "minecraft:cod": {"priority": 9, "retain": false},
+    "minecraft:salmon": {"priority": 9, "retain": false},
+    "minecraft:tropical_fish": {"priority": 9, "retain": false},
+    "minecraft:pufferfish": {"priority": 9, "retain": false},
+    "minecraft:fishing_rod": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:shepherd": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:shears": {"priority": 1, "retain": false},
+    "minecraft:wooden_axe": {"priority": 2, "retain": false},
+    "minecraft:wheat": {"priority": 3, "retain": false},
+    "minecraft:mutton": {"priority": 9, "retain": false},
+    "minecraft:white_wool": {"priority": 9, "retain": false},
+    "minecraft:orange_wool": {"priority": 9, "retain": false},
+    "minecraft:magenta_wool": {"priority": 9, "retain": false},
+    "minecraft:light_blue_wool": {"priority": 9, "retain": false},
+    "minecraft:yellow_wool": {"priority": 9, "retain": false},
+    "minecraft:lime_wool": {"priority": 9, "retain": false},
+    "minecraft:pink_wool": {"priority": 9, "retain": false},
+    "minecraft:gray_wool": {"priority": 9, "retain": false},
+    "minecraft:light_gray_wool": {"priority": 9, "retain": false},
+    "minecraft:cyan_wool": {"priority": 9, "retain": false},
+    "minecraft:purple_wool": {"priority": 9, "retain": false},
+    "minecraft:blue_wool": {"priority": 9, "retain": false},
+    "minecraft:brown_wool": {"priority": 9, "retain": false},
+    "minecraft:green_wool": {"priority": 9, "retain": false},
+    "minecraft:red_wool": {"priority": 9, "retain": false},
+    "minecraft:black_wool": {"priority": 9, "retain": false},
+    "minecraft:white_carpet": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:fletcher": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:feather": {"priority": 2, "retain": false},
+    "minecraft:string": {"priority": 2, "retain": false},
+    "minecraft:stick": {"priority": 5, "retain": false},
+    "minecraft:arrow": {"priority": 9, "retain": false},
+    "minecraft:bow": {"priority": 9, "retain": false},
+    "minecraft:crossbow": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:librarian": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:paper": {"priority": 2, "retain": false},
+    "minecraft:book": {"priority": 6, "retain": false},
+    "minecraft:bookshelf": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:cartographer": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:glowstone": {"priority": 2, "retain": false},
+    "minecraft:paper": {"priority": 6, "retain": false},
+    "minecraft:map": {"priority": 9, "retain": false},
+    "minecraft:filled_map": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:cleric": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:glowstone": {"priority": 2, "retain": false},
+    "minecraft:paper": {"priority": 2, "retain": false},
+    "minecraft:book": {"priority": 3, "retain": false},
+    "minecraft:glass_bottle": {"priority": 9, "retain": false},
+    "minecraft:ender_pearl": {"priority": 8, "retain": false}
+  },
+
+  "minecraft:armorer": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 2, "retain": false},
+    "minecraft:iron_ingot": {"priority": 2, "retain": false},
+    "minecraft:gold_ingot": {"priority": 2, "retain": false},
+    "minecraft:iron_helmet": {"priority": 9, "retain": false},
+    "minecraft:iron_chestplate": {"priority": 9, "retain": false},
+    "minecraft:iron_leggings": {"priority": 9, "retain": false},
+    "minecraft:iron_boots": {"priority": 9, "retain": false},
+    "minecraft:chainmail_helmet": {"priority": 9, "retain": false},
+    "minecraft:chainmail_chestplate": {"priority": 9, "retain": false},
+    "minecraft:chainmail_leggings": {"priority": 9, "retain": false},
+    "minecraft:chainmail_boots": {"priority": 9, "retain": false},
+    "minecraft:diamond_helmet": {"priority": 9, "retain": false},
+    "minecraft:diamond_chestplate": {"priority": 9, "retain": false},
+    "minecraft:diamond_leggings": {"priority": 9, "retain": false},
+    "minecraft:diamond_boots": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:weaponsmith": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 2, "retain": false},
+    "minecraft:iron_ingot": {"priority": 2, "retain": false},
+    "minecraft:iron_sword": {"priority": 6, "retain": false},
+    "minecraft:iron_axe": {"priority": 9, "retain": false},
+    "minecraft:diamond_sword": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:toolsmith": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 2, "retain": false},
+    "minecraft:iron_ingot": {"priority": 2, "retain": false},
+    "minecraft:iron_pickaxe": {"priority": 6, "retain": false},
+    "minecraft:iron_shovel": {"priority": 9, "retain": false},
+    "minecraft:iron_hoe": {"priority": 9, "retain": false},
+    "minecraft:iron_axe": {"priority": 9, "retain": false},
+    "minecraft:diamond_pickaxe": {"priority": 9, "retain": false},
+    "minecraft:diamond_axe": {"priority": 9, "retain": false},
+    "minecraft:diamond_hoe": {"priority": 9, "retain": false},
+    "minecraft:diamond_shovel": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:mason": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:stone_pickaxe": {"priority": 1, "retain": false},
+    "minecraft:oak_log": {"priority": 3, "retain": false},
+    "minecraft:stone": {"priority": 9, "retain": false},
+    "minecraft:stone_bricks": {"priority": 9, "retain": false},
+    "minecraft:chiseled_stone_bricks": {"priority": 9, "retain": false},
+    "minecraft:polished_andesite": {"priority": 9, "retain": false},
+    "minecraft:bricks": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:leatherworker": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:leather": {"priority": 2, "retain": false},
+    "minecraft:string": {"priority": 2, "retain": false},
+    "minecraft:leather_helmet": {"priority": 9, "retain": false},
+    "minecraft:leather_chestplate": {"priority": 9, "retain": false},
+    "minecraft:leather_leggings": {"priority": 9, "retain": false},
+    "minecraft:leather_boots": {"priority": 9, "retain": false},
+    "minecraft:saddle": {"priority": 8, "retain": false}
+  },
+
+  "minecraft:butcher": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 2, "retain": false},
+    "minecraft:wheat": {"priority": 3, "retain": false},
+    "minecraft:cooked_beef": {"priority": 9, "retain": false},
+    "minecraft:cooked_porkchop": {"priority": 9, "retain": false},
+    "minecraft:cooked_chicken": {"priority": 9, "retain": false},
+    "minecraft:cooked_mutton": {"priority": 9, "retain": false},
+    "minecraft:cooked_rabbit": {"priority": 9, "retain": false},
+    "minecraft:cooked_cod": {"priority": 9, "retain": false},
+    "minecraft:cooked_salmon": {"priority": 9, "retain": false},
+    "minecraft:rabbit_stew": {"priority": 9, "retain": false}
+  },
+
+  "villageragent:lumberjack": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:wooden_axe": {"priority": 2, "retain": false},
+    "minecraft:stick": {"priority": 7, "retain": false},
+    "minecraft:oak_log": {"priority": 9, "retain": false},
+    "minecraft:spruce_log": {"priority": 9, "retain": false},
+    "minecraft:birch_log": {"priority": 9, "retain": false},
+    "minecraft:jungle_log": {"priority": 9, "retain": false},
+    "minecraft:acacia_log": {"priority": 9, "retain": false},
+    "minecraft:dark_oak_log": {"priority": 9, "retain": false},
+    "minecraft:oak_planks": {"priority": 9, "retain": false},
+    "minecraft:spruce_planks": {"priority": 9, "retain": false},
+    "minecraft:birch_planks": {"priority": 9, "retain": false},
+    "minecraft:jungle_planks": {"priority": 9, "retain": false},
+    "minecraft:acacia_planks": {"priority": 9, "retain": false},
+    "minecraft:dark_oak_planks": {"priority": 9, "retain": false}
+  },
+
+  "villageragent:miner": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:stone_pickaxe": {"priority": 1, "retain": false},
+    "minecraft:cobblestone": {"priority": 8, "retain": false},
+    "minecraft:coal": {"priority": 9, "retain": false},
+    "minecraft:iron_ore": {"priority": 9, "retain": false},
+    "minecraft:gold_ore": {"priority": 9, "retain": false},
+    "minecraft:redstone": {"priority": 9, "retain": false},
+    "minecraft:lapis_lazuli": {"priority": 9, "retain": false},
+    "minecraft:quartz": {"priority": 9, "retain": false},
+    "minecraft:diamond": {"priority": 9, "retain": false}
+  },
+
+  "minecraft:nitwit": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:wheat": {"priority": 3, "retain": false},
+    "minecraft:apple": {"priority": 3, "retain": false}
+  },
+
+  "minecraft:unemployed": {
+    "minecraft:emerald": {"priority": 8, "retain": false},
+    "minecraft:wooden_hoe": {"priority": 2, "retain": false},
+    "minecraft:wheat": {"priority": 3, "retain": false}
+  }
+}

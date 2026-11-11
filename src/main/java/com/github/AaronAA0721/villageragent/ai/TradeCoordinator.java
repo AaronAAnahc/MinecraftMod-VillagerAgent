@@ -10,24 +10,66 @@ import net.minecraft.command.CommandSource;
 import net.minecraft.util.text.StringTextComponent;
 import java.util.*;
 
-/** Two ready participants start one meeting. Ordinary work is never cancelled to start a trade. */
+/**
+ * Shared state of joint meetings. Every meeting — a free cooperative delivery or an operator-directed
+ * exchange — is a pair of {@code meet_trade} root goals, one per participant: walk towards the partner, hand
+ * over where they meet, pick up. For a delivery only the provider's goal exists at first: it walks to the
+ * requester, and the requester's goal is added (invited) once the provider is within 16 blocks and can reach it. The coordinator owns only the session (booking, readiness,
+ * meeting point, thrown items). The requester's acquisition and the provider's {@code supply_request} do not
+ * drive the meeting; they only observe the request it consumes. Paid villager-to-villager board matching is
+ * retired.
+ */
 public final class TradeCoordinator {
+    private static final int PICKUP_TIMEOUT_TICKS = 600;
+    /** How long the first arrival waits at the meeting point for its partner (busy partners finish their task first). */
+    private static final int PARTNER_WAIT_TICKS = 1800;
+    /** Both participants within three blocks of each other, with line of sight, can hand over. */
+    private static final double HANDOFF_DIST_SQ = 9;
+    /** A delivery's requester is invited once the walking provider is this close (16 blocks) and can reach it. */
+    private static final double INVITE_DIST_SQ = 256;
+    /** Within 6 blocks and in sight, a villager without a path waits for its partner instead of failing. */
+    private static final double CLOSE_WAIT_DIST_SQ = 36;
+    /** Path searches (about one per second) that may fail in a row before a far-away participant gives up. */
+    private static final int MAX_PATH_MISSES = 10;
     private static final class Meeting {
         final ServerWorld world;
         final UUID id, buyer, seller;
         final BlockPos position;
+        long droppedAt = -1;
+        final List<net.minecraft.entity.item.ItemEntity> drops = new ArrayList<>();
         ItemStack goods = ItemStack.EMPTY, payment = ItemStack.EMPTY;
-        Meeting(ServerWorld w, VillageSignalBoard.VillageMessage want, VillageSignalBoard.VillageMessage have,
-                VillagerEntity customer) {
-            world=w; id=want.id; buyer=want.author; seller=have.author; position=customer.blockPosition();
+        /** Free one-way delivery: buyer is the requester, seller is the provider. */
+        final CooperativeSupply.Reservation delivery;
+        /** Last tick each participant's meeting subtask executed (delivery sessions). */
+        final Map<UUID, Long> seen = new HashMap<>();
+        /** Consecutive failed path searches per participant. */
+        final Map<UUID, Integer> pathMisses = new HashMap<>();
+        /** Last path search per participant (searches run at most every 20 ticks, 5 when navigation ended). */
+        final Map<UUID, Long> lastPlan = new HashMap<>();
+        /** Delivery: tick the requester was given its meet_trade goal (provider close and reachable); -1 before. */
+        long invitedAt = -1;
+        long deadline;
+        /** Delivery: the walking participant's last path to its partner reached it. */
+        boolean walkerReaches;
+        /**
+         * Delivery booked from a claimed offer: the requester walks to the provider and the provider is invited
+         * when it is close. Otherwise (a claimed request) the provider walks to the requester.
+         */
+        boolean pickup;
+        UUID walker() { return pickup ? buyer : seller; }
+        UUID waiter() { return pickup ? seller : buyer; }
+        Meeting(ServerWorld w, CooperativeSupply.Reservation r, BlockPos position) {
+            world=w; id=r.id; buyer=r.requester; seller=r.provider; this.position=position; delivery=r;
         }
         Meeting(ServerWorld w, UUID id, VillagerEntity seller, VillagerEntity buyer, ItemStack goods, ItemStack payment) {
             world=w; this.id=id; this.buyer=buyer.getUUID(); this.seller=seller.getUUID();
-            position=buyer.blockPosition(); this.goods=goods.copy(); this.payment=payment.copy();
+            position=buyer.blockPosition(); this.goods=goods.copy(); this.payment=payment.copy(); delivery=null;
         }
-        boolean directed() { return !goods.isEmpty(); }
+        boolean directed() { return delivery==null && !goods.isEmpty(); }
     }
     private static final Map<UUID,Meeting> MEETINGS=new LinkedHashMap<>();
+    /** True while the meeting for this delivery claim (or exchange session) is still in progress. */
+    public static boolean active(UUID meeting) { return meeting != null && MEETINGS.containsKey(meeting); }
     public static boolean busy(UUID resident) { return VillageSignalBoard.APPOINTMENTS.forResident(resident)!=null; }
     public static boolean owns(UUID resident,UUID session) {
         TradeAppointments.Appointment a=VillageSignalBoard.APPOINTMENTS.forResident(resident);
@@ -41,13 +83,17 @@ public final class TradeCoordinator {
         return null;
     }
     private static void addGoals(Meeting m,long deadline) {
-        for(UUID id:Arrays.asList(m.buyer,m.seller)) {
-            VillagerAgentData a=VillagerAgentManager.getAgent(id);
-            AgentGoal g=new AgentGoal("meet_trade","Meet for agreed trade",8);
-            g.setTradeMessageId(m.id); g.setLifecycle(AgentGoal.Lifecycle.EXPIRING); g.setDeadlineTick(deadline);
-            a.getGoals().add(g);
-        }
+        for(UUID id:Arrays.asList(m.buyer,m.seller)) addGoal(m,id,deadline);
         MEETINGS.put(m.id,m);
+    }
+    /** One participant's meet_trade goal (added even at the 10-goal soft cap: a booked meeting must not be lost). */
+    private static void addGoal(Meeting m,UUID id,long deadline) {
+        VillagerAgentData a=VillagerAgentManager.getAgent(id);
+        if(a==null||goal(a,m.id)!=null) return;
+        AgentGoal g=new AgentGoal("meet_trade",m.delivery!=null?"Meet for free delivery":"Meet for agreed trade",8);
+        g.setTradeMessageId(m.id); g.setLifecycle(AgentGoal.Lifecycle.EXPIRING); g.setDeadlineTick(deadline);
+        a.getGoals().add(g);
+        BrainLog.goalAdded(a, g, "meeting:" + m.id);
     }
     /** Operator chooses terms, but admission and settlement obey the same two-party barrier. */
     public static int requestExchange(CommandSource source, Entity first, Entity second, ItemStack goods, ItemStack payment) {
@@ -70,7 +116,7 @@ public final class TradeCoordinator {
         long deadline=w.getGameTime()+2400;
         if(!VillageSignalBoard.APPOINTMENTS.reserve(m.id,m.buyer,m.seller,deadline)) return 0;
         addGoals(m,deadline);
-        source.sendSuccess(new StringTextComponent("交易已预约：等待双方自然结束当前任务后会合，库存交割一次性提交。"),false);
+        source.sendSuccess(new StringTextComponent("交易已预约：等待双方自然结束当前任务后会合，双方丢出实物并原地等待接触拾取后入账。"),false);
         return 1;
     }
     private static TradeInventory.Plan directedPlan(Meeting m) {
@@ -78,38 +124,108 @@ public final class TradeCoordinator {
         return b==null||s==null?null:TradeInventory.plan(b.getInventory().getItems(),s.getInventory().getItems(),
                 Collections.emptyList(),new ItemStack[]{m.payment},new ItemStack[]{m.goods});
     }
-    private static boolean settleDirected(Meeting m) {
-        TradeInventory.Plan plan=directedPlan(m); if(plan==null) return false;
-        VillagerAgentData b=VillagerAgentManager.getAgent(m.buyer),s=VillagerAgentManager.getAgent(m.seller);
-        for(int i=0;i<plan.player.size();i++) b.getInventory().setStackInSlot(i,plan.player.get(i));
-        for(int i=0;i<plan.villager.size();i++) s.getInventory().setStackInSlot(i,plan.villager.get(i));
+    /**
+     * Book the joint delivery session: both participants get a {@code meet_trade} goal for it. The caller
+     * releases the claim on false.
+     */
+    public static boolean enqueueDelivery(ServerWorld world,CooperativeSupply.Reservation r,long deadline) {
+        return enqueueDelivery(world,r,deadline,false);
+    }
+    /** @param pickup the requester claimed an offer and walks to the provider (instead of the provider walking). */
+    public static boolean enqueueDelivery(ServerWorld world,CooperativeSupply.Reservation r,long deadline,boolean pickup) {
+        if(MEETINGS.containsKey(r.id)) return true;
+        VillagerEntity b=entity(world,r.requester),s=entity(world,r.provider);
+        VillagerAgentData ba=VillagerAgentManager.getAgent(r.requester),sa=VillagerAgentManager.getAgent(r.provider);
+        String why=b==null||s==null||ba==null||sa==null?"participant_missing"
+                : TradeDemo.isActive(b.getUUID())||TradeDemo.isActive(s.getUUID())?"demo_active"
+                : !VillageMarkets.same(world,r.requester,r.provider)?"different_market"
+                : !owns(r.requester,r.id)||!owns(r.provider,r.id)?"appointment_not_held":null;
+        // The meeting goals are added even when a goal list is at its soft cap: a booked delivery must not be lost.
+        if(why!=null) {
+            if(sa!=null) BrainLog.diagnostic(sa,"trade-book-failed","request="+r.request+" requester="+r.requester+" reason="+why);
+            return false;
+        }
+        // Only one participant sets off: the provider walks to the requester for a claimed request, the requester
+        // walks to the provider for a claimed offer. The other one is invited once the walker is close.
+        Meeting m=new Meeting(world,r,(pickup?s:b).blockPosition().immutable());
+        m.deadline=deadline;
+        m.pickup=pickup;
+        addGoal(m,m.walker(),deadline);
+        MEETINGS.put(m.id,m);
+        BrainLog.diagnostic(sa,"trade-booked","session="+r.id+" role=provider partner="+r.requester
+                +(pickup?" invite=when_requester_near":" requesterAt="+b.blockPosition()));
+        BrainLog.diagnostic(ba,"trade-booked","session="+r.id+" role=requester partner="+r.provider
+                +(pickup?" walk_to=provider providerAt="+s.blockPosition():" invite=when_provider_near"));
         return true;
     }
-    public static boolean enqueue(ServerWorld world,VillageSignalBoard.VillageMessage want,VillageSignalBoard.VillageMessage have) {
-        if(MEETINGS.containsKey(want.id)) return true;
-        VillagerEntity b=entity(world,want.author),s=entity(world,have.author);
-        if(b==null||s==null||TradeDemo.isActive(b.getUUID())||TradeDemo.isActive(s.getUUID())) return false;
-        if(!VillageMarkets.same(world,want.author,have.author)) return false;
-        if(!owns(want.author,want.id)||!owns(have.author,want.id)) return false;
-        VillagerAgentData ba=VillagerAgentManager.getAgent(want.author),sa=VillagerAgentManager.getAgent(have.author);
-        if(ba==null||sa==null||ba.getGoals().size()>=10||sa.getGoals().size()>=10) return false;
-        addGoals(new Meeting(world,want,have,b),Math.min(want.expireTick,have.expireTick));
-        return true;
+    /** Booked delivery session for {@code request} in which {@code requester} receives; null if none. */
+    public static UUID deliveryFor(UUID request,UUID requester) {
+        for(Meeting m:MEETINGS.values())
+            if(m.delivery!=null&&m.delivery.request.equals(request)&&m.buyer.equals(requester)) return m.id;
+        return null;
     }
     public static SkillResult advance(VillagerAgentData a,VillagerEntity v,ServerWorld world,AgentGoal g) {
-        Meeting m=MEETINGS.get(g.getTradeMessageId());
-        TradeAppointments.Appointment ap=VillageSignalBoard.APPOINTMENTS.get(g.getTradeMessageId());
+        return advanceSession(a,v,world,g.getTradeMessageId());
+    }
+    /**
+     * Primitive meeting step, executed by the participant's own subtask each tick: report ready, walk to the
+     * meeting point, then wait for the handoff. Callers check {@link #active(UUID)} to know when it ended.
+     */
+    public static SkillResult advanceSession(VillagerAgentData a,VillagerEntity v,ServerWorld world,UUID session) {
+        Meeting m=MEETINGS.get(session);
+        TradeAppointments.Appointment ap=VillageSignalBoard.APPOINTMENTS.get(session);
         if(m==null||m.world!=world||ap==null||!owns(a.getVillagerId(),m.id)) return SkillResult.DELETE;
-        VillageSignalBoard.APPOINTMENTS.ready(m.id,a.getVillagerId(),world.getGameTime());
-        if(!ap.started) return SkillResult.RUNNING;
-        if(v.blockPosition().distSqr(m.position)>2) {
-            if(a.getCurrentAction()==null) {
-                VillagerAction move=new VillagerAction(VillagerAction.ActionType.MOVE,"Meet for trade");
-                move.setGoalDriven(true); move.setTargetBlockPos(m.position); a.setCurrentAction(move);
+        m.seen.put(a.getVillagerId(),world.getGameTime());
+        if(m.droppedAt>=0) {
+            return SkillResult.RUNNING;
+        }
+        // Walk to the meeting point straight away; readiness only means "this villager is on its way/there".
+        long now=world.getGameTime();
+        VillageSignalBoard.APPOINTMENTS.ready(m.id,a.getVillagerId(),now);
+        VillagerEntity partner=entity(world,a.getVillagerId().equals(m.buyer)?m.seller:m.buyer);
+        boolean withPartner=partner!=null && v.distanceToSqr(partner)<=HANDOFF_DIST_SQ && v.canSee(partner);
+        if(withPartner || (partner==null && v.blockPosition().distSqr(m.position)<=2)) {
+            if(a.getCurrentAction()!=null) ActionLifecycle.clearBody(a,v,world);
+            v.getNavigation().stop();
+            if(partner!=null) v.getLookControl().setLookAt(partner,30f,30f);
+            return SkillResult.RUNNING;
+        }
+        VillagerAction move=a.getCurrentAction();
+        if(move==null || move.getActionType()!=VillagerAction.ActionType.MOVE) {
+            move=new VillagerAction(VillagerAction.ActionType.MOVE,"Meet for trade");
+            move.setGoalDriven(true); move.setPhase(VillagerAction.ActionPhase.WALKING);
+            move.setTargetBlockPos(m.position); a.setCurrentAction(move);
+        }
+        long lastPlan=m.lastPlan.getOrDefault(a.getVillagerId(),Long.MIN_VALUE/2);
+        if(now-lastPlan>=20 || (v.getNavigation().isDone() && now-lastPlan>=5)) {
+            m.lastPlan.put(a.getVillagerId(),now);
+            // Walk towards the partner (both do, once both have their goal); the handoff happens where they meet.
+            BlockPos target=partner!=null?partner.blockPosition():m.position;
+            net.minecraft.pathfinding.Path path=v.getNavigation().createPath(target,1);
+            if((path==null||!path.canReach()) && partner!=null) {
+                // The partner may stand where nobody can path to (a ledge, a crop block): aim beside it instead.
+                BlockPos beside=ReachablePaths.standingBeside(world,v,target);
+                net.minecraft.pathfinding.Path alt=beside==null?null:v.getNavigation().createPath(beside,0);
+                if(alt!=null&&(path==null||alt.canReach())) { path=alt; target=beside; }
             }
-            if(world.getGameTime()%20==0 || v.getNavigation().isDone())
-                v.getNavigation().moveTo(m.position.getX()+0.5,m.position.getY(),m.position.getZ()+0.5,VillagerNavigationSupport.WALK_SPEED);
-        } else if(a.getCurrentAction()!=null) ActionLifecycle.clearBody(a,v,world);
+            if(a.getVillagerId().equals(m.walker())) m.walkerReaches=path!=null&&path.canReach();
+            if(path==null) {
+                // Close and in sight: hold position, the partner (or its own replanning) closes the gap.
+                if(partner!=null && v.distanceToSqr(partner)<=CLOSE_WAIT_DIST_SQ && v.canSee(partner)) {
+                    v.getNavigation().stop();
+                    v.getLookControl().setLookAt(partner,30f,30f);
+                    return SkillResult.RUNNING;
+                }
+                int misses=m.pathMisses.merge(a.getVillagerId(),1,Integer::sum);
+                BrainLog.diagnostic(a,"trade-meeting-no-path","session="+m.id+" from="+v.blockPosition()
+                        +" target="+target+" misses="+misses);
+                if(misses>=MAX_PATH_MISSES) return SkillResult.FAIL;
+            } else {
+                m.pathMisses.remove(a.getVillagerId());
+                move.setTargetBlockPos(target.immutable());
+                v.getNavigation().moveTo(path,VillagerNavigationSupport.WALK_SPEED);
+            }
+        }
         return SkillResult.RUNNING;
     }
     private static boolean readyGoal(VillagerAgentData a,UUID id) {
@@ -118,44 +234,204 @@ public final class TradeCoordinator {
     }
     public static boolean canSettle(UUID id) {
         Meeting m=MEETINGS.get(id); TradeAppointments.Appointment a=VillageSignalBoard.APPOINTMENTS.get(id);
-        return m!=null&&a!=null&&a.started;
+        return m!=null&&m.droppedAt<0&&a!=null&&a.started;
+    }
+    public static boolean awaitingPickup(UUID id) {
+        Meeting m=MEETINGS.get(id);
+        return m!=null&&m.droppedAt>=0;
     }
     public static void tick(ServerWorld world) {
         long now=world.getGameTime();
         for(Meeting m:new ArrayList<>(MEETINGS.values())) {
             if(m.world!=world) continue;
             TradeAppointments.Appointment ap=VillageSignalBoard.APPOINTMENTS.get(m.id);
-            VillageSignalBoard.VillageMessage want=VillageSignalBoard.get().find(m.id);
-            VillageSignalBoard.VillageMessage have=want==null?null:VillageSignalBoard.get().find(want.matchedWith);
             VillagerEntity b=entity(world,m.buyer),s=entity(world,m.seller);
             VillagerAgentData ba=VillagerAgentManager.getAgent(m.buyer),sa=VillagerAgentManager.getAgent(m.seller);
-            if(ap==null||b==null||s==null||ba==null||sa==null
-                    || b.isNoAi()||s.isNoAi()||b.isBaby()||s.isBaby()||now>=ap.deadline
-                    || (!m.directed() && (!com.github.AaronAA0721.villageragent.config.ModConfig.ENABLE_ECONOMY.get()
-                        ||want==null||have==null||want.resolved||!VillagerEconomySystem.validateTradeFunds(want,have)))
-                    || (m.directed() && directedPlan(m)==null)
-                    || !VillageMarkets.same(world,m.buyer,m.seller)
-                    || goal(ba,m.id)==null||goal(sa,m.id)==null
-                    || (ap.firstReady>=0 && now-ap.firstReady>600)
-                    || (ap.buyerReady&&!readyGoal(ba,m.id)) || (ap.sellerReady&&!readyGoal(sa,m.id))) {
+            // Outgoing stock has been debited. Never repeat or refund a physical handoff.
+            if(m.droppedAt>=0) {
+                if(now-m.droppedAt>=PICKUP_TIMEOUT_TICKS || ap==null || b==null || s==null || ba==null || sa==null
+                        || b.isNoAi() || s.isNoAi() || !readyGoal(ba,m.id) || !readyGoal(sa,m.id)
+                        || (ba.getCurrentAction()!=null&&!ba.getCurrentAction().isGoalDriven())
+                        || (sa.getCurrentAction()!=null&&!sa.getCurrentAction().isGoalDriven())) {
+                    finish(m,false);
+                } else if (!collectDrops(m,b,s,ba,sa,now)) {
+                    finish(m,false);
+                } else if (m.drops.isEmpty()) {
+                    finish(m,true);
+                }
+                continue;
+            }
+            // Delivery: once the walker is close and can reach its partner, the partner gets its own meet_trade
+            // goal; it joins when its current task ends or reaches a yield point.
+            if(m.delivery!=null && m.invitedAt<0 && b!=null && s!=null && ba!=null && sa!=null
+                    && s.distanceToSqr(b)<=INVITE_DIST_SQ && (m.walkerReaches || s.canSee(b))) {
+                m.invitedAt=now;
+                addGoal(m,m.waiter(),m.deadline);
+                BrainLog.diagnostic(m.pickup?sa:ba,"trade-invite","session="+m.id+" walker="+m.walker()
+                        +" distance="+(int)Math.sqrt(s.distanceToSqr(b)));
+            }
+            String why=cancelReason(m,ap,b,s,ba,sa,now,world);
+            if(why!=null) {
+                BrainLog.diagnostic(ba!=null?ba:sa,"trade-meeting-cancel","session="+m.id+" reason="+why);
                 finish(m,false); continue;
             }
-            // Combat/building can own the body even while the old root reference remains.
-            if((ba.getCurrentAction()!=null&&!ba.getCurrentAction().isGoalDriven())
-                    ||(sa.getCurrentAction()!=null&&!sa.getCurrentAction().isGoalDriven())) { finish(m,false); continue; }
             if(!ap.started && ap.buyerReady && ap.sellerReady) {
                 ap.started=true;
                 BrainLog.diagnostic(ba,"trade-meeting-start","session="+m.id+" partner="+m.seller);
             }
-            if(ap.started && b.distanceToSqr(s)<=9 && b.blockPosition().distSqr(m.position)<=9
-                    && s.blockPosition().distSqr(m.position)<=9 && b.canSee(s)) {
-                finish(m,m.directed()?settleDirected(m):VillagerEconomySystem.completeMatchedExchange(world,m.id)>0);
+            // The handoff happens wherever the two meet: at the meeting point, or on the way if one walked to the other.
+            if(ap.started && b.distanceToSqr(s)<=HANDOFF_DIST_SQ && b.canSee(s)) {
+                boolean ok = m.delivery != null ? settleDeliveryDrop(m, b, s, world)
+                        : settleDirectedDrop(m, b, s, world);
+                if(ok) {
+                    m.droppedAt=now;
+                    ActionLifecycle.clearBody(ba,b,world);
+                    ActionLifecycle.clearBody(sa,s,world);
+                } else finish(m,false);
             }
         }
     }
+    /** First reason a booked meeting can no longer happen, for the log; null while it is still viable. */
+    private static String cancelReason(Meeting m,TradeAppointments.Appointment ap,VillagerEntity b,VillagerEntity s,
+                                       VillagerAgentData ba,VillagerAgentData sa,long now,ServerWorld world) {
+        if(ap==null) return "appointment_gone";
+        if(b==null||s==null||ba==null||sa==null||b.isNoAi()||s.isNoAi()||b.isBaby()||s.isBaby()) return "participant_missing";
+        if(now>=ap.deadline) return "deadline";
+        if(!VillageMarkets.same(world,m.buyer,m.seller)) return "different_market";
+        if(m.delivery!=null && !com.github.AaronAA0721.villageragent.config.ModConfig.ENABLE_ECONOMY.get()) return "economy_disabled";
+        if(m.delivery!=null && !CooperativeSupply.revalidate(world,m.delivery)) return "stock_or_space_changed";
+        if(m.delivery==null && (!m.directed() || directedPlan(m)==null)) return "exchange_no_longer_possible";
+        // Combat/building owns the body.
+        if((ba.getCurrentAction()!=null&&!ba.getCurrentAction().isGoalDriven())
+                ||(sa.getCurrentAction()!=null&&!sa.getCurrentAction().isGoalDriven())) return "body_taken";
+        boolean invited=m.delivery==null||m.invitedAt>=0;
+        boolean sellerNeeded=m.delivery==null||!m.pickup||invited, buyerNeeded=m.delivery==null||m.pickup||invited;
+        if(sellerNeeded && goal(sa,m.id)==null) return "provider_goal_gone";
+        if(buyerNeeded && goal(ba,m.id)==null) return "requester_goal_gone";
+        if(m.delivery!=null) {
+            // The invited partner has PARTNER_WAIT_TICKS after its invitation to finish its task and join.
+            boolean waiterReady=m.pickup?ap.sellerReady:ap.buyerReady;
+            if(m.invitedAt>=0 && !waiterReady && now-m.invitedAt>PARTNER_WAIT_TICKS)
+                return m.pickup?"provider_never_came":"requester_never_came";
+        } else if(ap.firstReady>=0 && now-ap.firstReady>PARTNER_WAIT_TICKS) return "partner_never_came";
+        if(ap.buyerReady&&!readyGoal(ba,m.id)) return "requester_left";
+        if(ap.sellerReady&&!readyGoal(sa,m.id)) return "provider_left";
+        return null;
+    }
+    private static boolean settleDirectedDrop(Meeting m, VillagerEntity buyer, VillagerEntity seller, ServerWorld w) {
+        if (directedPlan(m) == null) return false;
+        return throwExchange(m, buyer, seller, new ItemStack[]{m.payment}, new ItemStack[]{m.goods});
+    }
+
+    /** One-way free transfer: no payment stacks, provider stock revalidated immediately before throwing. */
+    private static boolean settleDeliveryDrop(Meeting m, VillagerEntity requester, VillagerEntity provider, ServerWorld w) {
+        if (!canSettle(m.id) || !CooperativeSupply.revalidate(w, m.delivery)) return false;
+        boolean thrown = throwExchange(m, requester, provider, new ItemStack[0], CooperativeSupply.copies(m.delivery.stacks));
+        if (thrown) CooperativeSupply.markThrown(m.delivery);
+        return thrown;
+    }
+
+    /** Stage real drops, then commit only outgoing debits. Receipts belong exclusively to contact pickup. */
+    private static boolean throwExchange(Meeting m, VillagerEntity buyer, VillagerEntity seller,
+                                         ItemStack[] payment, ItemStack[] goods) {
+        VillagerAgentData ba = VillagerAgentManager.getAgent(m.buyer);
+        VillagerAgentData sa = VillagerAgentManager.getAgent(m.seller);
+        if (ba == null || sa == null || TradeInventory.plan(ba.getInventory().getItems(),
+                sa.getInventory().getItems(), Collections.emptyList(), payment, goods) == null) return false;
+        List<ItemStack> buyerStock = TradeInventory.copy(ba.getInventory().getItems());
+        List<ItemStack> sellerStock = TradeInventory.copy(sa.getInventory().getItems());
+        if (!debit(buyerStock, payment) || !debit(sellerStock, goods)) return false;
+        if (!spawnDrops(m, seller, buyer, goods) || !spawnDrops(m, buyer, seller, payment)) {
+            for (net.minecraft.entity.item.ItemEntity drop : m.drops) drop.remove();
+            m.drops.clear();
+            return false;
+        }
+        for (int i=0;i<buyerStock.size();i++) ba.getInventory().setStackInSlot(i,buyerStock.get(i));
+        for (int i=0;i<sellerStock.size();i++) sa.getInventory().setStackInSlot(i,sellerStock.get(i));
+        m.droppedAt=m.world.getGameTime();
+        VillagerEquipmentHelper.refreshEquipment(buyer,ba);
+        VillagerEquipmentHelper.refreshEquipment(seller,sa);
+        buyer.swing(net.minecraft.util.Hand.MAIN_HAND);
+        seller.swing(net.minecraft.util.Hand.MAIN_HAND);
+        return true;
+    }
+
+    private static boolean debit(List<ItemStack> stock, ItemStack[] offers) {
+        for (ItemStack offer : offers) {
+            int left=offer.getCount();
+            for (ItemStack stack : stock) {
+                if (!TradeInventory.matches(stack,offer)) continue;
+                int n=Math.min(left,stack.getCount());
+                stack.shrink(n); left-=n;
+                if (left==0) break;
+            }
+            if (left!=0) return false;
+        }
+        return true;
+    }
+
+    private static boolean spawnDrops(Meeting m, VillagerEntity sender, VillagerEntity recipient, ItemStack[] offers) {
+        for (ItemStack offer : offers) {
+            if (offer.isEmpty()) continue;
+            net.minecraft.entity.item.ItemEntity drop = new net.minecraft.entity.item.ItemEntity(
+                    m.world,sender.getX(),sender.getEyeY()-0.3,sender.getZ(),offer.copy());
+            drop.setDeltaMovement(recipient.position().subtract(sender.position()).normalize().scale(0.22).add(0,0.15,0));
+            // Infinite delay also prevents vanilla merging; only this session collects these entities.
+            drop.setPickUpDelay(32767);
+            drop.setThrower(sender.getUUID());
+            drop.setOwner(recipient.getUUID());
+            m.drops.add(drop);
+            if (!m.world.addFreshEntity(drop)) return false;
+        }
+        return true;
+    }
+
+    private static boolean collectDrops(Meeting m, VillagerEntity buyer, VillagerEntity seller,
+                                        VillagerAgentData ba, VillagerAgentData sa, long now) {
+        // Stay at the handoff position; only collect reserved drops that reach contact range.
+        buyer.getNavigation().stop();
+        seller.getNavigation().stop();
+        for (Iterator<net.minecraft.entity.item.ItemEntity> it=m.drops.iterator();it.hasNext();) {
+            net.minecraft.entity.item.ItemEntity drop=it.next();
+            if (!drop.isAlive() || m.world.getEntity(drop.getUUID()) != drop) return false;
+            if (now-m.droppedAt<15) continue;
+            if (!m.buyer.equals(drop.getOwner()) && !m.seller.equals(drop.getOwner())) return false;
+            boolean toBuyer=m.buyer.equals(drop.getOwner());
+            VillagerEntity recipient=toBuyer?buyer:seller;
+            if (ItemAttractionSystem.pickupBox(recipient).intersects(drop.getBoundingBox())) {
+                ItemStack type = drop.getItem().copy();
+                int before = type.getCount();
+                drop.setPickUpDelay(0);
+                ItemAttractionSystem.collect(drop,recipient,toBuyer?ba:sa,Integer.MAX_VALUE);
+                int after = drop.isAlive() ? drop.getItem().getCount() : 0;
+                // Credit only what actually entered the requester's inventory, once per picked count.
+                if (m.delivery != null && toBuyer && before > after) CooperativeSupply.credit(m.delivery, type, before - after);
+                if (!drop.isAlive()) { it.remove(); continue; }
+                drop.setPickUpDelay(32767);
+            }
+        }
+        return true;
+    }
+
     private static void finish(Meeting m,boolean success) {
         MEETINGS.remove(m.id);
-        if(!success) VillageSignalBoard.get().unmatch(m.id);
+        // Thrown items are never refunded or replayed; unreceived credit returns to the request.
+        if(m.delivery!=null) {
+            CooperativeSupply.release(m.delivery);
+            if(!m.delivery.thrown()) {
+                // Nothing changed hands: CLAIMED -> OPEN, so this or another provider can claim the request again.
+                VillageSignalBoard.VillageMessage req=VillageSignalBoard.get().find(m.delivery.request);
+                if(req!=null && req.claim==m.delivery) {
+                    req.claim=null;
+                    VillagerAgentData ra=VillagerAgentManager.getAgent(m.buyer);
+                    if(ra!=null) BrainLog.diagnostic(ra,"request-reopened","request="+req.id+" session="+m.id);
+                }
+            }
+        }
+        for (net.minecraft.entity.item.ItemEntity drop : m.drops) {
+            if (drop.isAlive()) { drop.setOwner(null); drop.setPickUpDelay(10); }
+        }
+        m.drops.clear();
         VillageSignalBoard.APPOINTMENTS.release(m.id);
         for(UUID id:Arrays.asList(m.buyer,m.seller)) {
             VillagerAgentData a=VillagerAgentManager.getAgent(id); VillagerEntity v=entity(m.world,id);

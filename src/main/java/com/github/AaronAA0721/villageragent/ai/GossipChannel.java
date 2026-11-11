@@ -2,6 +2,7 @@ package com.github.AaronAA0721.villageragent.ai;
 
 import com.github.AaronAA0721.villageragent.ai.memory.ChunkFeature;
 import com.github.AaronAA0721.villageragent.ai.memory.ChunkMemory;
+import com.github.AaronAA0721.villageragent.ai.memory.ChunkTag;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import net.minecraft.util.math.BlockPos;
 import org.apache.logging.log4j.LogManager;
@@ -41,11 +42,16 @@ public final class GossipChannel {
      * Attempt a knowledge transfer from {@code teller} to {@code listener}. Called on a social
      * encounter (the two villagers are already known to be within conversation range). Transfers
      * at most one fact, and may do nothing.
+     *
+     * <p>Two channels: (1) resource feature anchors (ore / farmland / water) and (2) chunk-level
+     * tag knowledge — if the teller knows a chunk the listener doesn't, the listener gets the
+     * teller's tags for that chunk (lightweight, no block-level data).
      */
     public static void tryGossip(VillagerAgentData teller, VillagerAgentData listener, long gameTick) {
         if (teller == null || listener == null) return;
         if (Math.random() >= ModConfig.GOSSIP_CHANCE.get()) return;
 
+        // ── Channel 1: resource feature anchors (existing behaviour) ──
         for (ChunkMemory cm : teller.getAllChunkMemories()) {
             for (ChunkFeature f : ChunkFeature.values()) {
                 if (!isResourceFeature(f)) continue;
@@ -57,9 +63,8 @@ public final class GossipChannel {
                 int cx = anchor.getX() >> 4;
                 int cz = anchor.getZ() >> 4;
                 ChunkMemory lm = listener.getOrCreateChunkMemory(cx, cz);
-                if (lm.has(f)) continue; // the listener already knows this resource here
+                if (lm.has(f)) continue;
 
-                // Copy the fact as second-hand: local coords + the teller's freshness as of visit.
                 lm.recordFeature(f, anchor.getX() & 15, anchor.getY(), anchor.getZ() & 15);
                 lm.lastVisitedTick = cm.lastVisitedTick;
                 if (f.isOre()) {
@@ -72,6 +77,30 @@ public final class GossipChannel {
                         teller.getName(), listener.getName(), f.display(), cx, cz);
                 return; // one fact per encounter
             }
+        }
+
+        // ── Channel 2: whole-chunk tag knowledge ──
+        // If the teller knows a sampled chunk the listener hasn't seen, share its tag summary.
+        for (ChunkMemory cm : teller.getAllChunkMemories()) {
+            if (cm.lastVisitedTick == 0) continue; // unseen placeholder
+            if (cm.getTagFlags() == 0) continue;   // no useful tags
+
+            ChunkMemory lm = listener.getChunkMemory(cm.getX(), cm.getZ());
+            if (lm != null && lm.lastVisitedTick > 0) continue; // listener already sampled it
+
+            // Transfer: create a lightweight memory with the teller's tags
+            ChunkMemory shared = listener.getOrCreateChunkMemory(cm.getX(), cm.getZ());
+            for (ChunkTag t : ChunkTag.values()) {
+                if (cm.has(t)) shared.add(t);
+            }
+            shared.lastVisitedTick = cm.lastVisitedTick;
+            shared.saliency = Math.max(shared.saliency, cm.saliency * 0.5f); // second-hand = half saliency
+
+            listener.addMemory("Heard from " + teller.getName() + " about area at chunk ("
+                    + cm.getX() + ", " + cm.getZ() + ")");
+            LOGGER.info("[GOSSIP] {} -> {} : chunk tags ({},{}) = {}",
+                    teller.getName(), listener.getName(), cm.getX(), cm.getZ(), cm.tagLabels());
+            return; // one fact per encounter
         }
     }
 
