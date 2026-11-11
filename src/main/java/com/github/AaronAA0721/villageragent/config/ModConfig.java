@@ -135,6 +135,10 @@ public class ModConfig {
     public static final ForgeConfigSpec.BooleanValue ENSURE_CORE_JOBS;
     public static final ForgeConfigSpec.BooleanValue ASYNC_PATHFINDING;
     public static final ForgeConfigSpec.IntValue PATH_REPATH_INTERVAL;
+    /** Extra upward velocity applied each tick while a villager is submerged (fights sinking & helps surface). */
+    public static final ForgeConfigSpec.DoubleValue SWIM_BUOYANCY;
+    /** Speed multiplier for navigation while in water (1.0 = normal, 1.5 = 50% faster). */
+    public static final ForgeConfigSpec.DoubleValue SWIM_SPEED_BOOST;
 
     static {
         BUILDER.push("LLM Settings");
@@ -544,6 +548,18 @@ public class ModConfig {
         PATH_REPATH_INTERVAL = BUILDER
                 .comment("Ticks without walking progress before a managed villager re-plans its route.")
                 .defineInRange("path_repath_interval", 80, 20, 400);
+
+        SWIM_BUOYANCY = BUILDER
+                .comment("Extra upward velocity added each tick while a villager is in water. "
+                        + "Vanilla villagers sink and bob weakly; this helps them surface and climb out. "
+                        + "0.0 = vanilla behaviour, 0.04 = gentle float, 0.08 = strong buoyancy.")
+                .defineInRange("swim_buoyancy", 0.06, 0.0, 0.2);
+
+        SWIM_SPEED_BOOST = BUILDER
+                .comment("Horizontal swim-assist strength in water. Adds a small capped forward impulse "
+                        + "each tick to offset water drag and current push, so villagers can make headway "
+                        + "without flying. 1.0 = no assist, 1.6 = gentle, 2.0 = moderate.")
+                .defineInRange("swim_speed_boost", 1.2, 1.0, 3.0);
 
         BUILDER.pop();
 

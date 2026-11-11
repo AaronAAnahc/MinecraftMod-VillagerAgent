@@ -14,6 +14,8 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.StringTextComponent;
 import net.minecraft.world.server.ServerWorld;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -32,10 +34,13 @@ import java.util.UUID;
  *
  * Every step <em>nudges</em> the villagers with the real goals the systems use (miner_work, acquire_item,
  * trade, supply_request), waits for the real machinery to carry it out, and only if a step exceeds its time
- * budget applies a visible <b>force</b> fallback (marked in the caption) so a recording never stalls.
+ * budget applies a <b>force</b> fallback (traced to the server log) so a recording never stalls.
  * One scenario per world; ticked from the world tick next to {@link TradeDemo}.
  */
 public final class ShowcaseScenario {
+    private static final Logger LOGGER = LogManager.getLogger();
+    private static final int STALL_TICKS = 500;
+    private static final int STONE_SEARCH_RADIUS = 48;
     private static final Map<ServerWorld, Scenario> ACTIVE = new IdentityHashMap<>();
     private static final int TICK_INTERVAL = 10;
 
@@ -71,7 +76,7 @@ public final class ShowcaseScenario {
         }
         Scenario s = new Scenario(miner.getUUID(), toolsmith.getUUID(), lumberjack.getUUID());
         ACTIVE.put(world, s);
-        source.sendSuccess(new StringTextComponent("§6Showcase: pickaxe supply chain started. /va demo stop to end it."), false);
+        source.sendSuccess(new StringTextComponent("Pickaxe supply chain started. /va demo stop to end it."), false);
         return 1;
     }
 
@@ -89,14 +94,17 @@ public final class ShowcaseScenario {
 
     // ── Director ─────────────────────────────────────────────────────────────
 
-    /** One step of the film: announce, nudge, wait for the systems, force on timeout. */
+    /** One step of the film: nudge, wait for the systems, force on timeout. */
     private abstract static class Step {
-        final String caption;
+        /** For the server log only; the scenario stays silent in game so a recording shows no chat. */
+        final String label;
         final long budget;
-        Step(String caption, long budget) { this.caption = caption; this.budget = budget; }
+        Step(String label, long budget) { this.label = label; this.budget = budget; }
         void begin(Scenario s, ServerWorld w) {}
         abstract boolean done(Scenario s, ServerWorld w);
         void force(Scenario s, ServerWorld w) {}
+        /** True when the systems have visibly stopped making progress, so waiting out the budget is pointless. */
+        boolean stalled(Scenario s, ServerWorld w, long now) { return false; }
     }
 
     private static final class Scenario {
@@ -106,6 +114,8 @@ public final class ShowcaseScenario {
         boolean forced;
         UUID requestId;    // the miner's #pickaxe request
         boolean offerPosted;
+        int wear = -1;     // the miner's total pickaxe damage when last seen changing
+        long wearTick;
         Scenario(UUID miner, UUID toolsmith, UUID lumberjack) {
             this.miner = miner; this.toolsmith = toolsmith; this.lumberjack = lumberjack;
         }
@@ -122,9 +132,9 @@ public final class ShowcaseScenario {
         if (s.step < 0) { advance(world, s, now); return; }
         Step current = STEPS[s.step];
         if (current.done(s, world)) { advance(world, s, now); return; }
-        if (!s.forced && now - s.stepStart > current.budget) {
+        if (!s.forced && (now - s.stepStart > current.budget || current.stalled(s, world, now))) {
             s.forced = true;
-            caption(world, s, "§7(hurrying this along)");
+            log(s, "forcing: " + current.label);
             current.force(s, world);
         }
     }
@@ -134,24 +144,24 @@ public final class ShowcaseScenario {
         s.forced = false;
         s.stepStart = now;
         if (s.step >= STEPS.length) {
-            caption(world, s, "§aThe chain is complete: work → need → board → cooperation → delivery.");
+            log(s, "complete: work -> need -> board -> cooperation -> delivery");
             ACTIVE.values().remove(s);
             return;
         }
         Step next = STEPS[s.step];
-        caption(world, s, next.caption);
+        log(s, next.label);
         next.begin(s, world);
     }
 
     private static void abort(ServerWorld world, Scenario s, String reason) {
-        caption(world, s, "§cScenario ended: " + reason + ".");
+        log(s, "aborted: " + reason);
         ACTIVE.remove(world);
     }
 
     // ── The steps ────────────────────────────────────────────────────────────
 
     private static final Step[] STEPS = {
-        new Step("§6[1/8] The miner heads underground — his pickaxe is nearly worn out.", 2400) {
+        new Step("The miner heads underground — his pickaxe is nearly worn out.", 2400) {
             @Override void begin(Scenario s, ServerWorld w) {
                 // Stage the inventories so the chain has to happen: the miner's pickaxe is almost gone,
                 // the toolsmith has fuel but no iron, sticks or wood, the lumberjack has logs to share.
@@ -166,7 +176,15 @@ public final class ShowcaseScenario {
                 VillagerEquipmentHelper.refreshEquipment(mv, m);
                 VillagerEquipmentHelper.refreshEquipment(tv, t);
                 VillagerEquipmentHelper.refreshEquipment(lv, l);
+                moveToStone(w, mv);
+                s.wear = -1; s.wearTick = w.getGameTime();
                 startGoal(w, s.miner, new AgentGoal("miner_work", "Mine ore", 8));
+            }
+            /** A miner who is not wearing his pickaxe down for ~25 s is idle (no stone in reach, waiting...). */
+            @Override boolean stalled(Scenario s, ServerWorld w, long now) {
+                int wear = pickaxeWear(agent(s.miner));
+                if (wear != s.wear) { s.wear = wear; s.wearTick = now; return false; }
+                return now - s.wearTick > STALL_TICKS;
             }
             @Override boolean done(Scenario s, ServerWorld w) {
                 VillagerAgentData m = agent(s.miner);
@@ -181,7 +199,7 @@ public final class ShowcaseScenario {
                 if (count(m, Items.COAL) < 2) InventoryTransfer.insert(m.getInventory(), new ItemStack(Items.COAL, 2));
             }
         },
-        new Step("§6[2/8] Snap! The pickaxe broke. The miner walks to the notice board: iron for sale, pickaxe wanted.", 1800) {
+        new Step("Snap! The pickaxe broke. The miner walks to the notice board: iron for sale, pickaxe wanted.", 1800) {
             @Override void begin(Scenario s, ServerWorld w) {
                 VillagerAgentData m = agent(s.miner);
                 AgentGoal goal = null;
@@ -215,7 +233,7 @@ public final class ShowcaseScenario {
                 postIronOffer(s, w);
             }
         },
-        new Step("§6[3/8] The toolsmith checks the board and takes on the pickaxe request.", 1800) {
+        new Step("The toolsmith checks the board and takes on the pickaxe request.", 1800) {
             @Override void begin(Scenario s, ServerWorld w) {
                 startGoal(w, s.toolsmith, new AgentGoal("trade", "Check the notice board", 8));
             }
@@ -241,7 +259,7 @@ public final class ShowcaseScenario {
                 startGoal(w, s.toolsmith, g);
             }
         },
-        new Step("§6[4/8] Iron needed — the toolsmith takes the miner up on his ore offer.", 3600) {
+        new Step("Iron needed — the toolsmith takes the miner up on his ore offer.", 3600) {
             @Override boolean done(Scenario s, ServerWorld w) {
                 VillagerAgentData t = agent(s.toolsmith);
                 return count(t, Items.IRON_ORE) + count(t, Items.IRON_INGOT) >= 3 || hasPickaxe(t);
@@ -252,7 +270,7 @@ public final class ShowcaseScenario {
                 if (moved < 3) InventoryTransfer.insert(t.getInventory(), new ItemStack(Items.IRON_ORE, 3 - moved));
             }
         },
-        new Step("§6[5/8] Sticks wanted for the handle — the lumberjack answers the call.", 3600) {
+        new Step("Sticks wanted for the handle — the lumberjack answers the call.", 3600) {
             @Override void begin(Scenario s, ServerWorld w) {
                 startGoal(w, s.lumberjack, new AgentGoal("trade", "Check the notice board", 8));
             }
@@ -264,9 +282,11 @@ public final class ShowcaseScenario {
                 VillagerAgentData t = agent(s.toolsmith), l = agent(s.lumberjack);
                 takeOneLog(l);
                 InventoryTransfer.insert(t.getInventory(), new ItemStack(Items.STICK, 2));
+                // The handle arrived, so the wood he asked the village for is no longer wanted.
+                retireRequests(s.toolsmith, "log");
             }
         },
-        new Step("§6[6/8] The furnace glows: ore becomes iron.", 3600) {
+        new Step("The furnace glows: ore becomes iron.", 3600) {
             @Override boolean done(Scenario s, ServerWorld w) {
                 VillagerAgentData t = agent(s.toolsmith);
                 return count(t, Items.IRON_INGOT) >= 3 || hasPickaxe(t);
@@ -278,7 +298,14 @@ public final class ShowcaseScenario {
                 InventoryTransfer.insert(t.getInventory(), new ItemStack(Items.IRON_INGOT, Math.max(3, ore)));
             }
         },
-        new Step("§6[7/8] Three ingots, two sticks: the toolsmith forges a brand-new pickaxe.", 2400) {
+        new Step("Three ingots, two sticks: the toolsmith forges a brand-new pickaxe.", 2400) {
+            @Override void begin(Scenario s, ServerWorld w) {
+                AgentGoal g = new AgentGoal("craft", "Forge an iron pickaxe", 8);
+                g.setTargetItem("minecraft:iron_pickaxe");
+                g.setTargetQuantity(1);
+                g.setOutcomeItems(java.util.Collections.singleton("minecraft:iron_pickaxe"));
+                startGoal(w, s.toolsmith, g);
+            }
             @Override boolean done(Scenario s, ServerWorld w) {
                 return hasPickaxe(agent(s.toolsmith));
             }
@@ -290,7 +317,7 @@ public final class ShowcaseScenario {
                 VillagerEquipmentHelper.refreshEquipment(villager(w, s.toolsmith), t);
             }
         },
-        new Step("§6[8/8] Delivery! The toolsmith brings the miner his new pickaxe.", 3600) {
+        new Step("Delivery! The toolsmith brings the miner his new pickaxe.", 3600) {
             @Override boolean done(Scenario s, ServerWorld w) {
                 VillagerAgentData m = agent(s.miner);
                 if (!hasPickaxe(m)) return false;
@@ -364,6 +391,12 @@ public final class ShowcaseScenario {
         return a == null ? 0 : a.getInventory().countItem(new ItemStack(item));
     }
 
+    /** Take this villager's own open requests for a category off the board (the need was met another way). */
+    private static void retireRequests(UUID owner, String category) {
+        for (VillageSignalBoard.VillageMessage m : VillageSignalBoard.requestsBy(owner))
+            if (category.equals(m.spec.category)) VillageSignalBoard.get().retire(m.id);
+    }
+
     private static boolean hasPickaxe(VillagerAgentData a) {
         if (a == null) return false;
         for (ItemStack s : a.getInventory().getItems())
@@ -381,6 +414,37 @@ public final class ShowcaseScenario {
             ItemStack pick = new ItemStack(Items.IRON_PICKAXE);
             pick.setDamageValue(pick.getMaxDamage() - remaining);
             InventoryTransfer.insert(a.getInventory(), pick);
+        }
+    }
+
+    private static int pickaxeWear(VillagerAgentData a) {
+        int wear = 0;
+        for (ItemStack s : a.getInventory().getItems())
+            if (!s.isEmpty() && s.getItem() instanceof PickaxeItem) wear += s.getDamageValue();
+        return wear;
+    }
+
+    /**
+     * Put the miner beside exposed stone: the miner skill's stone phase only scans around where he stands, so a
+     * miner who wandered onto open plains would return WAITING forever and never swing the pickaxe.
+     */
+    private static void moveToStone(ServerWorld w, VillagerEntity miner) {
+        BlockPos origin = miner.blockPosition();
+        BlockPos.Mutable p = new BlockPos.Mutable();
+        for (int r = 0; r <= STONE_SEARCH_RADIUS; r += 2) {
+            for (int dx = -r; dx <= r; dx += 2) {
+                for (int dz = -r; dz <= r; dz += 2) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue; // ring by ring: nearest first
+                    for (int y = origin.getY() + 12; y >= origin.getY() - 24; y--) {
+                        p.set(origin.getX() + dx, y, origin.getZ() + dz);
+                        if (!w.isLoaded(p) || !w.getBlockState(p).is(Blocks.STONE)) continue;
+                        BlockPos above = p.above();
+                        if (!w.getBlockState(above).isAir() || !w.getBlockState(above.above()).isAir()) continue;
+                        if (r > 0) miner.teleportTo(above.getX() + 0.5, above.getY(), above.getZ() + 0.5);
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -439,8 +503,8 @@ public final class ShowcaseScenario {
         }
     }
 
-    /** Narrate a step to the operator's audience: everyone near the miner, plus the server log. */
-    private static void caption(ServerWorld world, Scenario s, String text) {
-        // Captions are disabled; keep the call sites so step titles still document the sequence.
+    /** Trace a step to the server log: the scenario says nothing in game. */
+    private static void log(Scenario s, String text) {
+        LOGGER.info("[demo pickaxe] step {}/{}: {}", Math.min(s.step + 1, STEPS.length), STEPS.length, text);
     }
 }

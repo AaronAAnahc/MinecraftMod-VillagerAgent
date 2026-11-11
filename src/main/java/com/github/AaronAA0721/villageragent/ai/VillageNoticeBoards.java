@@ -1,6 +1,7 @@
 package com.github.AaronAA0721.villageragent.ai;
 
 import com.github.AaronAA0721.villageragent.content.Workstations;
+import com.github.AaronAA0721.villageragent.ai.behavior.FailureReason;
 import com.github.AaronAA0721.villageragent.ai.behavior.SkillResult;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.merchant.villager.VillagerEntity;
@@ -95,20 +96,33 @@ public final class VillageNoticeBoards {
     }
     public static double distance(ServerWorld world, VillagerEntity villager) {
         if (atBoard(world, villager)) return 0;
-        return ReachablePaths.distance(villager, approachTarget(world, villager));
+        BlockPos target = approachTarget(world, villager);
+        if (target == null) return Double.POSITIVE_INFINITY;
+        double path = ReachablePaths.distance(villager, target);
+        // An unreachable probe is not proof: the isolated search covers a limited region, so a villager down
+        // in the shaft it just dug probes as unreachable from every cell. Estimating optimistically keeps
+        // "ask the village" among the acquisition methods; the walk itself reports a real failure.
+        return Double.isInfinite(path) ? Math.sqrt(villager.distanceToSqr(Vector3d.atCenterOf(target))) : path;
     }
-    /** Where a villager stands to read the board (the reachable cell in front of it); null when none. */
+    /**
+     * Where a villager stands to read the board: the cheapest cell in front of it that it can path to, and
+     * failing that the nearest standing cell, so the villager walks and the move goal reports an honest
+     * UNREACHABLE instead of the skill failing on the spot without even trying. Null only when the board has
+     * no standing cell at all (walled in, replaced terrain).
+     */
     public static BlockPos approachTarget(ServerWorld world, VillagerEntity villager) {
-        BlockPos board = position(world,villager), best=null;
+        BlockPos board = position(world,villager), best=null, nearest=null;
         if (board == null) return null;
-        double cost=Double.POSITIVE_INFINITY;
+        double cost=Double.POSITIVE_INFINITY, line=Double.POSITIVE_INFINITY;
         for(Direction direction:Direction.Plane.HORIZONTAL) {
             BlockPos candidate=board.below().relative(direction);
             if(!standable(world,candidate)) continue;
+            double straight=villager.distanceToSqr(Vector3d.atCenterOf(candidate));
+            if(straight<line) { nearest=candidate;line=straight; }
             double next=ReachablePaths.distance(villager,candidate);
             if(next<cost) { best=candidate;cost=next; }
         }
-        return best;
+        return best != null ? best : nearest;
     }
     private static boolean standable(ServerWorld world, BlockPos pos) {
         return world.isLoaded(pos) && world.isEmptyBlock(pos) && world.isEmptyBlock(pos.above())
@@ -141,11 +155,19 @@ public final class VillageNoticeBoards {
             return SkillResult.SUCCESS;
         }
         BlockPos board = position(world, villager);
-        if (board == null) return SkillResult.FAIL;
+        if (board == null) {
+            goal.setLastFailure(FailureReason.UNREACHABLE.with("no village notice board"));
+            return SkillResult.FAIL;
+        }
         BlockPos target = goal.getTargetLocation();
         if (target == null || target.distSqr(board) > 9 || !standable(world, target)) {
             target = approachTarget(world, villager);
-            if (target == null) return SkillResult.FAIL;
+            if (target == null) {
+                // Named, because an unexplained board failure is indistinguishable from a quiet villager.
+                goal.setLastFailure(FailureReason.UNREACHABLE.with("no standing cell at the notice board"));
+                BrainLog.diagnostic(agent, "board-approach", "board=" + board + " reason=no_standing_cell");
+                return SkillResult.FAIL;
+            }
             goal.setTargetLocation(target);
         }
         goal.setArrivalDistanceSq(0.5);

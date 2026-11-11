@@ -393,6 +393,14 @@ public final class AcquisitionMethods {
             AgentGoal probe = new AgentGoal(type, "probe", 6);
             return BehaviorExecutor.findHandler(c.agent, probe, c.villager, c.world) != null ? type : null;
         }
+        /** True while the contract still wants what this prerequisite child is fetching. */
+        private boolean needed(Context c, AgentGoal prerequisite) {
+            String item = prerequisite.getTargetItem();
+            if (item == null || item.isEmpty()) return true;
+            for (TaskContract.ItemNeed need : contract(c).items)
+                if (need.item.equals(item)) return ResourceWorkSystem.count(c.agent, need.item) < need.quantity;
+            return true; // Not one of this contract's inputs: someone else's business, leave it alone.
+        }
         /** Nearest remembered field when this is crop extraction by a villager able to farm; else null. */
         BlockPos fieldFor(Context c) {
             if (!extraction || c.villager == null) return null;
@@ -405,6 +413,15 @@ public final class AcquisitionMethods {
             if (!ModConfig.ENABLE_WORLD_INTERACTION.get()
                     || extraction && !ResourceCatalog.get(c.target.getRegistryName().toString()).skilled(c.agent)
                     || !extraction && !smelting && !c.unlocked()) return new Update(Status.FAILED, false, true);
+            // A prerequisite that arrived some other way — a delivery, a gift, the player — makes this child
+            // moot. Without this the method keeps descending into an input it no longer needs (waiting for a
+            // log it has long since turned into sticks) and never reaches the production step.
+            if (child != null && "acquire_item".equals(child.getGoalType()) && !needed(c, child)) {
+                BrainLog.diagnostic(c.agent, "acquire-prerequisite-met", "item=" + child.getTargetItem()
+                        + " target=" + c.target.getRegistryName());
+                c.discardChild();
+                child = null;
+            }
             if (child == null) {
                 TaskContract requirements = contract(c);
                 for (TaskContract.ItemNeed need : requirements.items) {

@@ -105,6 +105,8 @@ public final class TreeFelling {
         }
         w.levelEvent(2001,root,Block.getId(logs.get(root)));
         w.destroyBlockProgress(v.getId(),root,-1);
+        // The axe's durability hit zero while felling: play the vanilla break sound + particles.
+        if (tool.isEmpty()) v.broadcastBreakEvent(net.minecraft.inventory.EquipmentSlotType.MAINHAND);
         replant(a,w,root,logs.get(root));
         return BlockInteractionAction.StepResult.DONE;
     }

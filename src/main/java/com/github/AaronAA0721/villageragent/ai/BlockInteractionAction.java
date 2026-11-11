@@ -279,6 +279,8 @@ public class BlockInteractionAction {
             for (ItemStack drop : drops) Block.popResource(world, target, drop);
             tool.mineBlock(world, state, target, actor);
             villager.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, tool.copy());
+            // The tool's durability hit zero and it broke: play the vanilla break sound + particles.
+            if (tool.isEmpty()) villager.broadcastBreakEvent(net.minecraft.inventory.EquipmentSlotType.MAINHAND);
             if (xp > 0) world.addFreshEntity(new net.minecraft.entity.item.ExperienceOrbEntity(world,
                     target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, xp));
             agent.addMemory("Broke " + state.getBlock().getRegistryName() + " at " + target);
@@ -387,6 +389,8 @@ public class BlockInteractionAction {
             actor.setPos(villager.getX(), villager.getY(), villager.getZ());
             tool.mineBlock(world, state, target, actor);
             villager.setItemSlot(net.minecraft.inventory.EquipmentSlotType.MAINHAND, tool.copy());
+            // The tool's durability hit zero and it broke: play the vanilla break sound + particles.
+            if (tool.isEmpty()) villager.broadcastBreakEvent(net.minecraft.inventory.EquipmentSlotType.MAINHAND);
         }
         agent.addMemory("Mined " + output.getRegistryName() + " at " + target);
         return StepResult.DONE;

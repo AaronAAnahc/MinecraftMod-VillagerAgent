@@ -60,6 +60,7 @@ public final class VillagerNavigationSupport {
 
         VillagerPathfinding.poll(villager, agent);
         VillagerPathfinding.stepAssist(villager, ground);
+        swimAssist(villager, ground);
         BrainLog.movementObstacle(agent, villager, world);
         continuePartialPath(villager, agent, ground);
         recoverMovement(villager, world, agent, ground);
@@ -204,6 +205,77 @@ public final class VillagerNavigationSupport {
 
     /** Ticks pressed against a block (no progress) before stuck recovery acts. */
     private static final int COLLISION_STALL_TICKS = 30;
+
+    /**
+     * Buoyancy + speed boost + shore jump for villagers in water.
+     * Vanilla villagers have almost no active swim ability: SwimTask only fires when 40% submerged,
+     * and even then provides no upward thrust. This helper runs every tick and:
+     * <ol>
+     *   <li>Applies configurable upward velocity so the villager surfaces instead of bobbing at eye level.</li>
+     *   <li>Boosts navigation speed to counter water drag and current push.</li>
+     *   <li>Triggers a jump when pressed against a shore block, even though isOnGround() is false in water.</li>
+     * </ol>
+     */
+    private static void swimAssist(VillagerEntity v, GroundPathNavigator nav) {
+        if (!v.isInWater()) return;
+
+        // ── 1. Buoyancy: push the villager upward so it surfaces ──
+        double buoyancy = com.github.AaronAA0721.villageragent.config.ModConfig.SWIM_BUOYANCY.get();
+        if (buoyancy > 0) {
+            net.minecraft.util.math.vector.Vector3d motion = v.getDeltaMovement();
+            // Only boost when below the water surface (eyes submerged or sinking).
+            // Once the villager is at surface level, let vanilla float logic maintain it.
+            if (v.getFluidHeight(net.minecraft.tags.FluidTags.WATER) > 0.0
+                    || motion.y < 0) {
+                v.setDeltaMovement(motion.x, motion.y + buoyancy, motion.z);
+            }
+        }
+
+        // ── 2. Speed boost: counter drag so the villager can fight currents ──
+        // Do NOT multiply the current velocity — that compounds every tick and launches the
+        // villager like a rocket. Instead add a small, capped horizontal impulse toward the
+        // intended direction of travel, which only offsets water drag / current push.
+        double speedMult = com.github.AaronAA0721.villageragent.config.ModConfig.SWIM_SPEED_BOOST.get();
+        if (speedMult > 1.0) {
+            net.minecraft.util.math.vector.Vector3d motion = v.getDeltaMovement();
+            double horiz = Math.sqrt(motion.x * motion.x + motion.z * motion.z);
+            // Cap horizontal swim speed at a modest ceiling so it never exceeds a brisk walk.
+            double cap = 0.35;
+            double extra = (speedMult - 1.0) * 0.05; // at 1.6 -> +0.03 per tick, gentle
+            if (horiz < cap) {
+                // Push along the current heading; if barely moving, fall back to the look/yaw direction.
+                double dx = motion.x, dz = motion.z;
+                if (horiz < 1e-3) {
+                    float yaw = v.yRot * ((float) Math.PI / 180f);
+                    dx = -Math.sin(yaw); dz = Math.cos(yaw);
+                } else {
+                    dx /= horiz; dz /= horiz;
+                }
+                double impulse = Math.min(extra, cap - horiz);
+                v.setDeltaMovement(motion.x + dx * impulse, motion.y, motion.z + dz * impulse);
+            }
+        }
+
+        // ── 3. Shore jump: climb out when pressed against a block at water's edge ──
+        if (v.horizontalCollision) {
+            // In water isOnGround() is false, so the normal step/jump assist never fires.
+            // Trigger a jump if the next path node is above us and headroom is clear.
+            net.minecraft.pathfinding.Path path = nav.getPath();
+            if (path != null && !path.isDone()) {
+                BlockPos next = path.getNodePos(path.getNextNodeIndex());
+                double rise = next.getY() - v.getY();
+                if (rise > 0.1 && rise <= 1.5
+                        && v.level.noCollision(v, v.getBoundingBox().move(0, 1, 0))) {
+                    v.getJumpControl().jump();
+                }
+            } else {
+                // No path but colliding — just try to jump out
+                if (v.level.noCollision(v, v.getBoundingBox().move(0, 1, 0))) {
+                    v.getJumpControl().jump();
+                }
+            }
+        }
+    }
 
     /** A free, standable horizontal neighbour (feet and head clear, solid floor), preferring cells nearer the target. */
     private static BlockPos sidestepCell(ServerWorld world, VillagerEntity v, BlockPos target) {

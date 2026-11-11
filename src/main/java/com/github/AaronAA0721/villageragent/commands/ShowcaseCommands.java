@@ -9,6 +9,7 @@ import com.github.AaronAA0721.villageragent.ai.behavior.SleepSkill;
 import com.github.AaronAA0721.villageragent.config.ModConfig;
 import com.github.AaronAA0721.villageragent.debug.ShowcaseSync;
 import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -66,6 +67,19 @@ public final class ShowcaseCommands {
                 .executes(c -> breakTools(c, null))
                 .then(Commands.argument("villager", EntityArgument.entity())
                     .executes(c -> breakTools(c, EntityArgument.getEntity(c, "villager")))))
+            .then(Commands.literal("hunger")
+                .then(Commands.argument("amount", FloatArgumentType.floatArg(0f, 100f))
+                    .executes(c -> hunger(c, FloatArgumentType.getFloat(c, "amount"), null))
+                    .then(Commands.argument("villager", EntityArgument.entity())
+                        .executes(c -> hunger(c, FloatArgumentType.getFloat(c, "amount"),
+                                EntityArgument.getEntity(c, "villager"))))))
+            .then(Commands.literal("fatigue")
+                .then(Commands.argument("amount", FloatArgumentType.floatArg(0f, 100f))
+                    .executes(c -> fatigue(c, FloatArgumentType.getFloat(c, "amount"), null))
+                    .then(Commands.argument("villager", EntityArgument.entity())
+                        .executes(c -> fatigue(c, FloatArgumentType.getFloat(c, "amount"),
+                                EntityArgument.getEntity(c, "villager"))))))
+            .then(Commands.literal("clearfatigue").executes(ShowcaseCommands::clearFatigue))
             .then(Commands.literal("monster")
                 .then(Commands.literal("day")
                     .executes(c -> monster(c, true, null))
@@ -177,6 +191,62 @@ public final class ShowcaseCommands {
         c.getSource().sendSuccess(new StringTextComponent(TextFormatting.GOLD + "Broke " + who + "'s tools: "
                 + String.join(", ", broken)), true);
         return broken.size();
+    }
+
+    /**
+     * Lower the nearest (or given) managed villager's hunger by {@code amount} points (0-100 scale).
+     * Dropping below the eat threshold makes the villager seek food, useful for filming the hunger loop.
+     */
+    private static int hunger(CommandContext<CommandSource> c, float amount, Entity chosen) {
+        VillagerEntity target = managedTarget(c, chosen);
+        if (target == null) return 0;
+        VillagerAgentData agent = VillagerAgentManager.getAgent(target.getUUID());
+        float before = agent.getHunger();
+        agent.setHunger(before - amount);
+        c.getSource().sendSuccess(new StringTextComponent(TextFormatting.GOLD + target.getName().getString()
+                + " hunger: " + (int) before + " -> " + (int) agent.getHunger() + " (-" + amount + ")"), true);
+        return 1;
+    }
+
+    /**
+     * Raise the nearest (or given) managed villager's fatigue by {@code amount} points (0-100 scale).
+     * High fatigue pushes the villager toward a rest/sleep goal, useful for filming the rest loop.
+     */
+    private static int fatigue(CommandContext<CommandSource> c, float amount, Entity chosen) {
+        VillagerEntity target = managedTarget(c, chosen);
+        if (target == null) return 0;
+        VillagerAgentData agent = VillagerAgentManager.getAgent(target.getUUID());
+        float before = agent.getFatigue();
+        agent.setFatigue(before + amount);
+        c.getSource().sendSuccess(new StringTextComponent(TextFormatting.GOLD + target.getName().getString()
+                + " fatigue: " + (int) before + " -> " + (int) agent.getFatigue() + " (+" + amount + ")"), true);
+        return 1;
+    }
+
+    /** Reset every managed villager's fatigue to 0 (fully rested). */
+    private static int clearFatigue(CommandContext<CommandSource> c) {
+        int cleared = 0;
+        for (VillagerAgentData agent : VillagerAgentManager.getAllAgents()) {
+            if (agent.getFatigue() > 0) { agent.setFatigue(0f); cleared++; }
+        }
+        c.getSource().sendSuccess(new StringTextComponent(TextFormatting.GREEN + "Cleared fatigue on "
+                + cleared + " villager(s)."), true);
+        return cleared;
+    }
+
+    /** Resolve the target villager: the explicitly chosen entity, else the nearest managed villager. */
+    private static VillagerEntity managedTarget(CommandContext<CommandSource> c, Entity chosen) {
+        ServerWorld world = c.getSource().getLevel();
+        if (chosen != null) {
+            if (!(chosen instanceof VillagerEntity) || VillagerAgentManager.getAgent(chosen.getUUID()) == null) {
+                c.getSource().sendFailure(new StringTextComponent("Target must be a managed villager."));
+                return null;
+            }
+            return (VillagerEntity) chosen;
+        }
+        VillagerEntity target = ShowcaseSync.nearestManagedVillager(world, new BlockPos(c.getSource().getPosition()), 160);
+        if (target == null) c.getSource().sendFailure(new StringTextComponent("No managed villager within 160 blocks."));
+        return target;
     }
 
     private static int jobs(CommandContext<CommandSource> c) {
