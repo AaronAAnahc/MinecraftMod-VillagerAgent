@@ -365,11 +365,17 @@ public class VillagerAgentData {
      * responsive even when the LLM endpoint is slow or unreachable. A local fallback
      * identity is applied immediately; the LLM result (if it ever arrives) replaces it.
      */
+    private static final boolean USE_LLM_IDENTITY = false;
+
     private void generateWithLLM() {
         // Apply a local fallback right away so the villager is usable instantly and
         // we never have a null/blank identity while the LLM call is in flight.
         this.personality = generateRandomPersonality();
         this.name = generateRandomName();
+        // Local identity only. One LLM call per new villager flooded the request queue on world load
+        // (16 calls for one village, ~20-60 s each), so conversations queued behind them timed out,
+        // and the late answer renamed villagers that players had already met.
+        if (!USE_LLM_IDENTITY) return;
 
         String apiKey = ModConfig.LLM_API_KEY.get();
         if (apiKey == null || apiKey.trim().isEmpty()) {

@@ -183,6 +183,13 @@ public class AgentGoal {
      * time or belongs to a group. Activities wait out WAITING steps and gather before starting.
      */
     public boolean isActivity() { return endTick != Long.MAX_VALUE || groupId != null; }
+    /**
+     * Game tick at which this goal (or sequence step) first started running; -1 = not yet. Lives on the
+     * goal, not on a task frame, so interruptions (rest, a player chat) do not restart its clock.
+     */
+    private long startedTick = -1;
+    public long getStartedTick() { return startedTick; }
+    public void setStartedTick(long tick) { startedTick = tick; }
 
     /** Most recent failure recorded by the executing skill (runtime only; not NBT-persisted).
      *  Read by {@code FailureRecoveryPlanner} after a BLOCKED/FAIL return. */

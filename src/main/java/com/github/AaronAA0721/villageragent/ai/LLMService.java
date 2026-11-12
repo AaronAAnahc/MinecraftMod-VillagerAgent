@@ -23,7 +23,8 @@ import java.util.concurrent.Executors;
  */
 public class LLMService {
     private static final Logger LOGGER = LogManager.getLogger();
-    private static final ExecutorService executor = Executors.newFixedThreadPool(4);
+    /** 8 parallel requests: with ~15-20 s per call, 4 threads queue up and guarded calls time out waiting. */
+    private static final ExecutorService executor = Executors.newFixedThreadPool(8);
 
     /**
      * Sentinel prefix marking a SEMANTIC failure (API error / timeout / circuit open / no key).

@@ -45,14 +45,17 @@ public final class SequenceSkill implements VillagerSkill {
     private static final long PAUSE_AFTER_WAITING = 40;
     private static final long PAUSE_AFTER_FAILURE = 60;
     private static final int STEP_RETRIES = 3;
-    /** Without an end time, a step may only wait this many times before the activity gives up on it. */
-    private static final int WAIT_RETRIES_WITHOUT_END = 10;
     private static final long CHAT_INTERVAL = 600;
+    /** Appointment step that is still WAITING this long after it started is skipped (30 s real). */
+    private static final long WAIT_BUDGET = 600;
+    /** Longest any one step of an appointment may run, interruptions included (2 min real). */
+    private static final long STEP_BUDGET = 2_400;
+    /** Longest an appointment without an end time may run from its first start (5 min real). */
+    private static final long MAX_LENGTH_WITHOUT_END = com.github.AaronAA0721.villageragent.ai.GoalDraft.MAX_ACTIVITY;
 
     private static final class State {
         long pauseUntil;
         int failures;
-        int waits;
         long gatherSince = -1;
         boolean gathered;
         BlockPos spot;
@@ -72,7 +75,13 @@ public final class SequenceSkill implements VillagerSkill {
     public SkillResult execute(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager, ServerWorld world) {
         long now = world.getGameTime();
         State s = agent.brain().tasks.current().state(State.class, State::new);
+        if (goal.getStartedTick() < 0) goal.setStartedTick(now);
+        boolean appointment = isAppointment(goal);
         if (goal.isPastEnd(now)) return finish(agent, goal, villager, world, "Time's up: ");
+        if (appointment && !goal.hasEndTime() && now - goal.getStartedTick() >= MAX_LENGTH_WITHOUT_END) {
+            BrainLog.diagnostic(agent, "sequence-end", "max-length step=" + (goal.getStepIndex() + 1));
+            return finish(agent, goal, villager, world, "Ran out of time for: ");
+        }
 
         AgentGoal step = goal.currentStep();
         if (step == null) {
@@ -83,6 +92,18 @@ public final class SequenceSkill implements VillagerSkill {
 
         if (goal.getGroupId() != null && !s.gathered && arrivedAtMeetingPlace(goal) && !isLocationStep(step)) {
             if (!gather(agent, goal, villager, world, s, now)) return SkillResult.RUNNING;
+        }
+
+        // The step's clock lives on the step, so interruptions don't reset it; it starts after gathering.
+        if (step.getStartedTick() < 0) step.setStartedTick(now);
+        if (appointment && now - step.getStartedTick() >= STEP_BUDGET) {
+            // A stroll's natural end is its time running out; anything else is skipped.
+            dropChild(agent, villager, world);
+            if (!"stroll".equals(step.getGoalType())) {
+                agent.addMemory("Took too long to " + step.getDescription() + "; carried on with the rest of the plan");
+            }
+            return advance(agent, goal, villager, world, s, step, now,
+                    "stroll".equals(step.getGoalType()) ? "done" : "timed-out");
         }
 
         inheritContext(goal, step);
@@ -102,8 +123,9 @@ public final class SequenceSkill implements VillagerSkill {
         }
         // Activity: hold together rather than abandon the plan.
         if (r == SkillResult.WAITING) {
-            s.waits++;
-            if (goal.hasEndTime() || s.waits <= WAIT_RETRIES_WITHOUT_END) {
+            // Wait a bounded time (e.g. no one free to chat yet), then move on; with an end time the
+            // villager lingers with the group after the last step, so nothing is lost by skipping.
+            if (now - step.getStartedTick() < WAIT_BUDGET) {
                 s.pauseUntil = now + PAUSE_AFTER_WAITING;
                 return SkillResult.RUNNING;
             }
@@ -121,7 +143,7 @@ public final class SequenceSkill implements VillagerSkill {
                 + goal.getSteps().size() + " " + step.getGoalType());
         goal.setStepIndex(goal.getStepIndex() + 1);
         s.failures = 0;
-        s.waits = 0;
+        s.pauseUntil = 0;
         keepAlive(agent, goal, now); // each step gets a fresh watchdog budget
         if (goal.currentStep() == null && !goal.hasEndTime()) {
             return finish(agent, goal, villager, world, "Finished my plan: ");
@@ -159,6 +181,10 @@ public final class SequenceSkill implements VillagerSkill {
     /** After the last step of an activity with an end time: stay at the meeting place with the others. */
     private static SkillResult linger(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager,
                                       ServerWorld world, State s, long now) {
+        if (goal.getGroupId() != null
+                && GroupActivities.participantNames(goal.getGroupId(), agent.getVillagerId()).isEmpty()) {
+            return finish(agent, goal, villager, world, "Everyone else has gone home: ");
+        }
         if (s.spot == null) s.spot = meetingPlace(goal, villager);
         if (villager.blockPosition().distSqr(s.spot) > LINGER_RADIUS_SQ) {
             if (s.walk != null) s.walk.setTargetLocation(s.spot);
@@ -197,14 +223,25 @@ public final class SequenceSkill implements VillagerSkill {
 
     private static SkillResult finish(VillagerAgentData agent, AgentGoal goal, VillagerEntity villager,
                                       ServerWorld world, String memory) {
+        dropChild(agent, villager, world);
+        agent.addMemory(memory + goal.getDescription());
+        BrainLog.diagnostic(agent, "sequence-finished", memory.trim() + " " + goal.getDescription());
+        goal.setCompleted(true);
+        return SkillResult.SUCCESS;
+    }
+
+    /** Stop and release the running step's task tree, if any. */
+    private static void dropChild(VillagerAgentData agent, VillagerEntity villager, ServerWorld world) {
         if (agent.brain().tasks.current().child() != null) {
             ActionLifecycle.clearBody(agent, villager, world);
             ActionLifecycle.releaseTree(agent.brain().tasks.current().child(), agent, world);
             agent.brain().tasks.discardChild();
         }
-        agent.addMemory(memory + goal.getDescription());
-        goal.setCompleted(true);
-        return SkillResult.SUCCESS;
+    }
+
+    /** A plan tied to a time or to other villagers, as opposed to a plain to-do list. */
+    private static boolean isAppointment(AgentGoal goal) {
+        return goal.isActivity() || goal.isHoldUntilScheduled();
     }
 
     private static void keepAlive(VillagerAgentData agent, AgentGoal goal, long now) {

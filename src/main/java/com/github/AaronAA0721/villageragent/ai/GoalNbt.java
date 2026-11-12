@@ -48,6 +48,7 @@ public final class GoalNbt {
         if (g.getTitle() != null) t.putString("Title", g.getTitle());
         if (g.isShared()) t.putBoolean("Shared", true);
         if (g.hasEndTime()) t.putLong("End", g.getEndTick());
+        if (g.getStartedTick() >= 0) t.putLong("Started", g.getStartedTick());
 
         if (g.hasSteps()) {
             ListNBT steps = new ListNBT();
@@ -88,6 +89,7 @@ public final class GoalNbt {
         if (t.contains("Title")) g.setTitle(t.getString("Title"));
         g.setShared(t.getBoolean("Shared"));
         if (t.contains("End")) g.setEndTick(t.getLong("End"));
+        if (t.contains("Started")) g.setStartedTick(t.getLong("Started"));
 
         if (t.contains("Steps")) {
             ListNBT steps = t.getList("Steps", 10);

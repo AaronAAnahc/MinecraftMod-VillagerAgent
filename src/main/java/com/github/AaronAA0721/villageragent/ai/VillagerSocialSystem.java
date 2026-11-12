@@ -151,6 +151,42 @@ public class VillagerSocialSystem {
         return a.getName() + ": " + line + "\n" + b.getName() + ": Good to see you too. Let's talk again soon.";
     }
 
+    // ── Paced delivery: one line at a time, like people taking turns ─────────
+
+    /** Pause after a line before the next one: base + per character, clamped (ticks). */
+    private static final int LINE_PAUSE_BASE = 20, LINE_PAUSE_MIN = 40, LINE_PAUSE_MAX = 120;
+    /** Conversation stops if the two drift farther apart than this (squared, 6 blocks). */
+    private static final double TALK_RANGE_SQ = 36.0;
+
+    /** A conversation being spoken out line by line. Server thread only. */
+    private static final class Talk {
+        final ServerWorld world;
+        final VillagerEntity villagerA, villagerB;
+        final VillagerAgentData agentA, agentB;
+        final List<String> lines;
+        int next;
+        long nextTick;
+        Talk(ServerWorld world, VillagerEntity va, VillagerAgentData a, VillagerEntity vb, VillagerAgentData b, List<String> lines) {
+            this.world = world; this.villagerA = va; this.agentA = a; this.villagerB = vb; this.agentB = b; this.lines = lines;
+        }
+    }
+    private static final List<Talk> TALKS = new ArrayList<>();
+
+    /** Advances paced conversations; registered on the Forge bus. */
+    @net.minecraftforge.fml.common.Mod.EventBusSubscriber(modid = com.github.AaronAA0721.villageragent.Villageragent.MOD_ID,
+            bus = net.minecraftforge.fml.common.Mod.EventBusSubscriber.Bus.FORGE)
+    public static final class Pacer {
+        @net.minecraftforge.eventbus.api.SubscribeEvent
+        public static void onServerTick(net.minecraftforge.event.TickEvent.ServerTickEvent event) {
+            if (event.phase != net.minecraftforge.event.TickEvent.Phase.END || TALKS.isEmpty()) return;
+            for (Talk t : new ArrayList<>(TALKS)) advance(t);
+        }
+        @net.minecraftforge.eventbus.api.SubscribeEvent
+        public static void onServerStopping(net.minecraftforge.fml.event.server.FMLServerStoppingEvent event) {
+            for (Talk t : new ArrayList<>(TALKS)) end(t);
+        }
+    }
+
     private static void broadcastDialogue(ServerWorld world,
                                            VillagerEntity villagerA, VillagerAgentData agentA,
                                            VillagerEntity villagerB, VillagerAgentData agentB,
@@ -160,25 +196,60 @@ public class VillagerSocialSystem {
             String line = raw.trim();
             if (!line.isEmpty() && line.contains(":")) lines.add(line);
         }
+        Talk t = new Talk(world, villagerA, agentA, villagerB, agentB, lines);
+        t.nextTick = world.getGameTime();
+        TALKS.add(t);
+        advance(t); // first line right away
+    }
 
-        List<ServerPlayerEntity> players = world.getServer().getPlayerList().getPlayers();
+    /** Say the next line when it is due; finish once all are said or the two have parted. */
+    private static void advance(Talk t) {
+        long now = t.world.getGameTime();
+        if (!t.villagerA.isAlive() || !t.villagerB.isAlive() || t.villagerA.distanceToSqr(t.villagerB) > TALK_RANGE_SQ) {
+            end(t);
+            return;
+        }
+        if (now < t.nextTick) return;
+        if (t.next >= t.lines.size()) { end(t); return; }
+
+        String line = t.lines.get(t.next++);
+        String speaker = line.substring(0, line.indexOf(":")).trim();
+        String text = line.substring(line.indexOf(":") + 1).trim();
+        StringTextComponent msg = new StringTextComponent("§e[" + speaker + "]:§f " + text);
+        for (ServerPlayerEntity player : t.world.getServer().getPlayerList().getPlayers()) {
+            if (player.level == t.world && (player.distanceToSqr(t.villagerA) <= BROADCAST_RANGE_SQ
+                    || player.distanceToSqr(t.villagerB) <= BROADCAST_RANGE_SQ)) {
+                player.sendMessage(msg, Util.NIL_UUID);
+            }
+        }
+        // The speaker turns to the listener; both stay put until the conversation is over.
+        boolean aSpeaks = speaker.equalsIgnoreCase(t.agentA.getName());
+        VillagerEntity talker = aSpeaks ? t.villagerA : t.villagerB, listener = aSpeaks ? t.villagerB : t.villagerA;
+        talker.getLookControl().setLookAt(listener, 30f, 30f);
+        listener.getLookControl().setLookAt(talker, 30f, 30f);
+        t.nextTick = now + Math.max(LINE_PAUSE_MIN, Math.min(LINE_PAUSE_MAX, LINE_PAUSE_BASE + text.length()));
+        t.agentA.brain().socialUntilTick = t.nextTick + 20;
+        t.agentB.brain().socialUntilTick = t.nextTick + 20;
+    }
+
+    /** Conversation over (finished or interrupted): apply its effects for what was actually said. */
+    private static void end(Talk t) {
+        if (!TALKS.remove(t)) return;
+        applyConversation(t.world, t.villagerA, t.agentA, t.villagerB, t.agentB, t.lines.subList(0, t.next));
+    }
+
+    private static void applyConversation(ServerWorld world,
+                                          VillagerEntity villagerA, VillagerAgentData agentA,
+                                          VillagerEntity villagerB, VillagerAgentData agentB,
+                                          List<String> lines) {
         StringBuilder convA = new StringBuilder("Talked with " + agentB.getName() + ": ");
         StringBuilder convB = new StringBuilder("Talked with " + agentA.getName() + ": ");
-
         for (String line : lines) {
-            StringTextComponent msg = new StringTextComponent("§e[" + line.substring(0, line.indexOf(":")) + "]:§f "
-                    + line.substring(line.indexOf(":") + 1).trim());
-            for (ServerPlayerEntity player : players) {
-                if (player.distanceToSqr(villagerA) <= BROADCAST_RANGE_SQ
-                        || player.distanceToSqr(villagerB) <= BROADCAST_RANGE_SQ) {
-                    player.sendMessage(msg, Util.NIL_UUID);
-                }
-            }
             convA.append(line).append(" | ");
             convB.append(line).append(" | ");
         }
 
-        if (!lines.isEmpty()) {
+        if (!lines.isEmpty() && villagerA.isAlive() && villagerB.isAlive()) {
             agentA.addMemory(convA.toString());
             agentB.addMemory(convB.toString());
             // Relationship gain scales with existing score: friends gain less (already close),

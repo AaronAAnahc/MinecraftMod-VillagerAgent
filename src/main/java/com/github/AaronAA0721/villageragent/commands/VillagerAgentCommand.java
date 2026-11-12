@@ -92,7 +92,12 @@ public class VillagerAgentCommand {
                         .executes(VillagerAgentCommand::cmdBuild))))
             .then(Commands.literal("goals")
                 .then(Commands.literal("clear")
-                    .executes(VillagerAgentCommand::clearGoals)))
+                    .executes(VillagerAgentCommand::clearGoals)
+                    .then(Commands.literal("sequences")
+                        .executes(c -> clearSequences(c, null))
+                        .then(Commands.argument("villagers", net.minecraft.command.arguments.EntityArgument.entities())
+                            .executes(c -> clearSequences(c,
+                                    net.minecraft.command.arguments.EntityArgument.getEntities(c, "villagers")))))))
             .then(Commands.literal("occupation")
                 .then(Commands.argument("role", StringArgumentType.word())
                     .suggests((ctx, builder) -> net.minecraft.command.ISuggestionProvider.suggest(
@@ -670,6 +675,50 @@ public class VillagerAgentCommand {
                 + " non-routine goal(s) across " + cleared + " villager(s). "
                 + "Routine goals (farm/rest/restock) kept."), true);
         return removed > 0 ? 1 : 0;
+    }
+
+    /**
+     * /va goals clear sequences [villagers] — remove every multi-step plan ("sequence") and every pending
+     * invite/ask (which would create new ones) from all villagers, or only the selected ones. A plan that
+     * is running right now is stopped first, so the villager goes straight back to its routine.
+     */
+    private static int clearSequences(CommandContext<CommandSource> context,
+                                      Collection<? extends Entity> targets) {
+        CommandSource source = context.getSource();
+        java.util.Set<java.util.UUID> only = null;
+        if (targets != null) {
+            only = new java.util.HashSet<>();
+            for (Entity e : targets) if (e instanceof VillagerEntity) only.add(e.getUUID());
+        }
+        int removed = 0, villagers = 0;
+        for (VillagerAgentData agent : VillagerAgentManager.getAllAgents()) {
+            if (only != null && !only.contains(agent.getVillagerId())) continue;
+            java.util.function.Predicate<AgentGoal> isPlan =
+                    g -> "sequence".equals(g.getGoalType()) || "invite".equals(g.getGoalType());
+            AgentGoal running = agent.getRunningGoal();
+            if (running != null && isPlan.test(running)) {
+                for (ServerWorld world : source.getServer().getAllLevels()) {
+                    Entity e = world.getEntity(agent.getVillagerId());
+                    if (e instanceof VillagerEntity) {
+                        com.github.AaronAA0721.villageragent.ai.ActionLifecycle.cancel(agent, (VillagerEntity) e, world);
+                        break;
+                    }
+                }
+                agent.setRunningGoal(null);
+            }
+            int before = agent.getGoals().size();
+            agent.getGoals().removeIf(isPlan);
+            int n = before - agent.getGoals().size();
+            if (n > 0) {
+                villagers++;
+                removed += n;
+                source.sendSuccess(new StringTextComponent(TextFormatting.GREEN + "✓ " + agent.getName()
+                        + ": removed " + n + " plan(s)"), true);
+            }
+        }
+        source.sendSuccess(new StringTextComponent((removed > 0 ? TextFormatting.GREEN : TextFormatting.YELLOW)
+                + "Cleared " + removed + " sequence/invite plan(s) from " + villagers + " villager(s)."), true);
+        return removed;
     }
 
     /**
