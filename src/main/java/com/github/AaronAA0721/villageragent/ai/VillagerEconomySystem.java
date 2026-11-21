@@ -461,7 +461,8 @@ public final class VillagerEconomySystem {
      * "Farmer", "farmer", "minecraft:FARMER" → "farmer"; "None"/"Unemployed Villager" → "unemployed".
      */
     private static String professionRegistryKey(String key) {
-        return ("lumberjack".equals(key) || "miner".equals(key) ? "villageragent:" : "minecraft:") + key;
+        return ("lumberjack".equals(key) || "miner".equals(key) || "guard".equals(key) || "builder".equals(key)
+                ? "villageragent:" : "minecraft:") + key;
     }
 
     private static String normalizeProfession(String profession) {

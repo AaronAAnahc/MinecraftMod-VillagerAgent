@@ -26,6 +26,8 @@ public enum CapabilityId {
         switch (profession.toLowerCase(Locale.ROOT)) {
             case "lumberjack":  return WOODCUTTING;
             case "miner":       return MINING;
+            case "guard":       return COMBAT;
+            case "builder":     return CRAFTING;
             case "farmer":      return FARMING;
             case "fisherman":   return FISHING;
             case "weaponsmith":

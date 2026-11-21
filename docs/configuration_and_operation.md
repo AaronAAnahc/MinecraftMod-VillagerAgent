@@ -59,6 +59,8 @@ Both `/va` and `/villageragent` are supported. Use in-game completion for argume
 /va orders
 /va occupation lumberjack
 /va occupation miner
+/va occupation builder
+/va occupation guard
 /va occupation none
 /va request minecraft:oak_log 8
 ```
@@ -230,6 +232,8 @@ The radius does not change charging conditions: at least two eligible responders
 
 
 ## Resource workstations
+
+Village job assignment defaults to one builder at four adults (`builder_min_villagers`) and one guard at five (`guard_min_villagers`). Set either threshold to zero to disable automatic assignment for that role. Manual assignment and workstation claims remain available. Builder settings are `builder_spare_beds`, `builder_max_houses` and `builder_block_interval`. Guards use `guard_scan_range`. The corresponding block IDs are `villageragent:builder_bench` and `villageragent:guard_post`.
 
 `/give @p villageragent:carpenter_table` and `/give @p villageragent:miner_workbench` provide the new profession blocks. Both are noninteractive blocks with ordinary crafting recipes and creative entries. Placement lets eligible villagers claim the corresponding lumberjack/miner profession through POIs. See [Workstations](workstations.md) for textures, skills, starter tools and administrative occupation behavior; [Task methods](task_methods.md) describes automatic item-method discovery.
 

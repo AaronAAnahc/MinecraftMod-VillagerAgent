@@ -39,6 +39,8 @@ public final class DeterministicPlanGenerator {
         pool("cartographer","craft", 4, "socialize", 2);
         pool("lumberjack",  "lumberjack_work", 5, "craft", 2, "socialize", 2);
         pool("miner",       "miner_work", 5, "craft", 2, "socialize", 2);
+        pool("guard",       "guard_work", 5, "socialize", 2);
+        pool("builder",     "builder_work", 5, "socialize", 2);
         // unemployed / nitwit: no main duty — their routine is whatever their hobby unlocks.
         pool("none",        "socialize", 2);
         pool("nitwit",      "socialize", 2);

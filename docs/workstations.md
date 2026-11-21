@@ -1,17 +1,19 @@
 # Resource workstations
 
-`content/Workstations.java` registers plain blocks, block items, POI types and villager professions through Forge deferred registries. Forge's POI registration callback installs the state mapping. The two profession workstations do not open a screen, inventory or crafting interface; the notice board has a read-only order screen.
+`content/Workstations.java` registers plain blocks, block items, POI types and villager professions through Forge deferred registries. Forge's POI registration callback installs the state mapping. The four profession workstations serve as job sites. The notice board opens a read-only order screen.
 
 | Block | Profession | Initial capability baseline | Appearance |
 |---|---|---|---|
 | `villageragent:carpenter_table` | `villageragent:lumberjack` | WOODCUTTING 3 | Crafting-table top; oak-log bark on the other five faces |
 | `villageragent:miner_workbench` | `villageragent:miner` | MINING 3, QUARRYING 3 | Smooth-stone top, iron-ore sides, cobblestone bottom |
+| `villageragent:builder_bench` | `villageragent:builder` | CRAFTING (work requires level 1) | Dedicated bench textures |
+| `villageragent:guard_post` | `villageragent:guard` | COMBAT (work requires level 1) | Dedicated post textures |
 
 Unemployed adults claim the stations through `FindJobSiteSkill` and vanilla POI profession assignment. Each station has one ticket. Resource orders only recruit existing eligible workers; they never convert unemployed villagers into workers. Losing a station allows the normal job-site search to run again. `/va occupation` is an administrative override that updates the entity profession and clears the previous station reservation. Old separately saved resource roles reconcile with the actual profession on the next profession update.
 
 Taking the profession grants starter items once (`JobStarterItems`: lumberjack iron axe, miner iron pickaxe), and the workstation grants daily supplies (lumberjack 8 oak logs, miner 16 cobblestone). Missing tools use ordinary acquisition; lumberjacks can craft wooden/stone axes and miners wooden/stone pickaxes themselves. See the [economy topic](capabilities_crafting_and_economy.md#profession-essentials).
 
-Both block items appear in Decorations and have self-drop loot tables. Recipes:
+The carpenter table and miner workbench appear in Decorations and have self-drop loot tables. Recipes:
 
 ```text
 Carpenter table:       Miner workbench:
@@ -36,7 +38,13 @@ The carpenter table is a profession workstation, not a usable vanilla crafting t
 
 Compilation and static asset validation do not verify in-game POI claiming or rendering. Acceptance cases are tracked in `DEBUG_VERIFICATION.md`.
 
-### Lumberjack tree session
+### Builders and guards
+
+A builder starts with a crafting table and 32 oak planks. On a work session, the builder resumes an active construction site first. If the village needs beds, the builder looks for room to place a bed in existing housing before surveying a site for a house. Construction follows a house template in stages. Missing materials can trigger a village request. The default target is one spare bed, with a limit of eight builder-completed houses per village and ten ticks between block placements.
+
+A guard starts with an iron sword and four bread. The `guard_work` routine patrols the village. An armed guard can respond alone, prioritizing its own pursuer and then favoring visible monsters chasing residents. The default awake scan range is 16 blocks. A sleeping guard uses the shorter wake range.
+
+## Lumberjack tree session
 
 The routine selects loaded remembered forest chunks using complete paths to sampled surface standing cells (nine columns per chunk). It retains the selected route until success/failure instead of retargeting every tick. In the chunk it compares complete routes to standable cells beside up to 16 trunk bases. Tree approach uses that cell with a strict arrival radius and rechecks block reach before chopping, not a walk into the trunk. Null/partial paths are unavailable; no straight-line fallback is used. Failed trees/chunks are excluded for the execution, body/child state is cleared, and another target is selected. Three distinct target failures end the execution with UNREACHABLE/FAIL and a minimum 1200-tick root cooldown; no remaining reachable forest also fails. After at least one tree has been felled, the same conditions end the session with SUCCESS instead. The outer goal failure policy remains separate and bounded.
 

@@ -63,6 +63,8 @@ public final class BehaviorCatalog {
         add("socialize",    CapabilityId.SOCIAL,     0, 3, Category.SOCIAL); // ungated — chat trains SOCIAL from 0
         add("trade",        CapabilityId.SOCIAL,     2, 3, Category.SOCIAL);
         add("combat",       CapabilityId.COMBAT,     1, 4, Category.COMBAT);
+        add("guard_work",   CapabilityId.COMBAT,     1, 5, Category.WORK);
+        add("builder_work", CapabilityId.CRAFTING,   1, 5, Category.WORK);
     }
 
     private BehaviorCatalog() {}

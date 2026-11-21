@@ -34,6 +34,16 @@ public class JobStarterItems {
     private static void initializeStarterItems() {
         jobStarterItems.put("lumberjack", Collections.singletonList(new StarterItem(Items.IRON_AXE, 1)));
         jobStarterItems.put("miner", Collections.singletonList(new StarterItem(Items.IRON_PICKAXE, 1)));
+        // Guard: a sword to defend the village with, and a little bread for long patrols.
+        List<StarterItem> guardItems = new ArrayList<>();
+        guardItems.add(new StarterItem(Items.IRON_SWORD, 1));
+        guardItems.add(new StarterItem(Items.BREAD, 4));
+        jobStarterItems.put("guard", guardItems);
+        // Builder: a crafting table (beds, doors and stairs need the 3x3 grid) and enough planks to start a floor.
+        List<StarterItem> builderItems = new ArrayList<>();
+        builderItems.add(new StarterItem(Items.CRAFTING_TABLE, 1));
+        builderItems.add(new StarterItem(Items.OAK_PLANKS, 32));
+        jobStarterItems.put("builder", builderItems);
         // Farmer: seeds, hoe, bone meal
         List<StarterItem> farmerItems = new ArrayList<>();
         farmerItems.add(new StarterItem(Items.WHEAT_SEEDS, 32));

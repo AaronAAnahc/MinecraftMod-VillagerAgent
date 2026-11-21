@@ -41,10 +41,26 @@ public final class Workstations {
             () -> new VillagerProfession("lumberjack", LUMBERJACK_POI.get(), ImmutableSet.of(), ImmutableSet.of(), SoundEvents.VILLAGER_WORK_FLETCHER));
     public static final RegistryObject<VillagerProfession> MINER = JOBS.register("miner",
             () -> new VillagerProfession("miner", MINER_POI.get(), ImmutableSet.of(), ImmutableSet.of(), SoundEvents.VILLAGER_WORK_MASON));
+    // Guard: a weapon rack the village defender reports to.
+    public static final RegistryObject<Block> GUARD_POST = BLOCKS.register("guard_post",
+            () -> new Block(AbstractBlock.Properties.copy(Blocks.OAK_PLANKS)));
+    // Builder: a drafting bench where the builder keeps its plans.
+    public static final RegistryObject<Block> BUILDER_BENCH = BLOCKS.register("builder_bench",
+            () -> new Block(AbstractBlock.Properties.copy(Blocks.OAK_PLANKS)));
+    public static final RegistryObject<PointOfInterestType> GUARD_POI = POIS.register("guard",
+            () -> new PointOfInterestType("guard", PointOfInterestType.getBlockStates(GUARD_POST.get()), 1, 1));
+    public static final RegistryObject<PointOfInterestType> BUILDER_POI = POIS.register("builder",
+            () -> new PointOfInterestType("builder", PointOfInterestType.getBlockStates(BUILDER_BENCH.get()), 1, 1));
+    public static final RegistryObject<VillagerProfession> GUARD = JOBS.register("guard",
+            () -> new VillagerProfession("guard", GUARD_POI.get(), ImmutableSet.of(), ImmutableSet.of(), SoundEvents.VILLAGER_WORK_WEAPONSMITH));
+    public static final RegistryObject<VillagerProfession> BUILDER = JOBS.register("builder",
+            () -> new VillagerProfession("builder", BUILDER_POI.get(), ImmutableSet.of(), ImmutableSet.of(), SoundEvents.VILLAGER_WORK_MASON));
     static {
         ITEMS.register("notice_board", () -> new BlockItem(NOTICE_BOARD.get(), new Item.Properties().tab(ItemGroup.TAB_DECORATIONS)));
         ITEMS.register("carpenter_table", () -> new BlockItem(CARPENTER_TABLE.get(), new Item.Properties().tab(ItemGroup.TAB_DECORATIONS)));
         ITEMS.register("miner_workbench", () -> new BlockItem(MINER_WORKBENCH.get(), new Item.Properties().tab(ItemGroup.TAB_DECORATIONS)));
+        ITEMS.register("guard_post", () -> new BlockItem(GUARD_POST.get(), new Item.Properties().tab(ItemGroup.TAB_DECORATIONS)));
+        ITEMS.register("builder_bench", () -> new BlockItem(BUILDER_BENCH.get(), new Item.Properties().tab(ItemGroup.TAB_DECORATIONS)));
     }
     public static void register(IEventBus bus) {
         BLOCKS.register(bus); ITEMS.register(bus); POIS.register(bus); JOBS.register(bus);

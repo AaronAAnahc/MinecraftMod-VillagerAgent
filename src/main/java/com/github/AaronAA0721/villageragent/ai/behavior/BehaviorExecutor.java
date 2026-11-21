@@ -64,6 +64,8 @@ public final class BehaviorExecutor {
         register(new TradeMeetingSkill());
         register(new LumberjackWorkSkill());
         register(new MinerWorkSkill());
+        register(new GuardWorkSkill());
+        register(new BuilderWorkSkill());
         register(new PlaceNearSelfSkill());
         register(new PlaceBlockSkill());
         // LLM-authored composites: ordered plans and group invitations.

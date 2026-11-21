@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "villageragent:block/guard_post"
+    }
+  }
+}

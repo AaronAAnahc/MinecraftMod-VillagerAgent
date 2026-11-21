@@ -101,7 +101,7 @@ public class VillagerAgentCommand {
             .then(Commands.literal("occupation")
                 .then(Commands.argument("role", StringArgumentType.word())
                     .suggests((ctx, builder) -> net.minecraft.command.ISuggestionProvider.suggest(
-                        java.util.Arrays.asList("lumberjack", "miner", "none"), builder))
+                        java.util.Arrays.asList("lumberjack", "miner", "guard", "builder", "none"), builder))
                     .executes(VillagerAgentCommand::setOccupation)))
             .then(Commands.literal("request")
                 .then(Commands.argument("item", StringArgumentType.word())
@@ -129,6 +129,7 @@ public class VillagerAgentCommand {
                                     net.minecraft.command.arguments.ItemArgument.getItem(ctx, "item").createItemStack(
                                         IntegerArgumentType.getInteger(ctx, "count"), false))))))))
             .then(Commands.literal("orders").executes(VillagerAgentCommand::showOrders))
+            .then(Commands.literal("housing").executes(VillagerAgentCommand::housingReport))
             .then(Commands.literal("dumpstructures").executes(VillagerAgentCommand::dumpStructures));
     }
 
@@ -136,8 +137,8 @@ public class VillagerAgentCommand {
         VillagerAgentData agent = resolveAgent(context);
         if (agent == null) return 0;
         String role = StringArgumentType.getString(context, "role");
-        if (!java.util.Arrays.asList("lumberjack", "miner", "none").contains(role)) {
-            context.getSource().sendFailure(new StringTextComponent("Use lumberjack, miner or none")); return 0;
+        if (!java.util.Arrays.asList("lumberjack", "miner", "guard", "builder", "none").contains(role)) {
+            context.getSource().sendFailure(new StringTextComponent("Use lumberjack, miner, guard, builder or none")); return 0;
         }
         ServerWorld world = (ServerWorld) context.getSource().getLevel();
         VillagerEntity villager = resolveVillager(agent, context);
@@ -151,10 +152,21 @@ public class VillagerAgentCommand {
         net.minecraft.entity.merchant.villager.VillagerProfession profession = "lumberjack".equals(role)
                 ? com.github.AaronAA0721.villageragent.content.Workstations.LUMBERJACK.get()
                 : "miner".equals(role) ? com.github.AaronAA0721.villageragent.content.Workstations.MINER.get()
+                : "guard".equals(role) ? com.github.AaronAA0721.villageragent.content.Workstations.GUARD.get()
+                : "builder".equals(role) ? com.github.AaronAA0721.villageragent.content.Workstations.BUILDER.get()
                 : net.minecraft.entity.merchant.villager.VillagerProfession.NONE;
         villager.setVillagerData(villager.getVillagerData().setProfession(profession));
         agent.updateProfession("none".equals(role) ? "Unemployed Villager" : role);
         context.getSource().sendSuccess(new StringTextComponent(agent.getName() + " occupation: " + role), false);
+        return 1;
+    }
+
+    /** Beds, residents, free bed spots and house construction for the village the command runs in. */
+    private static int housingReport(CommandContext<CommandSource> context) {
+        ServerWorld world = (ServerWorld) context.getSource().getLevel();
+        net.minecraft.util.math.BlockPos pos = new net.minecraft.util.math.BlockPos(context.getSource().getPosition());
+        for (String line : com.github.AaronAA0721.villageragent.ai.housing.VillageHousing.report(world, pos))
+            context.getSource().sendSuccess(new StringTextComponent(line), false);
         return 1;
     }
 

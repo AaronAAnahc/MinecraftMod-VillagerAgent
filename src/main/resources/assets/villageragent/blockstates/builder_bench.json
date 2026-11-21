@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "villageragent:block/builder_bench"
+    }
+  }
+}

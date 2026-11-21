@@ -15,7 +15,9 @@ public final class GoalScheduler {
         int floor;
         switch (goal.getGoalType()) {
             case "find_job_site": case "deliver_trade": floor = 8; break;
-            case "farm": case "craft": case "fulfill_order": case "lumberjack_work": case "miner_work": floor = 7; break;
+            case "farm": case "craft": case "fulfill_order": case "lumberjack_work": case "miner_work":
+            case "builder_work": floor = 7; break;
+            case "guard_work": floor = 6; break;
             case "place_block": case "place_near_self": floor = 7; break;
             case "restock": case "acquire_item": case "gather": case "collect_smelt": floor = 6; break;
             default: return;

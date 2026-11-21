@@ -204,6 +204,12 @@ public final class SkillCraftCatalog {
         // Lumberjack: axes (for chopping)
         add("villageragent:lumberjack", 1, "minecraft:wooden_axe", false, false);
         add("villageragent:lumberjack", 1, "minecraft:stone_axe",  false, false);
+        // Guard: can at least make itself a stone sword when its iron one breaks.
+        add("villageragent:guard", 1, "minecraft:wooden_sword", false, false);
+        add("villageragent:guard", 1, "minecraft:stone_sword",  false, false);
+        // Builder: beds for new residents. Every other building block is unlocked by isBuildingMaterial below.
+        add("villageragent:builder", 1, "minecraft:white_bed",  false, false);
+        add("villageragent:builder", 1, "minecraft:stick",      false, false);
         // Farmer: hoes (for tilling)
         add("farmer", 1, "minecraft:wooden_hoe",  false, false);
         add("farmer", 1, "minecraft:stone_hoe",   false, false);
@@ -388,6 +394,9 @@ public final class SkillCraftCatalog {
 
     public static boolean isUnlockedFor(CapabilityPool pool, String profession, String itemId) {
         if (ALWAYS_CRAFTABLE.equals(itemId)) return true;
+        // A builder can craft any placeable building block (planks, stairs, doors, fences, beds, torches...).
+        if ("builder".equals(norm(profession)) && pool.levelOf(CapabilityId.CRAFTING) >= 1
+                && isBuildingMaterial(itemId)) return true;
         // Per-skill unlock table (craft_unlocks.json) — checked first, it is the authoritative gate.
         if (jsonUnlocksItem(pool, itemId)) return true;
 
@@ -414,6 +423,21 @@ public final class SkillCraftCatalog {
             }
         }
         return false;
+    }
+
+    /** A block item that is part of a house (not a workstation, container of value, or redstone part). */
+    public static boolean isBuildingMaterial(String itemId) {
+        ResourceLocation key = ResourceLocation.tryParse(itemId);
+        if (key == null) return false;
+        net.minecraft.item.Item item = net.minecraftforge.registries.ForgeRegistries.ITEMS.getValue(key);
+        if (!(item instanceof net.minecraft.item.BlockItem)) return false;
+        net.minecraft.block.Block block = ((net.minecraft.item.BlockItem) item).getBlock();
+        // Workstations stay with their own professions; redstone and shulker boxes are not house parts.
+        if (net.minecraft.village.PointOfInterestType.forState(block.defaultBlockState()).isPresent()
+                && !(block instanceof net.minecraft.block.BedBlock)) return false;
+        return !(block instanceof net.minecraft.block.ShulkerBoxBlock)
+                && !(block instanceof net.minecraft.block.TNTBlock)
+                && !(block instanceof net.minecraft.block.RedstoneDiodeBlock);
     }
 
     /** The capability level required to craft this item, or 0 if not craftable by this villager. */

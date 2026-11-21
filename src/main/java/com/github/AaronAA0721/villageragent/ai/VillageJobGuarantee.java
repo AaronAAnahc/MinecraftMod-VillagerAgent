@@ -24,7 +24,8 @@ import java.util.*;
 import java.util.function.Predicate;
 
 /**
- * Keeps at least one farmer, lumberjack and miner in every loaded village.
+ * Keeps at least one farmer, lumberjack and miner in every loaded village, plus a builder and a guard once the
+ * village has {@code builder_min_villagers} / {@code guard_min_villagers} adults.
  *
  * <p>A missing role goes to, in order: an unemployed resident, a novice holding a duplicated
  * non-core profession, any novice non-core resident, a novice duplicate of another core role.
@@ -44,8 +45,13 @@ public final class VillageJobGuarantee {
         public final String name;
         public final VillagerProfession profession;
         public final BlockState workstation;
+        /** Adults the village needs before this role is filled (0 = always). */
+        public final int minAdults;
         Role(String name, VillagerProfession profession, BlockState workstation) {
-            this.name = name; this.profession = profession; this.workstation = workstation;
+            this(name, profession, workstation, 0);
+        }
+        Role(String name, VillagerProfession profession, BlockState workstation, int minAdults) {
+            this.name = name; this.profession = profession; this.workstation = workstation; this.minAdults = minAdults;
         }
     }
 
@@ -54,6 +60,20 @@ public final class VillageJobGuarantee {
                 new Role("Farmer", VillagerProfession.FARMER, Blocks.COMPOSTER.defaultBlockState()),
                 new Role("Lumberjack", Workstations.LUMBERJACK.get(), Workstations.CARPENTER_TABLE.get().defaultBlockState()),
                 new Role("Miner", Workstations.MINER.get(), Workstations.MINER_WORKBENCH.get().defaultBlockState()));
+    }
+
+    /**
+     * Roles a village gets once it is big enough: a builder (houses and beds for newcomers) and a guard. A config
+     * value of 0 disables the automatic assignment of that role.
+     */
+    public static List<Role> growthRoles() {
+        List<Role> roles = new ArrayList<>();
+        int builders = ModConfig.BUILDER_MIN_VILLAGERS.get(), guards = ModConfig.GUARD_MIN_VILLAGERS.get();
+        if (builders > 0) roles.add(new Role("Builder", Workstations.BUILDER.get(),
+                Workstations.BUILDER_BENCH.get().defaultBlockState(), builders));
+        if (guards > 0) roles.add(new Role("Guard", Workstations.GUARD.get(),
+                Workstations.GUARD_POST.get().defaultBlockState(), guards));
+        return roles;
     }
 
     /** Server tick hook; each village is examined at most every 30 s. */
@@ -81,10 +101,13 @@ public final class VillageJobGuarantee {
         }
         if (adults.isEmpty()) return report;
         adults.sort(Comparator.comparing(v -> v.getUUID().toString()));
-        List<Role> roles = coreRoles();
+        List<Role> roles = new ArrayList<>(coreRoles());
+        roles.addAll(growthRoles());
         for (Role role : roles) {
+            if (adults.size() < role.minAdults) continue;
             if (count(adults, role.profession) > 0) continue;
-            VillagerEntity chosen = choose(adults, roles);
+            // Growth roles never take a village's only librarian, cleric... : unemployed or duplicated novices only.
+            VillagerEntity chosen = choose(adults, roles, role.minAdults > 0);
             if (chosen == null) {
                 report.add("No eligible resident left for " + role.name);
                 continue;
@@ -112,7 +135,7 @@ public final class VillageJobGuarantee {
         return false;
     }
 
-    private static VillagerEntity choose(List<VillagerEntity> adults, List<Role> roles) {
+    private static VillagerEntity choose(List<VillagerEntity> adults, List<Role> roles, boolean duplicatesOnly) {
         Comparator<VillagerEntity> novice = Comparator.comparingInt((VillagerEntity v) -> v.getVillagerData().getLevel())
                 .thenComparingInt(VillagerEntity::getVillagerXp);
         // 1. Unemployed.
@@ -125,6 +148,7 @@ public final class VillageJobGuarantee {
             VillagerProfession p = v.getVillagerData().getProfession();
             if (p == VillagerProfession.NITWIT || isCore(p, roles) || v.getVillagerData().getLevel() > 1) continue;
             boolean duplicated = count(adults, p) > 1;
+            if (duplicatesOnly && !duplicated) continue;
             if (best == null || (duplicated && !bestDuplicated)
                     || (duplicated == bestDuplicated && novice.compare(v, best) < 0)) {
                 best = v; bestDuplicated = duplicated;

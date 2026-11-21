@@ -133,6 +133,18 @@ public class ModConfig {
     public static final ForgeConfigSpec.DoubleValue MINING_TIME_MULTIPLIER;
     public static final ForgeConfigSpec.BooleanValue NIGHT_CURFEW;
     public static final ForgeConfigSpec.BooleanValue ENSURE_CORE_JOBS;
+    /** Villagers needed before a village gets a guard (0 = never assign one automatically). */
+    public static final ForgeConfigSpec.IntValue GUARD_MIN_VILLAGERS;
+    /** Villagers needed before a village gets a builder (0 = never assign one automatically). */
+    public static final ForgeConfigSpec.IntValue BUILDER_MIN_VILLAGERS;
+    /** How far (blocks) a guard spots monsters. */
+    public static final ForgeConfigSpec.DoubleValue GUARD_SCAN_RANGE;
+    /** Beds a builder keeps beyond the number of residents (room for children). */
+    public static final ForgeConfigSpec.IntValue BUILDER_SPARE_BEDS;
+    /** Houses builders may add to one village. */
+    public static final ForgeConfigSpec.IntValue BUILDER_MAX_HOUSES;
+    /** Ticks between two blocks placed by a builder. */
+    public static final ForgeConfigSpec.IntValue BUILDER_BLOCK_INTERVAL;
     public static final ForgeConfigSpec.BooleanValue ASYNC_PATHFINDING;
     public static final ForgeConfigSpec.IntValue PATH_REPATH_INTERVAL;
     /** Extra upward velocity applied each tick while a villager is submerged (fights sinking & helps surface). */
@@ -538,6 +550,35 @@ public class ModConfig {
                         + "given to an unemployed (or most-duplicated, novice) resident and its workstation is "
                         + "placed beside the village notice board. Manual run: /va showcase jobs")
                 .define("ensure_core_jobs", true);
+
+        GUARD_MIN_VILLAGERS = BUILDER
+                .comment("A village with at least this many adult villagers keeps one guard (given to an unemployed or "
+                        + "novice resident, with a guard post beside the notice board). 0 = only guards that find a "
+                        + "guard post themselves or are set with /va occupation guard.")
+                .defineInRange("guard_min_villagers", 5, 0, 256);
+
+        BUILDER_MIN_VILLAGERS = BUILDER
+                .comment("A village with at least this many adult villagers keeps one builder (builder's bench beside "
+                        + "the notice board). 0 = never assign automatically.")
+                .defineInRange("builder_min_villagers", 4, 0, 256);
+
+        GUARD_SCAN_RANGE = BUILDER
+                .comment("How far (blocks) an armed guard spots monsters and goes after them, including monsters "
+                        + "chasing other villagers. Ordinary villagers notice threats within 6 blocks.")
+                .defineInRange("guard_scan_range", 16.0, 6.0, 48.0);
+
+        BUILDER_SPARE_BEDS = BUILDER
+                .comment("Beds a builder keeps beyond the number of villagers. Villagers only have children when there "
+                        + "are more beds than villagers, so 0 stops village growth.")
+                .defineInRange("builder_spare_beds", 1, 0, 16);
+
+        BUILDER_MAX_HOUSES = BUILDER
+                .comment("Most houses the builders add to one village.")
+                .defineInRange("builder_max_houses", 8, 0, 128);
+
+        BUILDER_BLOCK_INTERVAL = BUILDER
+                .comment("Ticks between two blocks placed by a builder (20 = one block per second).")
+                .defineInRange("builder_block_interval", 10, 1, 200);
 
         ASYNC_PATHFINDING = BUILDER
                 .comment("Compute path recomputes, stuck recovery and continuation of partial paths on a worker "

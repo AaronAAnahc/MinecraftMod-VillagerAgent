@@ -5,6 +5,7 @@ Reviewed: 2026-11-09. This document lists source-confirmable scope and limits. T
 | Topic | Current scope | Limits or checks still needed |
 |---|---|---|
 | Main loop | Slow perception, Utility sampling, per-tick skills, unified exits | Continuous execution and exceptional cases need in-game tests |
+| Housing and patrols | Builders place beds and construct houses. Armed guards patrol and respond to threats. | Verify bed placement, interrupted construction and guard response in-game. |
 | Resource work | Workstation professions; independent woodcutting/mining/quarrying; connected ore veins; drop collection; torch-gated dark mining; farm sessions from remembered fields | Memory-directed whole trees outside vanilla villages; local exposed ores; no tunneling or scaffolding |
 | Item method discovery | Contracts, output providers, recursive prerequisites, cost/stall scoring and scoped cancellation | Bounded recipe/tag/cost search; no global optimum or automatic skill-training planner |
 | Goal lifecycle | Cooldowns, waits, exit after at most three failures, delayed routine recreation | Check source eligibility against handlers |

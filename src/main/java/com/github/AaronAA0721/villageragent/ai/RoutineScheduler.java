@@ -25,7 +25,7 @@ public final class RoutineScheduler {
     private static final List<String> KNOWN_TYPES = Arrays.asList(
             "rest", "wander", "farm", "restock", "find_job_site", "craft", "trade", "socialize",
             "smelt", "collect_smelt", "fish", "butcher_work", "butcher_cook", "shepherd_work", "fletcher_work",
-            "lumberjack_work", "miner_work");
+            "lumberjack_work", "miner_work", "guard_work", "builder_work");
 
     /** Routine notice-board check: at most every ~4 minutes, and a low pull against real work. */
     static final int BOARD_CHECK_COOLDOWN = 4800;
@@ -40,6 +40,7 @@ public final class RoutineScheduler {
      */
     public static final List<String> WORK_TYPES = Collections.unmodifiableList(Arrays.asList(
             "fish", "smelt", "butcher_work", "shepherd_work", "fletcher_work", "lumberjack_work", "miner_work",
+            "guard_work", "builder_work",
             "butcher_cook", "collect_smelt", "farm", "restock"));
 
     /** True if {@code type} is one of the profession work sessions in {@link #WORK_TYPES}. */
@@ -217,6 +218,18 @@ public final class RoutineScheduler {
                 // No hardcoded cooldown — recency factor in GoalScheduler handles pacing.
                 apply(g, 0, 5.0, 0.0, 5);
                 break;
+            case "guard_work":
+                if (!isGuard(agent.getProfession())) return null;
+                if (agent.getCapabilityPool().levelOf(CapabilityId.COMBAT) < 1) return null;
+                g = new AgentGoal("guard_work", "Patrol the village and keep watch (routine)", 5);
+                apply(g, 600, 5.0, 0.0, 5);   // 30 seconds off between patrol rounds
+                break;
+            case "builder_work":
+                if (!isBuilder(agent.getProfession())) return null;
+                if (agent.getCapabilityPool().levelOf(CapabilityId.CRAFTING) < 1) return null;
+                g = new AgentGoal("builder_work", "Build houses and beds for the village (routine)", 5);
+                apply(g, 200, 5.0, 0.0, 5);   // short pause: a house is built over many sessions
+                break;
             case "trade": {
                 // Checking the village notice board is a standing routine for every resident.
                 if (!com.github.AaronAA0721.villageragent.config.ModConfig.ENABLE_ECONOMY.get()) return null;
@@ -279,6 +292,12 @@ public final class RoutineScheduler {
     }
     private static boolean isLumberjack(String profession) {
         return profession != null && "lumberjack".equals(profession.toLowerCase(Locale.ROOT));
+    }
+    private static boolean isGuard(String profession) {
+        return profession != null && "guard".equals(profession.toLowerCase(Locale.ROOT));
+    }
+    private static boolean isBuilder(String profession) {
+        return profession != null && "builder".equals(profession.toLowerCase(Locale.ROOT));
     }
     private static boolean isMiner(String profession) {
         return profession != null && "miner".equals(profession.toLowerCase(Locale.ROOT));

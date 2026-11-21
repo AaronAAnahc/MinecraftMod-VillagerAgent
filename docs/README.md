@@ -11,6 +11,8 @@ Reviewed: 2026-11-09. Source inventory verified against the workspace. The curre
 
 Minecraft 1.16.5 / Forge 36.2.42, official mappings, Java 8 toolchain. Slow server updates maintain perception and candidates; skills execute every tick. `GoalScheduler` performs Utility-weighted sampling where each skill defines its own `chanceFactor()` opportunity multiplier (see [Goal utility and chance factors](goal_utility_and_chance_factors.md)). Rule-based behavior runs independently; the LLM optionally supplies content for conversations and other integration points. Villager resource supply is free and demand-driven: notice-board requests, non-exclusive request-linked production and physical one-way delivery (player barter remains paid); logging revisits remembered village-external chunks. Valuation content is populated per profession; see [Economy value tables](economy_value_tables.md).
 
+Builders add housing when beds are scarce, and guards patrol the village. See [Builders and guards](workstations.md#builders-and-guards) for their routines.
+
 ## Current documents and responsibilities
 
 | Document | Authoritative topic |

@@ -227,13 +227,17 @@ public class VillagerAgentManager {
         VillagerAction current = agent.getCurrentAction();
         // Archers (bow + arrows) look further and also take on monsters that are only safe to fight at range.
         boolean archer = ArcherCombat.canShoot(agent) && CombatAction.mayAttack(villager, agent);
-        LivingEntity threat = archer ? ArcherCombat.findTarget(villager, world) : CombatAction.findNearestThreat(villager, world);
+        // Guards (armed, healthy) look further and defend other residents, not only themselves.
+        boolean guard = GuardCombat.fightsAlone(agent) && CombatAction.mayAttack(villager, agent);
+        LivingEntity threat = archer ? ArcherCombat.findTarget(villager, world) : null;
+        if (threat == null && guard) threat = GuardCombat.findTarget(villager, world);
+        if (threat == null && !archer && !guard) threat = CombatAction.findNearestThreat(villager, world);
         boolean reacting = current != null && (current.getActionType() == VillagerAction.ActionType.ATTACK
                 || current.getActionType() == VillagerAction.ActionType.FLEE
                 || current.getActionType() == VillagerAction.ActionType.RALLY);
         // Night curfew: only the villager actually being chased (or attacked) starts a fight. Others keep
         // sleeping/heading to bed and join only when that villager's alarm reaches them.
-        if (threat != null && !reacting && SleepSkill.curfew(world.getDayTime())
+        if (threat != null && !reacting && !guard && SleepSkill.curfew(world.getDayTime())
                 && !CombatAction.isPursuer(threat, villager)) threat = null;
         if (threat != null) {
             agent.brain().lastThreatSeenTick = world.getGameTime();
@@ -244,6 +248,7 @@ public class VillagerAgentManager {
             if (reacting && !threat.getUUID().equals(current.getTargetEntityId())
                     && (!(oldTarget instanceof LivingEntity)
                         || !(archer ? ArcherCombat.isValidTarget(villager, (LivingEntity) oldTarget)
+                                : guard ? GuardCombat.isValidTarget(villager, (LivingEntity) oldTarget)
                                 : CombatAction.isVisibleThreat(villager, (LivingEntity) oldTarget)))) {
                 rallyOrFlee(villager, world, agent, threat);
                 return;
@@ -290,12 +295,13 @@ public class VillagerAgentManager {
         VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         VillageSignalBoard.RallyCall rally = board.nearestRally(villager);
         // A rally whose responders already bring enough strength does not pull in the rest of the village.
-        if (rally != null && board.needsHelp(rally, villager)) {
+        // Guards answer every alarm in their village, even when the group already looks strong enough.
+        if (rally != null && (board.needsHelp(rally, villager) || GuardCombat.fightsAlone(agent))) {
             Entity rallyThreat = world.getEntity(rally.threatUuid);
             if (rallyThreat instanceof LivingEntity && rallyThreat.isAlive()) {
                 LivingEntity target = (LivingEntity) rallyThreat;
                 board.respond(villager, agent, target);
-                if ((board.shouldCharge(target) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
+                if ((board.shouldCharge(target) || ArcherCombat.canShoot(agent) || GuardCombat.fightsAlone(agent)) && CombatAction.mayAttack(villager, agent)) {
                     startCombatAction(villager, agent, target);
                 } else if (!CombatAction.mayAttack(villager, agent)) {
                     // Wounded/unarmed listeners must not approach the hostile rally point.
@@ -332,7 +338,7 @@ public class VillagerAgentManager {
         if (!CombatAction.mayAttack(villager, agent)) {
             startFleeAction(villager, agent, target); return;
         }
-        if (board.shouldCharge(target) || ArcherCombat.canShoot(agent)) {
+        if (board.shouldCharge(target) || ArcherCombat.canShoot(agent) || GuardCombat.fightsAlone(agent)) {
             startCombatAction(villager, agent, target); return;
         }
         if (villager.isSleeping()) villager.stopSleeping();
@@ -385,7 +391,7 @@ public class VillagerAgentManager {
         VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         board.respond(villager, agent, threat);
         // Archers do not wait for a group: they keep their distance and shoot (ArcherCombat).
-        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
+        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent) || GuardCombat.fightsAlone(agent)) && CombatAction.mayAttack(villager, agent)) {
             startCombatAction(villager, agent, threat);
         } else {
             startFleeAction(villager, agent, threat);
@@ -437,7 +443,7 @@ public class VillagerAgentManager {
         VillageSignalBoard board = VillageMarkets.combatBoard(villager);
         board.respond(villager, agent, threat); // keep the alarm alive while we kite
 
-        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent)) && CombatAction.mayAttack(villager, agent)) {
+        if ((board.shouldCharge(threat) || ArcherCombat.canShoot(agent) || GuardCombat.fightsAlone(agent)) && CombatAction.mayAttack(villager, agent)) {
             // Enough firepower AND this villager can fight — turn and mob the threat together (archers shoot).
             agent.setCurrentAction(null);
             startCombatAction(villager, agent, threat);
@@ -516,7 +522,7 @@ public class VillagerAgentManager {
             action.setPhase(VillagerAction.ActionPhase.ACTING);
             if (ArcherCombat.tick(villager, world, agent, target, COMBAT_TICK_INTERVAL)) return;
         }
-        if (!VillageMarkets.combatBoard(villager).shouldCharge(target)) {
+        if (!GuardCombat.fightsAlone(agent) && !VillageMarkets.combatBoard(villager).shouldCharge(target)) {
             BrainLog.diagnostic(agent, "combat-retreat", "reason=group_not_ready threat=" + target.getUUID());
             startFleeAction(villager, agent, target);
             return;

@@ -11,6 +11,13 @@
       "minQty": 1
     }
   ],
+  "villageragent:guard": [
+    {
+      "item": "minecraft:iron_sword",
+      "minQty": 1
+    }
+  ],
+  "villageragent:builder": [],
   "minecraft:farmer": [
     {
       "item": "minecraft:iron_hoe",
